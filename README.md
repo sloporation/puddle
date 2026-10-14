@@ -28,6 +28,10 @@ Fedora:
 
 ### Build and test
 
+    scripts/build.sh              # configure, build, test (--clean, --no-gui, --release)
+
+Or by hand:
+
     cmake -S . -B build
     cmake --build build
     ctest --test-dir build
@@ -51,7 +55,7 @@ with `address = 127.0.0.1` and `port = 8443`, along with a self-signed `cert.pem
     curl --cacert ~/.config/puddle/cert.pem https://localhost:8443/health
 
 The app opens its window on launch. Closing the window hides it to the system tray
-(menu bar on macOS) and the server keeps running; use the tray icon to reopen it or
+(menu bar on macOS, where the Dock icon also goes away until the window is reopened) and the server keeps running; use the tray icon to reopen it or
 choose **Quit Puddle** to stop. On desktops without a tray (e.g. stock GNOME) closing
 the window quits instead, so the app can't become unreachable.
 

@@ -33,6 +33,9 @@ public:
     // True exactly once per install: the "still running in the tray" hint.
     Q_INVOKABLE bool takeFirstHideNotice();
 
+    // macOS: Dock icon only while the window is shown. No-op on other platforms.
+    Q_INVOKABLE void setDockVisible(bool visible);
+
 signals:
     void quittingChanged();
 

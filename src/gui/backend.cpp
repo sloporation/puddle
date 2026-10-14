@@ -4,6 +4,8 @@
 #include <QEvent>
 #include <QSettings>
 
+#include "dock.h"
+
 extern "C" {
 #include "log.h"
 }
@@ -70,6 +72,11 @@ bool Backend::eventFilter(QObject *watched, QEvent *event)
         emit quittingChanged();
     }
     return QObject::eventFilter(watched, event);
+}
+
+void Backend::setDockVisible(bool visible)
+{
+    puddle_set_dock_visible(visible);
 }
 
 bool Backend::takeFirstHideNotice()

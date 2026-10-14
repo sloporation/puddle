@@ -21,6 +21,7 @@ ApplicationWindow {
     title: "Puddle"
 
     function showWindow() {
+        backend.setDockVisible(true)
         show()
         raise()
         requestActivate()
@@ -35,6 +36,7 @@ ApplicationWindow {
         if (tray.available) {
             close.accepted = false
             hide()
+            backend.setDockVisible(false)
             if (backend.takeFirstHideNotice())
                 tray.showMessage("Puddle is still running",
                                  "Use the tray icon to reopen the window or quit.")
@@ -43,20 +45,13 @@ ApplicationWindow {
         }
     }
 
-    // macOS: clicking the Dock icon while the window is hidden reopens it.
-    Connections {
-        target: Qt.application
-        function onStateChanged() {
-            if (Qt.application.state === Qt.ApplicationActive && !root.visible)
-                root.showWindow()
-        }
-    }
-
     Platform.SystemTrayIcon {
         id: tray
         visible: true
-        icon.source: "puddle.png"
-        icon.mask: Qt.platform.os === "osx" // monochrome menu-bar glyph
+        // Must be a resolved URL: a relative one gives the tray item an empty icon.
+        icon.source: Qt.resolvedUrl("puddle.png")
+        // macOS template image: drawn black/white to follow the menu bar's light/dark theme.
+        icon.mask: Qt.platform.os === "osx"
         tooltip: "Puddle"
         onActivated: reason => {
             if (reason === Platform.SystemTrayIcon.Trigger

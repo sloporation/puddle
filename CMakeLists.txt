@@ -57,6 +57,11 @@ if(PUDDLE_BUILD_GUI)
       QML_FILES src/gui/Main.qml
       RESOURCES src/gui/puddle.png)
     target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2)
+    if(APPLE)
+      enable_language(OBJCXX)
+      target_sources(puddle PRIVATE src/gui/dock_mac.mm)
+      target_link_libraries(puddle PRIVATE "-framework AppKit")
+    endif()
     set_target_properties(puddle PROPERTIES
       OUTPUT_NAME Puddle
       MACOSX_BUNDLE_BUNDLE_NAME Puddle
