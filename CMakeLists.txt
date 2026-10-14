@@ -39,17 +39,32 @@ add_executable(puddled src/service/main.c)
 target_link_libraries(puddled PRIVATE puddle_core)
 install(TARGETS puddled RUNTIME DESTINATION bin)
 
-# --- puddle-gui: Qt desktop app ----------------------------------------------
+# --- Puddle: the desktop app (Qt). Embeds the server, so nothing else is needed.
 option(PUDDLE_BUILD_GUI "Build the Qt desktop app" ON)
 if(PUDDLE_BUILD_GUI)
-  find_package(Qt6 COMPONENTS Widgets QUIET)
+  find_package(Qt6 COMPONENTS Quick QuickControls2 QUIET)
   if(Qt6_FOUND)
-    set(CMAKE_AUTOMOC ON)
-    add_executable(puddle-gui WIN32 MACOSX_BUNDLE src/gui/main.cpp)
-    target_link_libraries(puddle-gui PRIVATE puddle_core Qt6::Widgets)
-    install(TARGETS puddle-gui BUNDLE DESTINATION . RUNTIME DESTINATION bin)
+    qt_standard_project_setup()
+    qt_policy(SET QTP0001 NEW)
+    qt_policy(SET QTP0004 NEW)
+    qt_add_executable(puddle WIN32 MACOSX_BUNDLE
+      src/gui/main.cpp
+      src/gui/backend.cpp
+      src/gui/backend.h)
+    qt_add_qml_module(puddle
+      URI Puddle
+      VERSION 1.0
+      QML_FILES src/gui/Main.qml
+      RESOURCES src/gui/puddle.png)
+    target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2)
+    set_target_properties(puddle PROPERTIES
+      OUTPUT_NAME Puddle
+      MACOSX_BUNDLE_BUNDLE_NAME Puddle
+      MACOSX_BUNDLE_GUI_IDENTIFIER io.github.sloporation.puddle
+      MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
+    install(TARGETS puddle BUNDLE DESTINATION . RUNTIME DESTINATION bin)
   else()
-    message(WARNING "Qt6 Widgets not found; skipping puddle-gui (set -DPUDDLE_BUILD_GUI=OFF to silence)")
+    message(WARNING "Qt6 Quick not found; skipping the Puddle app (set -DPUDDLE_BUILD_GUI=OFF to silence)")
   endif()
 endif()
 

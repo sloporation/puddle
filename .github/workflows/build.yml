@@ -20,7 +20,7 @@ jobs:
           # Linux: headless service only, built on the oldest supported LTS for glibc compatibility
           - { name: linux-amd64, os: ubuntu-22.04,     gui: OFF }
           - { name: linux-arm64, os: ubuntu-22.04-arm, gui: OFF }
-          # macOS: service + Qt app bundle
+          # macOS: the Puddle app (embeds the server)
           - { name: macos-arm64, os: macos-15,         gui: ON }
           - { name: macos-amd64, os: macos-15-intel,   gui: ON }
     steps:
@@ -58,14 +58,17 @@ jobs:
           if [ "${{ github.ref_type }}" = tag ]; then VERSION="${{ github.ref_name }}"; else VERSION="${GITHUB_SHA::7}"; fi
           NAME="puddle-$VERSION-${{ matrix.name }}"
           mkdir -p "stage/$NAME" out
-          strip build/puddled
-          cp build/puddled README.md "stage/$NAME/"
+          cp README.md "stage/$NAME/"
           if [ "${{ runner.os }}" = Linux ]; then
-            cp dist/puddled.service "stage/$NAME/"
+            strip build/puddled
+            cp build/puddled dist/puddled.service "stage/$NAME/"
             tar -C stage -czf "out/$NAME.tar.gz" "$NAME"
           else
-            "$(brew --prefix qt)/bin/macdeployqt" build/puddle-gui.app
-            cp -R build/puddle-gui.app "stage/$NAME/"
+            "$(brew --prefix qt)/bin/macdeployqt" build/Puddle.app -qmldir=src/gui || true  # noisy with Homebrew's split Qt
+            # macdeployqt's own signature is invalid afterwards (macOS kills the app); re-sign ad hoc
+            codesign --force --deep -s - build/Puddle.app
+            codesign --verify --deep --strict build/Puddle.app
+            cp -R build/Puddle.app "stage/$NAME/"
             ditto -c -k --keepParent "stage/$NAME" "out/$NAME.zip"
           fi
 
