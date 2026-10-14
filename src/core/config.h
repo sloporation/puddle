@@ -14,10 +14,15 @@ typedef struct {
     char address[64];          /* IPv4 or IPv6 literal; "::" = all interfaces */
     uint16_t port;
     char dir[PUDDLE_PATH_MAX]; /* directory of the config file; TLS material lives here */
+    char data_dir[PUDDLE_PATH_MAX]; /* chats, keys, profile, media (docs/storage.md) */
 } puddle_config;
 
 /* ~/.config/puddle/puddle.conf on macOS/Linux, %APPDATA%\puddle\puddle.conf on Windows. */
 int puddle_config_default_path(char *out, size_t n);
+
+/* ~/Library/Application Support/Puddle (macOS), $XDG_DATA_HOME or ~/.local/share/puddle (Linux),
+ * %LOCALAPPDATA%\puddle (Windows). */
+int puddle_config_default_data_dir(char *out, size_t n);
 
 /* Load `path` (NULL = default path). A missing file is created with defaults.
  * Returns 0 on success, -1 with a message in `err` otherwise. */

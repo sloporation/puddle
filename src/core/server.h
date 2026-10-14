@@ -9,9 +9,13 @@ extern "C" {
 
 typedef struct puddle_server puddle_server;
 
-/* Load/generate TLS material and bind the listening socket. NULL + message in
- * `err` on failure. */
+/* Open the data directory (locked: a second Puddle on the same directory fails), load/generate
+ * TLS material and bind the listening socket. NULL + message in `err` on failure. */
 puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t errlen);
+
+struct puddle_store;
+/* The chat store this server opened (valid until puddle_server_destroy). */
+struct puddle_store *puddle_server_store(puddle_server *s);
 
 /* Accept loop; blocks until puddle_server_stop(), then drains in-flight
  * connections. Returns 0 on clean stop. */

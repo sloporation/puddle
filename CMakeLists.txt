@@ -27,9 +27,12 @@ add_compile_options(-Wall -Wextra)
 # --- core: config, TLS, HTTP, listener (plain C, shared by both targets) -----
 add_library(puddle_core STATIC
   src/core/config.c
+  src/core/fsutil.c
   src/core/http.c
+  src/core/json.c
   src/core/log.c
   src/core/server.c
+  src/core/store.c
   src/core/tls.c)
 target_include_directories(puddle_core PUBLIC src/core)
 target_link_libraries(puddle_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
@@ -75,8 +78,10 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-add_executable(http_test tests/http_test.c)
-target_link_libraries(http_test PRIVATE puddle_core)
-add_test(NAME http COMMAND http_test)
+foreach(t http json store config)
+  add_executable(${t}_test tests/${t}_test.c)
+  target_link_libraries(${t}_test PRIVATE puddle_core)
+  add_test(NAME ${t} COMMAND ${t}_test)
+endforeach()
 
 install(FILES dist/puddled.service DESTINATION share/puddle)

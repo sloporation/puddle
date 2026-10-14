@@ -30,7 +30,10 @@ static const char DEFAULT_FILE[] =
     "address = " DEFAULT_ADDRESS "\n"
     "\n"
     "# TCP port for the HTTPS listener.\n"
-    "port = 8443\n";
+    "port = 8443\n"
+    "\n"
+    "# Where chats, keys and media are stored. Uncomment to change from the platform default.\n"
+    "# data_dir = /path/to/puddle-data\n";
 
 static void seterr(char *err, size_t n, const char *fmt, ...)
 {
@@ -42,6 +45,18 @@ static void seterr(char *err, size_t n, const char *fmt, ...)
     va_end(ap);
 }
 
+#ifndef _WIN32
+static const char *home_dir(void)
+{
+    const char *home = getenv("HOME");
+    if (!home || !*home) {
+        struct passwd *pw = getpwuid(getuid());
+        home = pw ? pw->pw_dir : NULL;
+    }
+    return (home && *home) ? home : NULL;
+}
+#endif
+
 int puddle_config_default_path(char *out, size_t n)
 {
     int w;
@@ -51,14 +66,36 @@ int puddle_config_default_path(char *out, size_t n)
         return -1;
     w = snprintf(out, n, "%s\\puddle\\puddle.conf", base);
 #else
-    const char *home = getenv("HOME");
-    if (!home || !*home) {
-        struct passwd *pw = getpwuid(getuid());
-        home = pw ? pw->pw_dir : NULL;
-    }
-    if (!home || !*home)
+    const char *home = home_dir();
+    if (!home)
         return -1;
     w = snprintf(out, n, "%s/.config/puddle/puddle.conf", home);
+#endif
+    return (w < 0 || (size_t)w >= n) ? -1 : 0;
+}
+
+int puddle_config_default_data_dir(char *out, size_t n)
+{
+    int w;
+#ifdef _WIN32
+    const char *base = getenv("LOCALAPPDATA");
+    if (!base || !*base)
+        return -1;
+    w = snprintf(out, n, "%s\\puddle", base);
+#elif defined(__APPLE__)
+    const char *home = home_dir();
+    if (!home)
+        return -1;
+    w = snprintf(out, n, "%s/Library/Application Support/Puddle", home);
+#else
+    const char *xdg = getenv("XDG_DATA_HOME");
+    const char *home = home_dir();
+    if (xdg && xdg[0] == '/')
+        w = snprintf(out, n, "%s/puddle", xdg);
+    else if (home)
+        w = snprintf(out, n, "%s/.local/share/puddle", home);
+    else
+        return -1;
 #endif
     return (w < 0 || (size_t)w >= n) ? -1 : 0;
 }
@@ -105,6 +142,10 @@ int puddle_config_load(puddle_config *cfg, const char *path, char *err, size_t e
     memset(cfg, 0, sizeof *cfg);
     snprintf(cfg->address, sizeof cfg->address, "%s", DEFAULT_ADDRESS);
     cfg->port = DEFAULT_PORT;
+    if (puddle_config_default_data_dir(cfg->data_dir, sizeof cfg->data_dir) != 0) {
+        seterr(err, errlen, "cannot determine data directory (HOME/LOCALAPPDATA unset)");
+        return -1;
+    }
 
     /* directory = everything before the last separator */
     snprintf(cfg->dir, sizeof cfg->dir, "%s", path);
@@ -167,6 +208,18 @@ int puddle_config_load(puddle_config *cfg, const char *path, char *err, size_t e
                 goto bad;
             }
             cfg->port = (uint16_t)p;
+        } else if (strcmp(key, "data_dir") == 0) {
+            if (!*val || strlen(val) >= sizeof cfg->data_dir) {
+                seterr(err, errlen, "%s:%d: invalid data_dir", path, lineno);
+                goto bad;
+            }
+#ifndef _WIN32
+            const char *home = home_dir();
+            if (val[0] == '~' && val[1] == '/' && home)
+                snprintf(cfg->data_dir, sizeof cfg->data_dir, "%s/%s", home, val + 2);
+            else
+#endif
+                snprintf(cfg->data_dir, sizeof cfg->data_dir, "%s", val);
         } else {
             seterr(err, errlen, "%s:%d: unknown key '%s'", path, lineno, key);
             goto bad;

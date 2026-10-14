@@ -51,6 +51,9 @@ On first run `~/.config/puddle/puddle.conf` is created (Windows: `%APPDATA%\pudd
 with `address = 127.0.0.1` and `port = 8443`, along with a self-signed `cert.pem` /
 `key.pem` in the same folder. Edit the config and restart to change the listener
 (`address = ::` listens on all IPv4 and IPv6 interfaces).
+Chats are stored under the data directory (`data_dir` in the config; default
+`~/Library/Application Support/Puddle` on macOS, `~/.local/share/puddle` on Linux).
+Only one Puddle can use a data directory at a time.
 
     curl --cacert ~/.config/puddle/cert.pem https://localhost:8443/health
 

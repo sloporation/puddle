@@ -2,6 +2,7 @@
 
 #include "http.h"
 #include "log.h"
+#include "store.h"
 #include "tls.h"
 
 #include <errno.h>
@@ -28,6 +29,7 @@
 struct puddle_server {
     puddle_config cfg;
     SSL_CTX *ctx;
+    puddle_store *store;
     int listen_fd;
     int stop_pipe[2];
     pthread_mutex_t mu;
@@ -119,6 +121,9 @@ puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t 
     pthread_mutex_init(&s->mu, NULL);
     pthread_cond_init(&s->drained, NULL);
 
+    s->store = puddle_store_open(cfg->data_dir, err, errlen);
+    if (!s->store)
+        goto fail;
     s->ctx = puddle_tls_context(cfg->dir, err, errlen);
     if (!s->ctx)
         goto fail;
@@ -141,6 +146,11 @@ fail:
     return NULL;
 }
 
+puddle_store *puddle_server_store(puddle_server *s)
+{
+    return s->store;
+}
+
 void puddle_server_stop(puddle_server *s)
 {
     int saved = errno;
@@ -159,6 +169,7 @@ void puddle_server_destroy(puddle_server *s)
     if (s->stop_pipe[0] >= 0) close(s->stop_pipe[0]);
     if (s->stop_pipe[1] >= 0) close(s->stop_pipe[1]);
     SSL_CTX_free(s->ctx);
+    puddle_store_close(s->store);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->drained);
     free(s);

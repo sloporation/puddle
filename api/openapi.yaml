@@ -1,0 +1,828 @@
+openapi: 3.1.0
+info:
+  title: Puddle API
+  version: 0.1.0
+  description: |
+    The owner API: the desktop app and phone clients talking to **their own Puddle**.
+    Other Puddles use the stream API instead (`federation.yaml`).
+
+    Vocabulary (see CLAUDE.md): a *Puddle* is the app on a user's computer; a *stream* is a trusted
+    connection between two Puddles.
+
+    Conventions:
+    - JSON everywhere, UTF-8. Versioned under `/api/v1`; `/health` is unversioned and public.
+    - Only GET and POST are used. GET reads and never changes anything; POST does everything else
+      (including delete and unblock, which are `.../delete` and `.../unblock`).
+    - Errors use the `Error` schema. Authenticated routes take `Authorization: Bearer <token>`.
+    - Users are identified by `UserId` (hash of their key; survives address changes). Messages are
+      identified by `EventId` (hash of the message's bytes).
+    - Messages are always listed in chat order, oldest first, and paged with `before` + `limit`.
+    - Edit and delete are events in the chat's log. Delete is a request to hide, not a guarantee:
+      other Puddles may ignore it.
+    - Things that finish later (a stream request, a group invite, adding a group member) return
+      immediately with a pending state. The outcome arrives on `/api/v1/events`.
+
+servers:
+  - url: https://localhost:8443
+    description: Default listener (self-signed certificate; pin or trust it explicitly)
+
+tags:
+  - name: system
+    description: Liveness
+  - name: me
+    description: This Puddle's owner
+  - name: streams
+    description: Trusted connections to other Puddles ("friends")
+  - name: conversations
+    description: Everything the owner can read, DMs and groups together
+  - name: dm
+    description: Direct messages. Need an active stream with the other person.
+  - name: groups
+    description: Group chats ("gm"). Anyone in the group can propose adding someone they share a stream with.
+  - name: blocks
+    description: Hard blocks, by user id
+  - name: events
+    description: Live updates
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      operationId: getHealth
+      summary: Liveness check
+      description: Public. Always `200` while the Puddle is up.
+      security: []
+      responses:
+        "200":
+          description: Running
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: ok }
+
+  /api/v1/me:
+    get:
+      tags: [me]
+      operationId: getMe
+      summary: Who this Puddle's owner is
+      description: Includes the `link` to share so others can request a stream.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --- streams -----------------------------------------------------------------
+  /api/v1/stream:
+    get:
+      tags: [streams]
+      operationId: listStreams
+      summary: Streams, including pending requests in both directions
+      parameters:
+        - name: state
+          in: query
+          schema: { $ref: "#/components/schemas/StreamState" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Stream" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/stream/request:
+    post:
+      tags: [streams]
+      operationId: requestStream
+      summary: Ask another Puddle to become friends
+      description: |
+        Sends a stream request to the target, with an optional short note ("hey it's Jayden from work").
+        Returns a `pending_out` stream; it becomes `active` when they accept. Requesting someone who
+        has blocked you looks exactly like a request that is still pending.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StreamRequest" }
+      responses:
+        "201":
+          description: Request sent (or queued if the target is unreachable)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stream" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/stream/accept:
+    post:
+      tags: [streams]
+      operationId: acceptStream
+      summary: Accept a request someone sent you
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StreamRef" }
+      responses:
+        "200":
+          description: Now active
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stream" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/stream/decline:
+    post:
+      tags: [streams]
+      operationId: declineStream
+      summary: Decline a request someone sent you
+      description: The requester is told it was declined. To refuse silently and permanently, block them.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StreamRef" }
+      responses:
+        "204": { description: Declined }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/stream/update:
+    post:
+      tags: [streams]
+      operationId: updateProfile
+      summary: Change your profile and tell your streams
+      description: Updates your profile locally and pushes it to every active stream.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Profile" }
+      responses:
+        "200":
+          description: Saved. Streams that were unreachable get it when they come back.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/stream/delete:
+    post:
+      tags: [streams]
+      operationId: deleteStream
+      summary: Dry up a stream
+      description: |
+        Closes the connection. Not a block: they can ask again. Existing DM history stays; sending
+        stops until a new stream exists.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StreamRef" }
+      responses:
+        "204": { description: Closed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- conversations -------------------------------------------------------------
+  /api/v1/conversations:
+    get:
+      tags: [conversations]
+      operationId: listConversations
+      summary: All DMs and groups, most recently active first
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Conversation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --- direct messages ------------------------------------------------------------
+  /api/v1/dm/send:
+    post:
+      tags: [dm]
+      operationId: sendDm
+      summary: Send a direct message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DmSend" }
+      responses:
+        "201":
+          description: Stored and queued for delivery
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/NoStream" }
+
+  /api/v1/dm/edit:
+    post:
+      tags: [dm]
+      operationId: editDm
+      summary: Edit one of your direct messages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MessageEdit" }
+      responses:
+        "200":
+          description: Edit stored and queued for delivery
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/dm/delete:
+    post:
+      tags: [dm]
+      operationId: deleteDm
+      summary: Delete one of your direct messages (a request to hide it)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MessageRef" }
+      responses:
+        "204": { description: Delete stored and queued for delivery }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/dm/{user}/messages:
+    get:
+      tags: [dm]
+      operationId: listDmMessages
+      summary: Messages in the DM with this user
+      parameters:
+        - { $ref: "#/components/parameters/UserIdPath" }
+        - { $ref: "#/components/parameters/Before" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Message" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --- groups ---------------------------------------------------------------------
+  /api/v1/gm/create:
+    post:
+      tags: [groups]
+      operationId: createGroup
+      summary: Start a group chat
+      description: |
+        Every initial member must already share an active stream with you. Each is sent an invite and
+        asked to accept. Members who share no stream with each other get a group-only connection when
+        they accept; it does not make them friends.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupCreate" }
+      responses:
+        "201":
+          description: Created, with invites out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/NoStream" }
+
+  /api/v1/gm/send:
+    post:
+      tags: [groups]
+      operationId: sendGroupMessage
+      summary: Send a message to a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupSend" }
+      responses:
+        "201":
+          description: Stored and queued for delivery
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/gm/edit:
+    post:
+      tags: [groups]
+      operationId: editGroupMessage
+      summary: Edit one of your group messages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MessageEdit" }
+      responses:
+        "200":
+          description: Edit stored and queued for delivery
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/gm/delete:
+    post:
+      tags: [groups]
+      operationId: deleteGroupMessage
+      summary: Delete one of your group messages (a request to hide it)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MessageRef" }
+      responses:
+        "204": { description: Delete stored and queued for delivery }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/gm/{group}/messages:
+    get:
+      tags: [groups]
+      operationId: listGroupMessages
+      summary: Messages in a group
+      parameters:
+        - { $ref: "#/components/parameters/GroupIdPath" }
+        - { $ref: "#/components/parameters/Before" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Message" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/gm/{group}/members:
+    post:
+      tags: [groups]
+      operationId: addGroupMember
+      summary: Propose adding someone to a group
+      description: |
+        You must share an active stream with them. Every current member's Puddle must approve (each
+        checks its own blocks, automatically); one refusal vetoes the add. Always returns `202`; the
+        result arrives as a `group.member_added` or `group.member_refused` event. A refusal does not
+        say who refused or why.
+      parameters:
+        - { $ref: "#/components/parameters/GroupIdPath" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: { $ref: "#/components/schemas/UserId" }
+      responses:
+        "202": { description: Proposal published; waiting for approvals }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/NoStream" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/gm/{group}/leave:
+    post:
+      tags: [groups]
+      operationId: leaveGroup
+      summary: Leave a group
+      parameters:
+        - { $ref: "#/components/parameters/GroupIdPath" }
+      responses:
+        "204": { description: Left }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/gm/invites:
+    get:
+      tags: [groups]
+      operationId: listGroupInvites
+      summary: Group invites waiting for your answer
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/GroupInvite" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/gm/invites/{invite}/accept:
+    post:
+      tags: [groups]
+      operationId: acceptGroupInvite
+      summary: Join the group
+      description: |
+        Refused with `403` if anyone listed in the invite is on your block list. Joining does not make
+        you friends with the other members.
+      parameters:
+        - { $ref: "#/components/parameters/InviteId" }
+      responses:
+        "200":
+          description: Joined
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: A member of the group is blocked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/gm/invites/{invite}/decline:
+    post:
+      tags: [groups]
+      operationId: declineGroupInvite
+      summary: Decline the invite
+      description: The inviter is told "declined" and nothing else.
+      parameters:
+        - { $ref: "#/components/parameters/InviteId" }
+      responses:
+        "204": { description: Declined }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- blocks ---------------------------------------------------------------------
+  /api/v1/user/block:
+    get:
+      tags: [blocks]
+      operationId: listBlocks
+      summary: Your block list
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Block" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [blocks]
+      operationId: blockUser
+      summary: Block a Puddle by user id
+      description: |
+        A hard block, by id rather than address, so changing address does not get around it. It
+        closes any stream with them and is silent: they are not told, and their requests and invites
+        look like ordinary pending ones. You also refuse group invites that include them, and your
+        Puddle refuses to let them be added to groups you are in. Different from deleting a stream.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: { $ref: "#/components/schemas/UserId" }
+                note:
+                  type: string
+                  maxLength: 200
+                  description: For your eyes only
+      responses:
+        "201":
+          description: Blocked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Block" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/user/unblock:
+    post:
+      tags: [blocks]
+      operationId: unblockUser
+      summary: Remove a block
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: { $ref: "#/components/schemas/UserId" }
+      responses:
+        "204": { description: Unblocked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --- live updates -----------------------------------------------------------------
+  /api/v1/events:
+    get:
+      tags: [events]
+      operationId: streamEvents
+      summary: Live updates (Server-Sent Events)
+      description: |
+        A long-lived `text/event-stream`. Each event's `event:` is one of the types below and `data:`
+        is JSON. Reconnect with `Last-Event-ID` to catch up.
+
+        - `message.new`, `message.edited`, `message.deleted`: data is a `Message`
+        - `stream.requested`: someone asked you; data is a `Stream` (`pending_in`)
+        - `stream.active`, `stream.closed`: data is a `Stream`
+        - `group.invited`: data is a `GroupInvite`
+        - `group.joined`: you joined; data is a `Group`
+        - `group.member_added`, `group.member_refused`: data is `{group, user}` (refusals never say who refused)
+        - `profile.updated`: a friend changed their profile; data is `{user, profile}`
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Session token, issued when the owner approves a new device on their Puddle (see docs/identity.md, "Devices").
+
+  parameters:
+    UserIdPath:
+      name: user
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/UserId" }
+    GroupIdPath:
+      name: group
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/ChatId" }
+    InviteId:
+      name: invite
+      in: path
+      required: true
+      schema: { type: string }
+    Before:
+      name: before
+      in: query
+      description: Only messages before this one (the id of the oldest message you already have)
+      schema: { $ref: "#/components/schemas/EventId" }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+
+    UserId:
+      type: string
+      description: Hash of the user's key, base32, lowercase
+      pattern: "^[a-z2-7]{52}$"
+    EventId:
+      type: string
+      description: SHA-256 of the event's bytes, hex
+      pattern: "^[0-9a-f]{64}$"
+    ChatId:
+      type: string
+      description: For a group, the id of its creating event
+      pattern: "^[A-Za-z0-9_-]{1,128}$"
+
+    Profile:
+      type: object
+      required: [display_name]
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 64 }
+        bio: { type: string, maxLength: 500 }
+
+    Person:
+      type: object
+      required: [id, profile]
+      properties:
+        id: { $ref: "#/components/schemas/UserId" }
+        profile: { $ref: "#/components/schemas/Profile" }
+
+    Me:
+      type: object
+      required: [id, profile, link]
+      properties:
+        id: { $ref: "#/components/schemas/UserId" }
+        profile: { $ref: "#/components/schemas/Profile" }
+        link:
+          type: string
+          description: Share this so others can request a stream, `puddle://<user id>@<address>`
+          example: puddle://ab…@203.0.113.7:8443
+
+    StreamState:
+      type: string
+      enum: [pending_out, pending_in, active, closed]
+      description: |
+        `pending_out` you asked, `pending_in` they asked and are waiting on you, `active` trusted
+        in both directions, `closed` dried up.
+
+    Stream:
+      type: object
+      required: [id, peer, state]
+      properties:
+        id: { type: string }
+        peer: { $ref: "#/components/schemas/Person" }
+        state: { $ref: "#/components/schemas/StreamState" }
+        message:
+          type: string
+          description: The note sent with the request
+        updated_at: { type: integer, format: int64, description: UTC ms }
+
+    StreamRequest:
+      type: object
+      required: [target]
+      properties:
+        target:
+          type: string
+          description: A `puddle://` link
+        message: { type: string, maxLength: 500 }
+
+    StreamRef:
+      type: object
+      required: [stream]
+      properties:
+        stream: { type: string }
+
+    Message:
+      type: object
+      required: [id, chat, sender, ts, body]
+      properties:
+        id: { $ref: "#/components/schemas/EventId" }
+        chat:
+          type: string
+          description: DM chat ids are derived from the two user ids
+        sender: { $ref: "#/components/schemas/UserId" }
+        ts:
+          type: integer
+          format: int64
+          description: UTC ms, the sender's clock
+        body: { type: string, maxLength: 4000 }
+        edited: { type: boolean }
+        deleted: { type: boolean }
+        reply_to: { $ref: "#/components/schemas/EventId" }
+
+    MessageRef:
+      type: object
+      required: [message]
+      properties:
+        message: { $ref: "#/components/schemas/EventId" }
+
+    MessageEdit:
+      type: object
+      required: [message, body]
+      properties:
+        message: { $ref: "#/components/schemas/EventId" }
+        body: { type: string, minLength: 1, maxLength: 4000 }
+
+    DmSend:
+      type: object
+      required: [to, body]
+      properties:
+        to: { $ref: "#/components/schemas/UserId" }
+        body: { type: string, minLength: 1, maxLength: 4000 }
+        reply_to: { $ref: "#/components/schemas/EventId" }
+
+    GroupSend:
+      type: object
+      required: [group, body]
+      properties:
+        group: { $ref: "#/components/schemas/ChatId" }
+        body: { type: string, minLength: 1, maxLength: 4000 }
+        reply_to: { $ref: "#/components/schemas/EventId" }
+
+    GroupCreate:
+      type: object
+      required: [name, members]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        members:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/UserId" }
+
+    GroupMember:
+      type: object
+      required: [id, profile, state]
+      properties:
+        id: { $ref: "#/components/schemas/UserId" }
+        profile: { $ref: "#/components/schemas/Profile" }
+        state: { type: string, enum: [invited, member] }
+
+    Group:
+      type: object
+      required: [id, name, members]
+      properties:
+        id: { $ref: "#/components/schemas/ChatId" }
+        name: { type: string }
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/GroupMember" }
+
+    GroupInvite:
+      type: object
+      required: [id, group, name, from, members]
+      properties:
+        id: { type: string }
+        group: { $ref: "#/components/schemas/ChatId" }
+        name: { type: string }
+        from: { $ref: "#/components/schemas/Person" }
+        members:
+          type: array
+          description: Everyone else in the group, so you can see who you would be joining
+          items: { $ref: "#/components/schemas/Person" }
+
+    Conversation:
+      type: object
+      required: [id, kind, name]
+      properties:
+        id:
+          type: string
+          description: The peer's UserId for a DM, the group id for a group
+        kind: { type: string, enum: [dm, group] }
+        name: { type: string }
+        last_message: { $ref: "#/components/schemas/Message" }
+        unread: { type: integer, minimum: 0 }
+
+    Block:
+      type: object
+      required: [user, created_at]
+      properties:
+        user: { $ref: "#/components/schemas/UserId" }
+        note: { type: string }
+        created_at: { type: integer, format: int64 }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable message
+        code:
+          type: string
+          description: "Stable machine-readable code, e.g. `no_stream`, `already_streaming`, `invalid_link`."
+
+  responses:
+    BadRequest:
+      description: Malformed or invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Not allowed in the current state (for example already streaming with them)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NoStream:
+      description: "You do not share an active stream with them (code `no_stream`)"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+# Everything is authenticated unless an operation sets `security: []`.
+security:
+  - bearerAuth: []

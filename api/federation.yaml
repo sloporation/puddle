@@ -1,0 +1,355 @@
+openapi: 3.1.0
+info:
+  title: Puddle Stream API
+  version: 0.1.0
+  description: |
+    How one Puddle talks to another over a stream. Not used by apps or phone clients; they use
+    `openapi.yaml`. (This file keeps its old name, `federation.yaml`.)
+
+    This is the thin slice a demo needs: becoming friends, delivering messages, and group invites.
+    Ponds will implement the same core later.
+
+    Conventions:
+    - JSON over HTTPS, versioned under `/stream/v1`. Peers are found by the address in their link.
+    - Only GET and POST are used. GET reads and never changes anything; POST does everything else.
+    - **Events are sent as strings.** An event's id is the SHA-256 of its exact bytes, so `event` is the
+      raw JSON text as a string, never re-serialized. See docs/storage.md.
+    - Group membership votes are ordinary events (`member.propose`, `member.approve`, `member.deny`,
+      `member.add`, `member.leave`) delivered through `/stream/v1/events`. A group's add only counts
+      if the log holds an approval from every member it builds on; each Puddle checks this itself.
+    - There is deliberately no endpoint for blocks. A blocked sender is answered exactly like an
+      ordinary pending request, and never told.
+    - Group-only connections (a "scoped stream") use `/stream/v1/access` with `scope` set.
+
+    Still to decide: the exact signature scheme, retries and ordering, and key rotation records.
+
+servers:
+  - url: https://localhost:8443
+
+tags:
+  - name: info
+    description: Public
+  - name: access
+    description: Becoming trusted
+  - name: delivery
+    description: Messages and profile changes over an existing stream
+  - name: groups
+    description: Group invites
+
+paths:
+  /stream/v1/info:
+    get:
+      tags: [info]
+      operationId: getInfo
+      summary: Who this Puddle is and whether it takes requests
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Info" }
+
+  /stream/v1/access:
+    post:
+      tags: [access]
+      operationId: requestAccess
+      summary: Ask for a stream
+      description: |
+        Always answered `202` with `pending` unless the target decides immediately. A blocked
+        requester gets `pending` too and the request is silently dropped. Set `scope` to ask for a
+        group-only connection: the target auto-approves if `scope.proof` is a membership event it
+        already holds for that group.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccessRequest" }
+      responses:
+        "202":
+          description: Received
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessState" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /stream/v1/access/result:
+    post:
+      tags: [access]
+      operationId: sendAccessResult
+      summary: Tell the requester what the owner decided
+      description: Called by the target on the requester's Puddle once the owner accepts or declines.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccessResult" }
+      responses:
+        "204": { description: Recorded }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /stream/v1/close:
+    post:
+      tags: [access]
+      operationId: closeStream
+      summary: Tell the peer this stream is closed
+      description: Sent when the owner deletes a stream. A block sends nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scope: { $ref: "#/components/schemas/Scope" }
+      responses:
+        "204": { description: Closed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /stream/v1/events:
+    post:
+      tags: [delivery]
+      operationId: deliverEvents
+      summary: Deliver signed events for one chat
+      description: |
+        Messages, edits, deletes and group membership events. Safe to repeat: events already held
+        are reported as duplicates. Events for a chat the sender is not allowed in (no stream, not a
+        group member, or a scoped stream for a different chat) are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Delivery" }
+      responses:
+        "200":
+          description: Per-event outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliveryResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /stream/v1/profile:
+    post:
+      tags: [delivery]
+      operationId: pushProfile
+      summary: The sender changed their profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile]
+              properties:
+                profile: { $ref: "#/components/schemas/Profile" }
+      responses:
+        "204": { description: Recorded }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /stream/v1/group/invite:
+    post:
+      tags: [groups]
+      operationId: inviteToGroup
+      summary: Invite someone you share a stream with into a group
+      description: |
+        The invitee's Puddle checks the stream and the member list against its blocks, then asks its
+        owner. It answers later with `/stream/v1/group/invite/response`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupInvite" }
+      responses:
+        "202": { description: Received }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /stream/v1/group/invite/response:
+    post:
+      tags: [groups]
+      operationId: answerGroupInvite
+      summary: The invitee's answer
+      description: Only "accepted" or "declined"; never a reason.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group, accepted]
+              properties:
+                group: { $ref: "#/components/schemas/ChatId" }
+                accepted: { type: boolean }
+      responses:
+        "204": { description: Recorded }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    streamSignature:
+      type: apiKey
+      in: header
+      name: X-Puddle-Signature
+      description: |
+        TODO define what is signed (method, path, body hash, timestamp) and the sender id header.
+        Must verify against the sender's key, found in its key chain; the id alone is not trusted.
+
+  schemas:
+    UserId:
+      type: string
+      pattern: "^[a-z2-7]{52}$"
+    EventId:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    ChatId:
+      type: string
+      pattern: "^[A-Za-z0-9_-]{1,128}$"
+
+    Profile:
+      type: object
+      required: [display_name]
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 64 }
+        bio: { type: string, maxLength: 500 }
+
+    Keys:
+      type: object
+      description: One key pair per Puddle for now
+      required: [signing, encryption]
+      properties:
+        signing: { type: string, description: Ed25519 public key, base64 }
+        encryption: { type: string, description: X25519 public key, base64 }
+
+    Peer:
+      type: object
+      required: [id, profile, address, keys]
+      properties:
+        id: { $ref: "#/components/schemas/UserId" }
+        profile: { $ref: "#/components/schemas/Profile" }
+        address:
+          type: string
+          description: host:port this Puddle can be reached at
+        keys: { $ref: "#/components/schemas/Keys" }
+
+    Info:
+      type: object
+      required: [id, kind, name, access]
+      properties:
+        id: { $ref: "#/components/schemas/UserId" }
+        kind: { type: string, enum: [puddle, pond] }
+        name: { type: string }
+        access:
+          type: string
+          enum: [manual, closed]
+          description: What happens to a cold request. `manual` waits for the owner; `closed` refuses.
+        versions:
+          type: array
+          items: { type: string }
+
+    Scope:
+      type: object
+      description: Limits a stream to one group. Absent means a full friendship.
+      required: [group]
+      properties:
+        group: { $ref: "#/components/schemas/ChatId" }
+        proof:
+          type: string
+          description: A membership event (raw JSON text) showing the sender was added to the group
+
+    AccessRequest:
+      type: object
+      required: [requester]
+      properties:
+        requester: { $ref: "#/components/schemas/Peer" }
+        message: { type: string, maxLength: 500 }
+        scope: { $ref: "#/components/schemas/Scope" }
+
+    AccessState:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [pending, approved] }
+
+    AccessResult:
+      type: object
+      required: [responder, approved]
+      properties:
+        responder: { $ref: "#/components/schemas/Peer" }
+        approved: { type: boolean }
+        scope: { $ref: "#/components/schemas/Scope" }
+
+    SignedEvent:
+      type: object
+      required: [id, event, sig]
+      properties:
+        id: { $ref: "#/components/schemas/EventId" }
+        event:
+          type: string
+          description: The event's exact JSON text. `id` is the SHA-256 of these bytes.
+        sig: { type: string, description: Sender's signature over the same bytes, base64 }
+
+    Delivery:
+      type: object
+      required: [chat, events]
+      properties:
+        chat: { $ref: "#/components/schemas/ChatId" }
+        events:
+          type: array
+          maxItems: 500
+          items: { $ref: "#/components/schemas/SignedEvent" }
+
+    DeliveryResult:
+      type: object
+      required: [accepted, duplicate, rejected]
+      properties:
+        accepted:
+          type: array
+          items: { $ref: "#/components/schemas/EventId" }
+        duplicate:
+          type: array
+          items: { $ref: "#/components/schemas/EventId" }
+        rejected:
+          type: array
+          items:
+            type: object
+            required: [id, reason]
+            properties:
+              id: { $ref: "#/components/schemas/EventId" }
+              reason: { type: string }
+
+    GroupInvite:
+      type: object
+      required: [group, name, create_event, members]
+      properties:
+        group: { $ref: "#/components/schemas/ChatId" }
+        name: { type: string }
+        create_event:
+          $ref: "#/components/schemas/SignedEvent"
+        members:
+          type: array
+          description: Everyone in the group, with the details needed to reach and verify them
+          items: { $ref: "#/components/schemas/Peer" }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        code: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed or invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Bad signature, or no stream with this sender
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+security:
+  - streamSignature: []
