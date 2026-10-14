@@ -2,6 +2,8 @@
 #define PUDDLE_SERVER_H
 
 #include "config.h"
+#include "identity.h"
+#include "profile.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,8 +16,11 @@ typedef struct puddle_server puddle_server;
 puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t errlen);
 
 struct puddle_store;
-/* The chat store this server opened (valid until puddle_server_destroy). */
+/* Opened by puddle_server_create; valid until puddle_server_destroy. */
 struct puddle_store *puddle_server_store(puddle_server *s);
+const puddle_profiles *puddle_server_profiles(puddle_server *s);
+puddle_identity *puddle_server_identity(puddle_server *s);
+puddle_assignments *puddle_server_assignments(puddle_server *s);
 
 /* Accept loop; blocks until puddle_server_stop(), then drains in-flight
  * connections. Returns 0 on clean stop. */

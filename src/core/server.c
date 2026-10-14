@@ -1,7 +1,9 @@
 #include "server.h"
 
 #include "http.h"
+#include "identity.h"
 #include "log.h"
+#include "profile.h"
 #include "store.h"
 #include "tls.h"
 
@@ -30,6 +32,9 @@ struct puddle_server {
     puddle_config cfg;
     SSL_CTX *ctx;
     puddle_store *store;
+    puddle_identity *identity;
+    puddle_profiles profiles;
+    puddle_assignments *assignments;
     int listen_fd;
     int stop_pipe[2];
     pthread_mutex_t mu;
@@ -124,6 +129,21 @@ puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t 
     s->store = puddle_store_open(cfg->data_dir, err, errlen);
     if (!s->store)
         goto fail;
+    s->identity = puddle_identity_open(cfg->data_dir, err, errlen);
+    if (!s->identity)
+        goto fail;
+    {
+        char uid[PUDDLE_USER_ID_LEN + 1];
+        puddle_identity_id(s->identity, uid);
+        puddle_log(PUDDLE_LOG_INFO, "identity %s", uid);
+    }
+    if (puddle_profiles_load(&s->profiles, cfg, err, errlen) != 0)
+        goto fail;
+    s->assignments = puddle_assignments_open(cfg->data_dir, err, errlen);
+    if (!s->assignments)
+        goto fail;
+    puddle_log(PUDDLE_LOG_INFO, "%zu profile%s loaded, default '%s'", s->profiles.count,
+               s->profiles.count == 1 ? "" : "s", s->profiles.items[0].id);
     s->ctx = puddle_tls_context(cfg->dir, err, errlen);
     if (!s->ctx)
         goto fail;
@@ -151,6 +171,21 @@ puddle_store *puddle_server_store(puddle_server *s)
     return s->store;
 }
 
+const puddle_profiles *puddle_server_profiles(puddle_server *s)
+{
+    return &s->profiles;
+}
+
+puddle_identity *puddle_server_identity(puddle_server *s)
+{
+    return s->identity;
+}
+
+puddle_assignments *puddle_server_assignments(puddle_server *s)
+{
+    return s->assignments;
+}
+
 void puddle_server_stop(puddle_server *s)
 {
     int saved = errno;
@@ -169,6 +204,9 @@ void puddle_server_destroy(puddle_server *s)
     if (s->stop_pipe[0] >= 0) close(s->stop_pipe[0]);
     if (s->stop_pipe[1] >= 0) close(s->stop_pipe[1]);
     SSL_CTX_free(s->ctx);
+    puddle_assignments_close(s->assignments);
+    puddle_identity_close(s->identity);
+    puddle_profiles_free(&s->profiles);
     puddle_store_close(s->store);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->drained);

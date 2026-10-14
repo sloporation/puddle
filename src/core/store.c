@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "fsutil.h"
+#include "hash.h"
 #include "json.h"
 #include "log.h"
 
@@ -64,24 +65,6 @@ static int valid_id_hex(const char *id)
         if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f')))
             return 0;
     return 1;
-}
-
-static void hex_encode(const unsigned char *md, unsigned len, char *out)
-{
-    static const char hex[] = "0123456789abcdef";
-    for (unsigned i = 0; i < len; i++) {
-        out[2 * i] = hex[md[i] >> 4];
-        out[2 * i + 1] = hex[md[i] & 15];
-    }
-    out[2 * len] = '\0';
-}
-
-static void sha256_hex(const void *data, size_t len, char out[PUDDLE_ID_HEX + 1])
-{
-    unsigned char md[EVP_MAX_MD_SIZE];
-    unsigned mdlen = 0;
-    EVP_Digest(data, len, md, &mdlen, EVP_sha256(), NULL);
-    hex_encode(md, mdlen, out);
 }
 
 static int64_t now_ms(void)
@@ -327,7 +310,7 @@ static int parse_record(const char *line, size_t len, record *r)
     }
 
     char hash[PUDDLE_ID_HEX + 1];
-    sha256_hex(r->event, r->event_len, hash);
+    puddle_sha256_hex(r->event, r->event_len, hash);
     if (strcmp(hash, r->id) != 0)
         return -1;
     return event_meta(r->event, r->event_len, &r->ts, r->chat);
@@ -666,7 +649,7 @@ static int append_locked(puddle_store *s, const char *chat_id, const char *event
     day_of_ts(ts, day);
 
     char id[PUDDLE_ID_HEX + 1];
-    sha256_hex(event, event_len, id);
+    puddle_sha256_hex(event, event_len, id);
     if (id_out)
         memcpy(id_out, id, sizeof id);
 
@@ -906,7 +889,7 @@ static int chunk_hash(puddle_event **ev, size_t from, size_t to, char out[PUDDLE
     unsigned char md[EVP_MAX_MD_SIZE];
     unsigned mdlen = 0;
     EVP_DigestFinal_ex(ctx, md, &mdlen);
-    hex_encode(md, mdlen, out);
+    puddle_hex_encode(md, mdlen, out);
     EVP_MD_CTX_free(ctx);
     free(ids);
     return 0;

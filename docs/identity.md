@@ -42,22 +42,27 @@ Puddle is its always-on replica.
 without rotating. More machinery (device certificates, revocation lists); worth it if lost phones
 turn out to be common.
 
-## Rotation (in v1)
+## Rotation (in v1, optional, owner-triggered)
 
-Keys can be replaced without changing the user id. The scheme is **pre-rotation**:
+Implemented in `src/core/identity.c`; the flow is in streams.md. Keys can be replaced without
+changing the user id, using **pre-rotation**:
 
-- The identity record lists the current keys and a **commitment**: the hash of the *next* keys.
-- A rotation record reveals those next keys, is signed by them, names the following commitment, and
-  increments `seq`. Contacts keep the whole chain and verify it back to the genesis key.
-- A thief holding only the *current* keys cannot rotate to their own: they do not have the committed
-  next keys. So a stolen phone can be answered by rotating from the keys still held safely.
-- The next keys are derived from a **recovery phrase** shown once at setup and kept by the owner,
-  offline. With it, a user who lost everything can still rotate. Without it, a lost key means a new
-  identity and re-adding contacts.
+- Two key sets exist at all times: *current* and *next*. Every record in the chain commits to the
+  next set as `SHA-256(signing public || encryption public)`.
+- A rotation record announces new keys, names the hash of the previous record (`prev`), increments
+  `seq`, commits to the following set, and is signed by the key it announces. It is valid only if its
+  keys hash to what the previous record committed to.
+- Records are lines of `identity/chain.jsonl`: `{"record":{...},"sig":"<base64>"}`, the signature over
+  the exact record bytes. Peers keep the whole chain and verify it back to the first record, whose
+  signing key hashes to the user id.
+- Someone holding only the *current* keys (a stolen phone: devices are given the current keys, never
+  the next set) cannot make a valid rotation, because they lack the committed next keys.
+- Events carry the id of the key that signed them (`kid`), so history signed before a roll still
+  verifies.
 
-Rotation records are pushed to contacts like address records (below), and contacts hand them on.
-Events carry the id of the key that signed them (`kid`), so history signed before a rotation still
-verifies.
+Simplification for now: the next keys are stored in `identity/keys` next to the current ones, so
+someone who copies that whole file can roll. A recovery phrase would let the next keys live offline;
+that is parked in discuss-later.md. Meanwhile, back up `identity/` somewhere offline.
 
 ## Transport
 

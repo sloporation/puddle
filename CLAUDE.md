@@ -11,6 +11,9 @@ Use these terms the way the owner does, in code, docs and conversation.
   for this; they mean a Puddle.)
 - **Phone client**: the app on a user's phone. It connects back to that user's own Puddle and
   never hosts anything. No product name yet; "phone client" is a placeholder.
+- **Profile**: how the owner appears to others (display name, picture, blurb, colors, ...). An
+  owner has several (work, friends, family) and chooses which one each stream sees. Defined in
+  YAML files (`docs/profiles.md`).
 - **Pond**: a Discord-style community server (channels, many members). Runs as its own daemon on
   a different code base; it is not a Puddle. Puddles connect to Ponds. Not designed yet.
 - **Stream**: a connection between two Puddles. (Older docs call this federation or
@@ -21,6 +24,7 @@ or looks like it conflicts with this list, ask rather than guess.
 
 ## Conventions
 
+- Config and profile files are YAML (`puddle.yaml`, `profiles.yaml`), read with libyaml.
 - The HTTP APIs use only GET and POST. GET reads and never changes state; POST does everything
   else, with the verb in the path (`dm/delete`, `user/unblock`). No PUT, PATCH, DELETE or HEAD in
   the specs.
@@ -31,5 +35,6 @@ or looks like it conflicts with this list, ask rather than guess.
 - `src/service/`: `puddled`, the headless Puddle
 - `src/gui/`: `Puddle`, the desktop app (Qt Quick)
 - `api/openapi.yaml`: API for phone clients and the desktop app. `api/federation.yaml`: streams.
-- `docs/storage.md`, `docs/identity.md`: design drafts the code follows
+- `docs/storage.md`, `docs/identity.md`, `docs/profiles.md`, `docs/streams.md`: design drafts the code follows
+- `docs/discuss-later.md`: open questions parked on purpose; don't raise them unprompted
 - Build and test: `scripts/build.sh`

@@ -12,19 +12,19 @@ Two programs, built from one CMake project:
 
 ### Requirements
 
-CMake 3.21+, a C11/C++17 compiler, OpenSSL 3.0+, and (for the GUI) Qt 6 with Quick and Quick Controls 2.
+CMake 3.21+, a C11/C++17 compiler, OpenSSL 3.0+, libyaml, and (for the GUI) Qt 6 with Quick and Quick Controls 2.
 
 macOS (Homebrew):
 
-    brew install cmake openssl@3 qt
+    brew install cmake openssl@3 libyaml qt
 
 Debian/Ubuntu:
 
-    sudo apt install build-essential cmake libssl-dev qt6-base-dev qt6-declarative-dev qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window qml6-module-qt-labs-platform
+    sudo apt install build-essential cmake libssl-dev libyaml-dev qt6-base-dev qt6-declarative-dev qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtquick-window qml6-module-qt-labs-platform
 
 Fedora:
 
-    sudo dnf install gcc gcc-c++ cmake openssl-devel qt6-qtbase-devel qt6-qtdeclarative-devel
+    sudo dnf install gcc gcc-c++ cmake openssl-devel libyaml-devel qt6-qtbase-devel qt6-qtdeclarative-devel
 
 ### Build and test
 
@@ -47,10 +47,18 @@ Outputs: `build/puddled` and `build/Puddle` (`build/Puddle.app` on macOS).
 
     ./build/puddled                  # or ./build/Puddle
 
-On first run `~/.config/puddle/puddle.conf` is created (Windows: `%APPDATA%\puddle\`)
-with `address = 127.0.0.1` and `port = 8443`, along with a self-signed `cert.pem` /
-`key.pem` in the same folder. Edit the config and restart to change the listener
-(`address = ::` listens on all IPv4 and IPv6 interfaces).
+On first run `~/.config/puddle/puddle.yaml` is created (Windows: `%APPDATA%\puddle\`)
+with `address: 127.0.0.1` and `port: 8443`, a starter `profiles.yaml` next to it, and a
+self-signed `cert.pem` / `key.pem` in the same folder. Edit the config and restart to change the
+listener (`address: "::"` listens on all IPv4 and IPv6 interfaces; put IPv6 addresses in quotes).
+
+Your profiles (display name, picture, blurb, colors, ...) live in `profiles.yaml`, and the
+`profiles:` setting names the file or files. See [docs/profiles.md](docs/profiles.md).
+On first run Puddle also creates your identity: a signing key and an encryption key in
+`<data_dir>/identity/`, and your user id (shown in the log). **Back that folder up somewhere
+offline**: lose it and you cannot be the same person again. Rolling the keys is optional and
+never automatic ([docs/streams.md](docs/streams.md)).
+
 Chats are stored under the data directory (`data_dir` in the config; default
 `~/Library/Application Support/Puddle` on macOS, `~/.local/share/puddle` on Linux).
 Only one Puddle can use a data directory at a time.

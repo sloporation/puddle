@@ -19,6 +19,17 @@ if(PUDDLE_STATIC_OPENSSL)
   set(OPENSSL_USE_STATIC_LIBS TRUE)
 endif()
 
+# libyaml, for the config and profile files (pkg-config isn't assumed to exist).
+find_path(YAML_INCLUDE_DIR yaml.h)
+if(PUDDLE_STATIC_OPENSSL)
+  find_library(YAML_LIBRARY NAMES libyaml.a yaml)
+else()
+  find_library(YAML_LIBRARY NAMES yaml)
+endif()
+if(NOT YAML_INCLUDE_DIR OR NOT YAML_LIBRARY)
+  message(FATAL_ERROR "libyaml not found (brew install libyaml / apt install libyaml-dev)")
+endif()
+
 find_package(OpenSSL 3.0 REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -27,15 +38,23 @@ add_compile_options(-Wall -Wextra)
 # --- core: config, TLS, HTTP, listener (plain C, shared by both targets) -----
 add_library(puddle_core STATIC
   src/core/config.c
+  src/core/encoding.c
   src/core/fsutil.c
+  src/core/hash.c
   src/core/http.c
+  src/core/identity.c
   src/core/json.c
   src/core/log.c
+  src/core/profile.c
   src/core/server.c
   src/core/store.c
-  src/core/tls.c)
+  src/core/tls.c
+  src/core/yamltree.c)
 target_include_directories(puddle_core PUBLIC src/core)
-target_link_libraries(puddle_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+# Only yamltree.c sees libyaml's headers: a shared include dir like /opt/homebrew/include would
+# also expose a different OpenSSL's headers.
+set_source_files_properties(src/core/yamltree.c PROPERTIES INCLUDE_DIRECTORIES "${YAML_INCLUDE_DIR}")
+target_link_libraries(puddle_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${YAML_LIBRARY})
 
 # --- puddled: headless service (systemd --user, launchd, ...) -----------------
 add_executable(puddled src/service/main.c)
@@ -78,7 +97,7 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config)
+foreach(t http json store config yaml profile encoding identity)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)

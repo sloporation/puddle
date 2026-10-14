@@ -18,13 +18,14 @@ Identity, signing and encryption are in [identity.md](identity.md).
       identity/                            keys, contacts (see identity.md)
       profile/profile.yaml                 own profile
       profile/avatar.png
-      media/<sha256>                       attachments, named by content hash
+      media/<sha256>                       images (profile pictures, banners, attachments), named by content hash
+      state/stream-profiles.tsv            which profile each stream sees (docs/profiles.md)
       state.json                           mutable non-event state: login sessions, read markers
 
 Files sort by chat id, then by day, so everything for one chat sits together.
 
 `data_dir` defaults to `~/Library/Application Support/Puddle` (macOS), `~/.local/share/puddle`
-(Linux), `%LOCALAPPDATA%\puddle` (Windows), and can be set with `data_dir =` in `puddle.conf`.
+(Linux), `%LOCALAPPDATA%\puddle` (Windows), and can be set with `data_dir:` in `puddle.yaml`.
 One process per data directory: `<data_dir>/lock` is held with `flock` for as long as the store is
 open, so a second Puddle (service or app) on the same directory fails to start with a clear error.
 

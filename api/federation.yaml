@@ -50,6 +50,56 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Info" }
 
+  /stream/v1/identity:
+    get:
+      tags: [info]
+      operationId: getIdentityChain
+      summary: This Puddle's key chain
+      description: |
+        Public. The chain is checked by the reader against the user id in the link they followed, so
+        it cannot be swapped for someone else's.
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Chain" }
+    post:
+      tags: [access]
+      operationId: pushIdentityChain
+      summary: Tell a peer your keys rolled
+      description: |
+        Sent to every active stream after a roll. The recipient verifies the chain extends the one it
+        holds (same id, same earlier records, one or more new ones, each signed by the committed
+        keys). Authenticated by that chain rather than by a stored key, since the signing key has just
+        changed. A chain that does not verify is ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Chain" }
+      responses:
+        "204": { description: Accepted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /stream/v1/address:
+    post:
+      tags: [access]
+      operationId: pushAddress
+      summary: Tell a peer where to reach you now
+      description: The highest `seq` wins. Peers keep every address they have heard of, newest first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddressRecord" }
+      responses:
+        "204": { description: Recorded }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /stream/v1/access:
     post:
       tags: [access]
@@ -88,6 +138,21 @@ paths:
         "204": { description: Recorded }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /stream/v1/access/status:
+    get:
+      tags: [access]
+      operationId: getAccessStatus
+      summary: What became of the request I sent you
+      description: For a requester whose Puddle missed the result call. Answers for the caller only.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /stream/v1/close:
     post:
@@ -134,7 +199,8 @@ paths:
     post:
       tags: [delivery]
       operationId: pushProfile
-      summary: The sender changed their profile
+      summary: The sender changed the profile you see
+      description: Sent whenever the owner edits the profile shown to you, or assigns you a different one.
       requestBody:
         required: true
         content:
@@ -147,6 +213,30 @@ paths:
       responses:
         "204": { description: Recorded }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /stream/v1/media:
+    get:
+      tags: [delivery]
+      operationId: getMedia
+      summary: An image from the sender's profile
+      description: |
+        Only images in the profile the owner shows *you* are served; anything else is `404`, as if it
+        did not exist. The hash is the SHA-256 of the file; check it. Size limits are still to be decided.
+      parameters:
+        - name: hash
+          in: query
+          required: true
+          schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+      responses:
+        "200":
+          description: The image
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/gif: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /stream/v1/group/invite:
     post:
@@ -193,8 +283,12 @@ components:
       in: header
       name: X-Puddle-Signature
       description: |
-        TODO define what is signed (method, path, body hash, timestamp) and the sender id header.
-        Must verify against the sender's key, found in its key chain; the id alone is not trusted.
+        `v1 id=<sender id>; kid=<key id>; ts=<ms>; nonce=<base64>; sig=<base64>`, where `kid` is the hex
+        SHA-256 of the sender's signing public key and `sig` is an Ed25519 signature over the lines
+        `puddle-request-v1`, method, request target (path and query), hex SHA-256 of the body, `ts`,
+        `nonce`, and the recipient's user id. The recipient checks it is the recipient, `ts` is within
+        five minutes of its clock, the nonce is new, `kid` is the sender's current key, and the
+        signature. Full rules in docs/streams.md.
 
   schemas:
     UserId:
@@ -207,31 +301,87 @@ components:
       type: string
       pattern: "^[A-Za-z0-9_-]{1,128}$"
 
+    Hex:
+      type: string
+      description: A color, lowercase "#rrggbb"
+      pattern: "^#[0-9a-f]{6}$"
+
+    Color:
+      type: object
+      description: One color is solid; two to five make a gradient
+      required: [colors]
+      properties:
+        colors:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items: { $ref: "#/components/schemas/Hex" }
+        angle:
+          type: integer
+          minimum: 0
+          maximum: 360
+          description: Gradient direction in degrees (default 180). Ignored for a solid color.
+
+    MediaRef:
+      type: object
+      description: An image, fetched by hash from `/stream/v1/media`
+      required: [hash, mime, size]
+      properties:
+        hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        mime: { type: string, enum: [image/png, image/jpeg, image/gif, image/webp] }
+        size: { type: integer, format: int64 }
+
     Profile:
       type: object
+      description: |
+        How a person appears to someone they share a stream with. Everything but `display_name` is
+        optional. Limits (characters): display_name 64, blurb 160, about 2000, pronouns 32.
       required: [display_name]
       properties:
         display_name: { type: string, minLength: 1, maxLength: 64 }
-        bio: { type: string, maxLength: 500 }
+        avatar: { $ref: "#/components/schemas/MediaRef" }
+        blurb: { type: string, maxLength: 160, description: A short line }
+        about: { type: string, maxLength: 2000, description: The longer description }
+        pronouns: { type: string, maxLength: 32 }
+        color: { $ref: "#/components/schemas/Color" }
+        banner: { $ref: "#/components/schemas/MediaRef" }
+        background: { $ref: "#/components/schemas/MediaRef" }
 
-    Keys:
+
+    Chain:
       type: object
-      description: One key pair per Puddle for now
-      required: [signing, encryption]
+      description: |
+        A Puddle's identity chain. Each element is one line of `chain.jsonl`, exactly as written
+        (`{"record":{...},"sig":"..."}`), because the signatures cover the exact bytes. Verified with
+        the rules in docs/identity.md; the reader pins it to the id they expect.
+      required: [chain]
       properties:
-        signing: { type: string, description: Ed25519 public key, base64 }
-        encryption: { type: string, description: X25519 public key, base64 }
+        chain:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items: { type: string }
+
+    AddressRecord:
+      type: object
+      description: |
+        `record` is the exact JSON text `{"type":"address","id":..,"addresses":[..],"seq":N,"ts":..}`,
+        signed with the sender's current key; `sig` is base64.
+      required: [record, sig]
+      properties:
+        record: { type: string }
+        sig: { type: string }
 
     Peer:
       type: object
-      required: [id, profile, address, keys]
+      required: [id, profile, address, chain]
       properties:
         id: { $ref: "#/components/schemas/UserId" }
         profile: { $ref: "#/components/schemas/Profile" }
         address:
           type: string
           description: host:port this Puddle can be reached at
-        keys: { $ref: "#/components/schemas/Keys" }
+        chain: { $ref: "#/components/schemas/Chain" }
 
     Info:
       type: object
@@ -242,8 +392,10 @@ components:
         name: { type: string }
         access:
           type: string
-          enum: [manual, closed]
-          description: What happens to a cold request. `manual` waits for the owner; `closed` refuses.
+          enum: [open, manual, closed]
+          description: |
+            What happens to a request with no invite. `open` accepts at once, `manual` waits for the
+            owner, `closed` refuses with `access_closed`.
         versions:
           type: array
           items: { type: string }
@@ -264,13 +416,16 @@ components:
       properties:
         requester: { $ref: "#/components/schemas/Peer" }
         message: { type: string, maxLength: 500 }
+        invite:
+          type: string
+          description: Token from an invite link; a valid one is approved at once
         scope: { $ref: "#/components/schemas/Scope" }
 
     AccessState:
       type: object
       required: [state]
       properties:
-        state: { type: string, enum: [pending, approved] }
+        state: { type: string, enum: [pending, approved, declined] }
 
     AccessResult:
       type: object
@@ -337,11 +492,20 @@ components:
       required: [error]
       properties:
         error: { type: string }
-        code: { type: string }
+        code:
+          type: string
+          description: |
+            One of `bad_signature`, `clock_skew` (the reply says its time), `replayed`, `unknown_key`,
+            `no_stream`, `access_closed`, `rate_limited`.
 
   responses:
     BadRequest:
       description: Malformed or invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such thing, or not one you are allowed to see
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

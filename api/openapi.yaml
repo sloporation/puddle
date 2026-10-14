@@ -19,6 +19,8 @@ info:
     - Messages are always listed in chat order, oldest first, and paged with `before` + `limit`.
     - Edit and delete are events in the chat's log. Delete is a request to hide, not a guarantee:
       other Puddles may ignore it.
+    - Profiles are defined in the owner's YAML files, not through this API. The API lists them,
+      reloads the files, and chooses which profile each stream sees.
     - Things that finish later (a stream request, a group invite, adding a group member) return
       immediately with a pending state. The outcome arrives on `/api/v1/events`.
 
@@ -31,6 +33,10 @@ tags:
     description: Liveness
   - name: me
     description: This Puddle's owner
+  - name: identity
+    description: This Puddle's keys and user id
+  - name: profiles
+    description: The owner's profiles (defined in YAML files, see docs/profiles.md)
   - name: streams
     description: Trusted connections to other Puddles ("friends")
   - name: conversations
@@ -73,6 +79,106 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Me" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --- identity -----------------------------------------------------------------
+  /api/v1/identity:
+    get:
+      tags: [identity]
+      operationId: getIdentity
+      summary: Your user id and key status
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Identity" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/identity/roll:
+    post:
+      tags: [identity]
+      operationId: rollIdentity
+      summary: Replace your keys (optional)
+      description: |
+        Never happens on its own. Promotes the pre-committed next keys, commits to a fresh set, and
+        sends the change to every active stream. Your user id stays the same, so nobody has to re-add
+        you. Use it after losing a device that held your keys. `confirm` must be `true`. Streams that
+        are offline learn at their next contact.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: boolean }
+      responses:
+        "200":
+          description: Rolled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Identity" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --- profiles ----------------------------------------------------------------
+  /api/v1/profile:
+    get:
+      tags: [profiles]
+      operationId: listProfiles
+      summary: Your profiles
+      description: The first one is the default.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OwnProfile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/profile/reload:
+    post:
+      tags: [profiles]
+      operationId: reloadProfiles
+      summary: Re-read the profile files
+      description: |
+        Picks up edits to the YAML files and their images, then sends changed profiles to the streams
+        that see them. If a file has a mistake, nothing changes and the error says where.
+      responses:
+        "200":
+          description: The profiles now in use
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OwnProfile" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/media:
+    get:
+      tags: [profiles]
+      operationId: getMedia
+      summary: An image by hash
+      description: Profile images, yours or your friends'. Cached forever; the hash never changes meaning.
+      parameters:
+        - name: hash
+          in: query
+          required: true
+          schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+      responses:
+        "200":
+          description: The image
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/gif: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   # --- streams -----------------------------------------------------------------
   /api/v1/stream:
@@ -154,25 +260,95 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  /api/v1/stream/update:
+  /api/v1/stream/invite:
     post:
       tags: [streams]
-      operationId: updateProfile
-      summary: Change your profile and tell your streams
-      description: Updates your profile locally and pushes it to every active stream.
+      operationId: createInvite
+      summary: Make an invite link that is approved automatically
+      description: |
+        The link is `puddle://<your id>@<address>?invite=<token>`. Whoever requests a stream with it
+        is accepted without waiting for you, until it expires or its uses run out. Share it only with
+        people you mean to let in.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                uses: { type: integer, minimum: 1, maximum: 1000, default: 1 }
+                expires_in:
+                  type: integer
+                  minimum: 60
+                  default: 604800
+                  description: Seconds; default one week
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invite" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/stream/policy:
+    get:
+      tags: [streams]
+      operationId: getAccessPolicy
+      summary: What happens when a stranger asks for a stream
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccessPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [streams]
+      operationId: setAccessPolicy
+      summary: Change what happens when a stranger asks for a stream
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/Profile" }
+            schema: { $ref: "#/components/schemas/AccessPolicy" }
       responses:
         "200":
-          description: Saved. Streams that were unreachable get it when they come back.
+          description: Saved
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Me" }
+              schema: { $ref: "#/components/schemas/AccessPolicy" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/stream/profile:
+    post:
+      tags: [streams]
+      operationId: setStreamProfile
+      summary: Choose which of your profiles a stream sees
+      description: |
+        Takes effect immediately and is pushed to that peer. `profile: null` goes back to your
+        default profile. Anyone you have not assigned a profile sees the default.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stream, profile]
+              properties:
+                stream: { type: string }
+                profile:
+                  type: [string, "null"]
+                  pattern: "^[a-z0-9_-]{1,32}$"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stream" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/stream/delete:
     post:
@@ -557,6 +733,8 @@ paths:
         - `group.joined`: you joined; data is a `Group`
         - `group.member_added`, `group.member_refused`: data is `{group, user}` (refusals never say who refused)
         - `profile.updated`: a friend changed their profile; data is `{user, profile}`
+        - `peer.key_changed`: a friend's keys rolled and verified; data is `{user, seq}`. If one fails to
+          verify, `peer.key_rejected` with `{user}` instead.
       responses:
         "200":
           description: Event stream
@@ -618,12 +796,61 @@ components:
       description: For a group, the id of its creating event
       pattern: "^[A-Za-z0-9_-]{1,128}$"
 
+    Hex:
+      type: string
+      description: A color, lowercase "#rrggbb"
+      pattern: "^#[0-9a-f]{6}$"
+
+    Color:
+      type: object
+      description: One color is solid; two to five make a gradient
+      required: [colors]
+      properties:
+        colors:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items: { $ref: "#/components/schemas/Hex" }
+        angle:
+          type: integer
+          minimum: 0
+          maximum: 360
+          description: Gradient direction in degrees (default 180). Ignored for a solid color.
+
+    MediaRef:
+      type: object
+      description: An image, fetched by hash from `/api/v1/media`
+      required: [hash, mime, size]
+      properties:
+        hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        mime: { type: string, enum: [image/png, image/jpeg, image/gif, image/webp] }
+        size: { type: integer, format: int64 }
+
     Profile:
       type: object
+      description: |
+        How a person appears to someone they share a stream with. Everything but `display_name` is
+        optional. Limits (characters): display_name 64, blurb 160, about 2000, pronouns 32.
       required: [display_name]
       properties:
         display_name: { type: string, minLength: 1, maxLength: 64 }
-        bio: { type: string, maxLength: 500 }
+        avatar: { $ref: "#/components/schemas/MediaRef" }
+        blurb: { type: string, maxLength: 160, description: A short line }
+        about: { type: string, maxLength: 2000, description: The longer description }
+        pronouns: { type: string, maxLength: 32 }
+        color: { $ref: "#/components/schemas/Color" }
+        banner: { $ref: "#/components/schemas/MediaRef" }
+        background: { $ref: "#/components/schemas/MediaRef" }
+
+    OwnProfile:
+      description: One of your own profiles, with the private `id` you use to refer to it. The id is never sent to anyone.
+      allOf:
+        - $ref: "#/components/schemas/Profile"
+        - type: object
+          required: [id, default]
+          properties:
+            id: { type: string, pattern: "^[a-z0-9_-]{1,32}$" }
+            default: { type: boolean, description: Shown to anyone you have not assigned a profile }
 
     Person:
       type: object
@@ -637,11 +864,48 @@ components:
       required: [id, profile, link]
       properties:
         id: { $ref: "#/components/schemas/UserId" }
-        profile: { $ref: "#/components/schemas/Profile" }
+        profile:
+          description: Your default profile
+          $ref: "#/components/schemas/OwnProfile"
         link:
           type: string
           description: Share this so others can request a stream, `puddle://<user id>@<address>`
           example: puddle://ab…@203.0.113.7:8443
+
+    AccessPolicy:
+      type: object
+      required: [access]
+      properties:
+        access:
+          type: string
+          enum: [open, manual, closed]
+          description: |
+            `manual` (default): requests wait for you. `open`: anyone is accepted at once.
+            `closed`: requests are refused. An invite link works whatever this is, except `closed`.
+
+    Identity:
+      type: object
+      required: [id, link, seq, key_id]
+      properties:
+        id: { $ref: "#/components/schemas/UserId" }
+        link:
+          type: string
+          description: Share this to be asked for a stream
+        seq:
+          type: integer
+          minimum: 0
+          description: How many times the keys have rolled
+        key_id:
+          type: string
+          description: Hex SHA-256 of the current signing public key; changes when keys roll
+
+    Invite:
+      type: object
+      required: [link, expires_at, uses]
+      properties:
+        link: { type: string }
+        expires_at: { type: integer, format: int64, description: UTC ms }
+        uses: { type: integer, description: Uses remaining }
 
     StreamState:
       type: string
@@ -660,6 +924,9 @@ components:
         message:
           type: string
           description: The note sent with the request
+        profile:
+          type: string
+          description: The id of your profile this peer sees
         updated_at: { type: integer, format: int64, description: UTC ms }
 
     StreamRequest:
@@ -668,8 +935,11 @@ components:
       properties:
         target:
           type: string
-          description: A `puddle://` link
+          description: A `puddle://` link. If it has `?invite=`, the request is accepted automatically.
         message: { type: string, maxLength: 500 }
+        profile:
+          type: string
+          description: Which of your profiles to introduce yourself with (default if omitted)
 
     StreamRef:
       type: object
