@@ -13,7 +13,11 @@ info:
     - JSON everywhere, UTF-8. Versioned under `/api/v1`; `/health` is unversioned and public.
     - Only GET and POST are used. GET reads and never changes anything; POST does everything else
       (including delete and unblock, which are `.../delete` and `.../unblock`).
-    - Errors use the `Error` schema. Authenticated routes take `Authorization: Bearer <token>`.
+    - Errors use the `Error` schema.
+    - **Nothing is public.** Every route needs `Authorization: Bearer <owner token>`. A request without
+      a valid token is answered `404`, exactly like a path that doesn't exist, so a stranger can't tell
+      that a route is there. (The Puddle's own log says why, for the owner.) The 401s below are
+      therefore never sent; they are listed only for routes that an owner can reach with a bad session.
     - Users are identified by `UserId` (hash of their key; survives address changes). Messages are
       identified by `EventId` (hash of the message's bytes).
     - Messages are always listed in chat order, oldest first, and paged with `before` + `limit`.
@@ -56,8 +60,7 @@ paths:
       tags: [system]
       operationId: getHealth
       summary: Liveness check
-      description: Public. Always `200` while the Puddle is up.
-      security: []
+      description: Needs the owner token like everything else; without it, `404`. `200` while the Puddle is up.
       responses:
         "200":
           description: Running
@@ -78,7 +81,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Me" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # --- identity -----------------------------------------------------------------
   /api/v1/identity:
@@ -92,7 +94,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Identity" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/identity/roll:
     post:
@@ -120,7 +121,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Identity" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # --- profiles ----------------------------------------------------------------
   /api/v1/profile:
@@ -137,7 +137,6 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/OwnProfile" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/profile/reload:
     post:
@@ -156,7 +155,6 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/OwnProfile" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/media:
     get:
@@ -177,7 +175,6 @@ paths:
             image/jpeg: { schema: { type: string, format: binary } }
             image/gif: { schema: { type: string, format: binary } }
             image/webp: { schema: { type: string, format: binary } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # --- streams -----------------------------------------------------------------
@@ -198,7 +195,6 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Stream" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/stream/request:
     post:
@@ -221,7 +217,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Stream" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/stream/accept:
@@ -240,7 +235,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Stream" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
@@ -257,7 +251,6 @@ paths:
             schema: { $ref: "#/components/schemas/StreamRef" }
       responses:
         "204": { description: Declined }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/stream/invite:
@@ -288,7 +281,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Invite" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/stream/policy:
     get:
@@ -301,7 +293,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AccessPolicy" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [streams]
       operationId: setAccessPolicy
@@ -318,7 +309,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AccessPolicy" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/stream/profile:
     post:
@@ -347,7 +337,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Stream" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/stream/delete:
@@ -365,7 +354,6 @@ paths:
             schema: { $ref: "#/components/schemas/StreamRef" }
       responses:
         "204": { description: Closed }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # --- conversations -------------------------------------------------------------
@@ -382,7 +370,6 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Conversation" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # --- direct messages ------------------------------------------------------------
   /api/v1/dm/send:
@@ -402,7 +389,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Message" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/NoStream" }
 
   /api/v1/dm/edit:
@@ -422,7 +408,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Message" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/dm/delete:
@@ -437,7 +422,6 @@ paths:
             schema: { $ref: "#/components/schemas/MessageRef" }
       responses:
         "204": { description: Delete stored and queued for delivery }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/dm/{user}/messages:
@@ -457,7 +441,6 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Message" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # --- groups ---------------------------------------------------------------------
   /api/v1/gm/create:
@@ -481,7 +464,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Group" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/NoStream" }
 
   /api/v1/gm/send:
@@ -501,7 +483,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Message" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/gm/edit:
@@ -521,7 +502,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Message" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/gm/delete:
@@ -536,7 +516,6 @@ paths:
             schema: { $ref: "#/components/schemas/MessageRef" }
       responses:
         "204": { description: Delete stored and queued for delivery }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/gm/{group}/messages:
@@ -556,7 +535,6 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Message" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/gm/{group}/members:
@@ -583,7 +561,6 @@ paths:
       responses:
         "202": { description: Proposal published; waiting for approvals }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/NoStream" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -596,7 +573,6 @@ paths:
         - { $ref: "#/components/parameters/GroupIdPath" }
       responses:
         "204": { description: Left }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/gm/invites:
@@ -612,7 +588,6 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/GroupInvite" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/gm/invites/{invite}/accept:
     post:
@@ -630,7 +605,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Group" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
           description: A member of the group is blocked
           content:
@@ -648,7 +622,6 @@ paths:
         - { $ref: "#/components/parameters/InviteId" }
       responses:
         "204": { description: Declined }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # --- blocks ---------------------------------------------------------------------
@@ -665,7 +638,6 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Block" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [blocks]
       operationId: blockUser
@@ -695,7 +667,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Block" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/user/unblock:
     post:
@@ -713,7 +684,6 @@ paths:
                 user: { $ref: "#/components/schemas/UserId" }
       responses:
         "204": { description: Unblocked }
-        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # --- live updates -----------------------------------------------------------------
@@ -741,14 +711,16 @@ paths:
           content:
             text/event-stream:
               schema: { type: string }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      description: Session token, issued when the owner approves a new device on their Puddle (see docs/identity.md, "Devices").
+      description: |
+        The owner token: 64 hex characters, made on first run and kept in `<data_dir>/state/owner-token`
+        (mode 0600). The app on the same machine and the owner's own tools use it. Phone clients get
+        their own token when the owner approves them (docs/identity.md, "Devices").
 
   parameters:
     UserIdPath:
@@ -880,8 +852,9 @@ components:
           type: string
           enum: [open, manual, closed]
           description: |
-            `manual` (default): requests wait for you. `open`: anyone is accepted at once.
-            `closed`: requests are refused. An invite link works whatever this is, except `closed`.
+            `manual` (default): requests wait for you. `open`: anyone is accepted at once. `closed`:
+            strangers are ignored, silently; the sender just keeps waiting and is never told. A valid
+            invite link works unless this is `closed`.
 
     Identity:
       type: object
@@ -1069,11 +1042,6 @@ components:
   responses:
     BadRequest:
       description: Malformed or invalid input
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
-    Unauthorized:
-      description: Missing or invalid credentials
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

@@ -9,6 +9,12 @@ info:
     This is the thin slice a demo needs: becoming friends, delivering messages, and group invites.
     Ponds will implement the same core later.
 
+    **There are no public endpoints.** Every request is signed (see `streamSignature`). One that fails
+    any check, up to and including the signature, gets the same `404` as a path that does not exist, so
+    a stranger learns nothing, not even that this is a Puddle. The one request a Puddle must take from
+    someone it doesn't know is `POST /stream/v1/access`, and it answers that identically whatever it
+    decides.
+
     Conventions:
     - JSON over HTTPS, versioned under `/stream/v1`. Peers are found by the address in their link.
     - Only GET and POST are used. GET reads and never changes anything; POST does everything else.
@@ -27,8 +33,6 @@ servers:
   - url: https://localhost:8443
 
 tags:
-  - name: info
-    description: Public
   - name: access
     description: Becoming trusted
   - name: delivery
@@ -37,28 +41,14 @@ tags:
     description: Group invites
 
 paths:
-  /stream/v1/info:
-    get:
-      tags: [info]
-      operationId: getInfo
-      summary: Who this Puddle is and whether it takes requests
-      security: []
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Info" }
-
   /stream/v1/identity:
     get:
-      tags: [info]
+      tags: [access]
       operationId: getIdentityChain
       summary: This Puddle's key chain
       description: |
-        Public. The chain is checked by the reader against the user id in the link they followed, so
-        it cannot be swapped for someone else's.
-      security: []
+        Signed like everything else, answered only to a known peer. Used by an owner recovering after
+        losing a device, who signs with keys re-derived from their recovery phrase.
       responses:
         "200":
           description: OK
@@ -106,22 +96,19 @@ paths:
       operationId: requestAccess
       summary: Ask for a stream
       description: |
-        Always answered `202` with `pending` unless the target decides immediately. A blocked
-        requester gets `pending` too and the request is silently dropped. Set `scope` to ask for a
-        group-only connection: the target auto-approves if `scope.proof` is a membership event it
-        already holds for that group.
+        The one request a Puddle takes from a stranger. It is signed with the requester's key, checkable
+        because the requester's `chain` is in the body. **Always answered `202` with an empty body,
+        whatever happens**: blocked, refused by policy, rate-limited, or invalid are all dropped
+        silently. The outcome arrives later at the requester's `access/result`, or by polling
+        `access/status`. Set `scope` to ask for a group-only connection: the target auto-approves if
+        `scope.proof` is a membership event it already holds for that group.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AccessRequest" }
       responses:
-        "202":
-          description: Received
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AccessState" }
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "202": { description: Received. Says nothing about what will happen. }
 
   /stream/v1/access/result:
     post:
@@ -144,7 +131,10 @@ paths:
       tags: [access]
       operationId: getAccessStatus
       summary: What became of the request I sent you
-      description: For a requester whose Puddle missed the result call. Answers for the caller only.
+      description: |
+        For a requester whose Puddle missed the result call. Answers only a requester it has a record
+        of. A requester that is blocked, or refused by policy, is told `pending` forever; anyone else
+        unknown gets `404`.
       responses:
         "200":
           description: OK
@@ -383,23 +373,6 @@ components:
           description: host:port this Puddle can be reached at
         chain: { $ref: "#/components/schemas/Chain" }
 
-    Info:
-      type: object
-      required: [id, kind, name, access]
-      properties:
-        id: { $ref: "#/components/schemas/UserId" }
-        kind: { type: string, enum: [puddle, pond] }
-        name: { type: string }
-        access:
-          type: string
-          enum: [open, manual, closed]
-          description: |
-            What happens to a request with no invite. `open` accepts at once, `manual` waits for the
-            owner, `closed` refuses with `access_closed`.
-        versions:
-          type: array
-          items: { type: string }
-
     Scope:
       type: object
       description: Limits a stream to one group. Absent means a full friendship.
@@ -495,8 +468,8 @@ components:
         code:
           type: string
           description: |
-            One of `bad_signature`, `clock_skew` (the reply says its time), `replayed`, `unknown_key`,
-            `no_stream`, `access_closed`, `rate_limited`.
+            Only given to an authenticated peer: `clock_skew` (the reply says its time), `replayed`,
+            `no_stream`. A request that fails authentication gets a plain `404` with no code.
 
   responses:
     BadRequest:
@@ -510,7 +483,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     Unauthorized:
-      description: Bad signature, or no stream with this sender
+      description: Authenticated, but not acceptable now (`clock_skew`, `replayed`)
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

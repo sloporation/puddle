@@ -5,8 +5,9 @@ is sent between two Puddles without one, apart from asking for one. This describ
 endpoints are in `api/openapi.yaml` (what the owner's app calls) and `api/federation.yaml` (what
 Puddles call on each other).
 
-Built so far: the identity, its key chain and key rolling (`src/core/identity.c`). Everything else
-here is design.
+Built so far: the identity, its key chain and key rolling (`src/core/identity.c`), and request
+signing and checking (`src/core/reqsig.c`: Alice's side signs, Bob's side runs the checks below in
+order, with a bounded nonce memory). Everything else here is design.
 
 ## What each side keeps
 
@@ -35,28 +36,53 @@ never removed when a stream closes.
 
 ## Asking for a stream
 
-1. The owner gets a **link**: `puddle://<user id>@<address>`, optionally `?invite=<token>`. The id in
-   the link pins the other Puddle's key: it is the hash of their first signing key.
-2. A's Puddle fetches `GET /stream/v1/identity` from that address and checks the chain with
-   `puddle_chain_verify(..., expected_id = the id in the link)`. A chain for any other id is refused,
-   so nobody can answer in place of the Puddle in the link.
-3. A sends `POST /stream/v1/access`: its own chain, address, a profile (the one the owner chose),
-   a short note (up to 500 characters), and the invite token if there is one. A records `pending_out`.
-4. B verifies A's chain and the request signature, then decides:
-   - **Blocked:** drop it silently and answer exactly as for an ordinary pending request. Never reveal
-     a block.
-   - **Valid invite token:** approve at once (below). Tokens have an expiry and a use count.
-   - **Policy `open`:** approve at once. For Ponds, and for anyone who wants open doors.
-   - **Policy `manual`** (the default for a Puddle): record `pending_in`, tell the owner, answer
-     `pending`.
-   - **Policy `closed`:** `403 access_closed`.
-5. When the owner accepts (`POST /api/v1/stream/accept`), B becomes `active`, then calls A's
-   `POST /stream/v1/access/result` with its chain and profile. If A is unreachable, B retries with a
-   growing delay; A can also ask with `GET /stream/v1/access/status`.
-6. A checks the result is signed by a key in the chain it already pinned, and becomes `active`.
+There are **no public endpoints**. A Puddle never tells a stranger anything: not its identity, its
+name, its policy, or whether it is even a Puddle. The one request it must accept from someone it
+doesn't know is a request for a stream, and its answer to that is always the same.
 
-Decline sends `approved: false` and nothing else about why. Requests are rate-limited per sender id
-and per address, because a Puddle on a home connection is reachable by anyone with its address.
+1. The owner gets a **link**: `puddle://<user id>@<address>`, optionally `?invite=<token>`. The id is
+   the hash of the other Puddle's first signing key, and is what their answer will be checked against.
+2. A's Puddle sends `POST /stream/v1/access` straight to that address: its own key chain, address, a
+   profile (the one the owner chose), a short note (up to 500 characters), and the invite token if
+   there is one, signed with its key. It records `pending_out`. Nothing is fetched first.
+3. B's Puddle answers `202` with no body **whatever it decides**. Then, privately, it drops the request
+   silently if the sender is blocked, if its policy is `closed`, if the sender is over its rate limit,
+   or if the chain or signature does not verify. Otherwise:
+   - **valid invite token:** approve at once (tokens expire and have a use count)
+   - **policy `open`:** approve at once
+   - **policy `manual`** (the default): record `pending_in` and tell the owner
+4. When approved (immediately, or when the owner accepts with `POST /api/v1/stream/accept`), B becomes
+   `active` and calls A's `POST /stream/v1/access/result` with its own chain and profile, retrying
+   with a growing delay if A is unreachable. A checks that the chain belongs to the id in the link
+   and that the result is signed by a key in it, then becomes `active`. This is the first time A sees
+   B's keys, and it sees them only because B chose to approve.
+5. Declining sends `approved: false` and nothing about why.
+6. A can ask `GET /stream/v1/access/status`. B answers only a requester it has a record of; one that
+   is blocked or refused by policy is told `pending`, forever, and anything unknown gets `404`. So no
+   answer ever reveals a block, a closed door, or who B is.
+
+`closed` therefore means "ignore strangers", not "refuse": the sender just waits. A request reflected
+off a forged return address can make B send a small signed result to someone who didn't ask; results
+are rate-limited too.
+
+## Proving who you are
+
+A stream request proves one thing: whoever sent it holds the key whose hash is the id they claim.
+It does not prove that id belongs to the person Bob thinks it does. So:
+
+- **Names and notes are self-declared.** Anyone can type "Alice" or "hey it's Jayden from work".
+  What can't be faked is her id, because she is the only one who can sign with her key.
+- **If the request follows a link** (Alice sent Bob her link, or Bob followed it), the id in the link
+  is checked against the chain that comes back, automatically. A different id fails.
+- **If Alice asks cold**, Bob's app shows her id as grouped characters with a short check code, marked
+  as someone new. If it matters he confirms it some other way: a call, or another chat app. This is
+  the same job as comparing safety numbers elsewhere.
+- **Every later request proves it again.** Each one is signed with Alice's current key and checked
+  against the chain Bob stored when he accepted. Knowing her address, or having seen old traffic,
+  is not enough to be her.
+- **Someone in the middle of first contact** can swap the chain in a cold request. Bob would then see
+  the interceptor's id, not Alice's, which is why the id comparison above matters for cold requests.
+  A link pins the id, so it cannot be done to someone who followed a link.
 
 ## Closing, blocking
 
@@ -75,7 +101,7 @@ limit for now (no middleman servers).
 
 ## Request signatures
 
-Every request except the public ones (`GET /stream/v1/info`, `GET /stream/v1/identity`) carries
+Every request carries
 
     X-Puddle-Signature: v1 id=<sender id>; kid=<key id>; ts=<ms>; nonce=<base64>; sig=<base64>
 
@@ -89,12 +115,25 @@ Every request except the public ones (`GET /stream/v1/info`, `GET /stream/v1/ide
     <nonce>
     <the recipient's user id>
 
-The recipient checks, in order: the recipient id is its own (so a request can't be replayed against a
-different Puddle); `ts` is within five minutes of its clock (else `401 clock_skew`, with its time
-so the sender can tell the owner); the nonce has not been seen in that window (`replayed`); `kid` is
-the sender's *current* key (a retired key cannot start new requests); the signature verifies; and
-the sender has a stream in a state the endpoint allows. If `kid` is newer than the chain it holds,
-it fetches the sender's chain from the sender's *stored* address and verifies it extends the old one.
+The recipient checks, in this order, and **answers `404` to any failure up to and including the
+signature**, the same as for a path that doesn't exist, so a stranger can't tell what is there:
+
+1. the recipient id is its own (so a request can't be replayed against a different Puddle)
+2. the sender is one it knows, and `kid` is that sender's *current* key (retired keys can't start new
+   requests). The exceptions are `POST /stream/v1/access`, checked against the chain in its body, and
+   `POST /stream/v1/identity`, checked by chain continuity (below)
+3. the signature verifies
+
+Only now is the sender authenticated, so only now can it be told specific things:
+
+4. `ts` within five minutes of the recipient's clock, else `401 clock_skew` with its time so the
+   owner can be told
+5. the nonce is new in that window, else `401 replayed`
+6. the sender has a stream in a state the endpoint allows, else `403 no_stream`
+
+There is no "fetch the sender's keys" step. When a peer rolls its keys it pushes the new chain to
+every active stream (`POST /stream/v1/identity`). That endpoint answers a stranger exactly as any
+other: `404` unless the chain extends one the recipient already holds.
 
 Events inside chats are signed separately, over their exact bytes, and name the key that signed them
 (`kid`), so history signed before a key roll still verifies.
@@ -113,8 +152,8 @@ the base32 hash of the first signing key. All of it lives in `<data_dir>/identit
 2. a record signed by the new key is appended to the chain
 3. the Puddle sends the chain to every active stream with `POST /stream/v1/identity`
 4. peers verify it extends the chain they hold and note the new keys; one that doesn't verify is
-   ignored and the owner is told. Peers that were offline learn at their next contact (an unknown
-   `kid` makes them fetch the chain).
+   ignored and the owner is told. A peer that was offline misses the push, so the sender keeps
+   retrying it until that stream acknowledges.
 
 The id does not change, so no one has to re-add anyone. Why it resists a stolen phone: a phone is given
 the *current* keys only. To roll, an attacker would need the *next* pair, which stays on the main

@@ -1,5 +1,6 @@
 #include "server.h"
 
+#include "auth.h"
 #include "http.h"
 #include "identity.h"
 #include "log.h"
@@ -32,6 +33,7 @@ struct puddle_server {
     puddle_config cfg;
     SSL_CTX *ctx;
     puddle_store *store;
+    puddle_auth *auth;
     puddle_identity *identity;
     puddle_profiles profiles;
     puddle_assignments *assignments;
@@ -129,6 +131,9 @@ puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t 
     s->store = puddle_store_open(cfg->data_dir, err, errlen);
     if (!s->store)
         goto fail;
+    s->auth = puddle_auth_open(cfg->data_dir, err, errlen);
+    if (!s->auth)
+        goto fail;
     s->identity = puddle_identity_open(cfg->data_dir, err, errlen);
     if (!s->identity)
         goto fail;
@@ -206,6 +211,7 @@ void puddle_server_destroy(puddle_server *s)
     SSL_CTX_free(s->ctx);
     puddle_assignments_close(s->assignments);
     puddle_identity_close(s->identity);
+    puddle_auth_close(s->auth);
     puddle_profiles_free(&s->profiles);
     puddle_store_close(s->store);
     pthread_mutex_destroy(&s->mu);
@@ -225,7 +231,7 @@ static int ssl_write_all(SSL *ssl, const char *p, size_t n)
     return 0;
 }
 
-static void handle_request(SSL *ssl, const char *peer)
+static void handle_request(puddle_server *srv, SSL *ssl, const char *peer)
 {
     char buf[REQUEST_MAX + 1];
     char out[2048];
@@ -259,8 +265,12 @@ static void handle_request(SSL *ssl, const char *peer)
 
     puddle_request req;
     int ok = puddle_http_parse(buf, len, &req) == 0;
-    outlen = puddle_http_route(ok ? &req : NULL, out, sizeof out, &status);
-    puddle_log(PUDDLE_LOG_INFO, "%s %s %s -> %d", peer, ok ? req.method : "-", ok ? req.path : "-", status);
+    int owner_ok = ok && puddle_auth_check_bearer(srv->auth, req.authorization);
+    outlen = puddle_http_route(ok ? &req : NULL, owner_ok, out, sizeof out, &status);
+    /* the owner reads this log, so say why a 404 happened; the client is told nothing */
+    puddle_log(PUDDLE_LOG_INFO, "%s %s %s [%s] -> %d", peer, ok ? req.method : "-", ok ? req.path : "-",
+               !ok ? "malformed" : owner_ok ? "owner token" : req.authorization[0] ? "wrong token" : "no token",
+               status);
 send:
     if (outlen)
         ssl_write_all(ssl, out, outlen);
@@ -274,7 +284,7 @@ static void *conn_main(void *arg)
     SSL *ssl = SSL_new(s->ctx);
     if (ssl && SSL_set_fd(ssl, c->fd) == 1) {
         if (SSL_accept(ssl) == 1) {
-            handle_request(ssl, c->peer);
+            handle_request(s, ssl, c->peer);
             SSL_shutdown(ssl);
         } else {
             /* expected whenever a client rejects the self-signed cert */

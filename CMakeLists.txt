@@ -37,6 +37,7 @@ add_compile_options(-Wall -Wextra)
 
 # --- core: config, TLS, HTTP, listener (plain C, shared by both targets) -----
 add_library(puddle_core STATIC
+  src/core/auth.c
   src/core/config.c
   src/core/encoding.c
   src/core/fsutil.c
@@ -46,6 +47,7 @@ add_library(puddle_core STATIC
   src/core/json.c
   src/core/log.c
   src/core/profile.c
+  src/core/reqsig.c
   src/core/server.c
   src/core/store.c
   src/core/tls.c
@@ -97,7 +99,7 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity)
+foreach(t http json store config yaml profile encoding identity auth reqsig)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)

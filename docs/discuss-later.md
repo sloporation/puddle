@@ -25,6 +25,16 @@ requests are in flight, what happens to the old images, whether a file watcher r
 automatically, what a mistake in the new files does (keep the old ones, and how the owner is told),
 and how changes are pushed to the streams that see them.
 
+## 3. Encrypting chats at rest, and what it does to search
+
+Nothing is encrypted on disk today: chat logs and the key file are plain files. Once messages are
+encrypted between Puddles, the stored events keep their ciphertext bodies (they are stored exactly as
+signed), which protects the logs, but the key to read them sits beside them in `identity/keys`.
+Questions: lean on OS disk encryption (FileVault, BitLocker, LUKS) or encrypt ourselves; protect the
+key with a passphrase or the OS keychain; and search. Search inside one chat is fine, since the chat
+is decrypted in memory. Searching across all chats means decrypting them all or keeping an index, and
+an on-disk index is plaintext unless it is encrypted too.
+
 ## Carried over from earlier
 
 - Name for the group-only connection (a scoped stream). Options floated: Brook, Rill, Tributary.

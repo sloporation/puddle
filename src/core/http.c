@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *reason(int status)
 {
@@ -63,23 +64,74 @@ int puddle_http_parse(const char *buf, size_t len, puddle_request *req)
     if (strncmp(version, "HTTP/1.", 7) != 0)
         return -1;
 
-    char *q = strpbrk(target, "?#");
+    memset(req, 0, sizeof *req);
+    snprintf(req->target, sizeof req->target, "%s", target);
+    char *frag = strchr(target, '#');
+    if (frag) {
+        *frag = '\0';
+        char *h = strchr(req->target, '#');
+        if (h)
+            *h = '\0'; /* a fragment is never sent in a request target; drop it from what is signed too */
+    }
+    char *q = strchr(target, '?');
     if (q)
         *q = '\0';
 
     memcpy(req->method, method, sizeof req->method);
     memcpy(req->path, target, sizeof req->path);
+
+    /* headers: only Authorization and X-Puddle-Signature matter */
+    const char *p = eol + 1;
+    const char *end = buf + len;
+    int seen_auth = 0, seen_sig = 0;
+    while (p < end) {
+        const char *le = memchr(p, '\n', (size_t)(end - p));
+        if (!le)
+            break;
+        size_t ll = (size_t)(le - p);
+        if (ll && p[ll - 1] == '\r')
+            ll--;
+        if (ll == 0)
+            break; /* blank line: end of headers */
+        if (*p == ' ' || *p == '\t')
+            return -1; /* folded headers are not accepted */
+        const char *colon = memchr(p, ':', ll);
+        if (!colon)
+            return -1;
+        size_t nl = (size_t)(colon - p);
+        const char *v = colon + 1;
+        size_t vl = ll - nl - 1;
+        while (vl && (*v == ' ' || *v == '\t')) { v++; vl--; }
+        while (vl && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+
+        char *dst = NULL;
+        size_t cap = 0;
+        int *seen = NULL;
+        if (nl == 13 && strncasecmp(p, "Authorization", 13) == 0) {
+            dst = req->authorization; cap = sizeof req->authorization; seen = &seen_auth;
+        } else if (nl == 18 && strncasecmp(p, "X-Puddle-Signature", 18) == 0) {
+            dst = req->signature; cap = sizeof req->signature; seen = &seen_sig;
+        }
+        if (dst) {
+            if (*seen || vl >= cap)
+                return -1;
+            *seen = 1;
+            memcpy(dst, v, vl);
+            dst[vl] = '\0';
+        }
+        p = le + 1;
+    }
     return 0;
 }
 
-size_t puddle_http_route(const puddle_request *req, char *out, size_t cap, int *status)
+size_t puddle_http_route(const puddle_request *req, int owner_ok, char *out, size_t cap, int *status)
 {
     if (!req) {
         *status = 400;
         return puddle_http_error(400, out, cap);
     }
 
-    if (strcmp(req->path, "/health") == 0) {
+    if (strcmp(req->path, "/health") == 0 && owner_ok) {
         int is_get = strcmp(req->method, "GET") == 0;
         int is_head = strcmp(req->method, "HEAD") == 0;
         if (is_get || is_head) {

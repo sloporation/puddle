@@ -63,7 +63,15 @@ Chats are stored under the data directory (`data_dir` in the config; default
 `~/Library/Application Support/Puddle` on macOS, `~/.local/share/puddle` on Linux).
 Only one Puddle can use a data directory at a time.
 
-    curl --cacert ~/.config/puddle/cert.pem https://localhost:8443/health
+Nothing on the port is public. Even `/health` needs your owner token, which is made on first run in
+`<data_dir>/state/owner-token` (mode 0600). Without it the answer is a plain `404`, the same as for
+any path that doesn't exist; the Puddle's log says why.
+
+    curl --cacert ~/.config/puddle/cert.pem \
+         -H "Authorization: Bearer $(cat ~/Library/Application\ Support/Puddle/state/owner-token)" \
+         https://localhost:8443/health
+
+(On Linux the token is at `~/.local/share/puddle/state/owner-token`.)
 
 The app opens its window on launch. Closing the window hides it to the system tray
 (menu bar on macOS, where the Dock icon also goes away until the window is reopened) and the server keeps running; use the tray icon to reopen it or

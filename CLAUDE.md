@@ -25,6 +25,8 @@ or looks like it conflicts with this list, ask rather than guess.
 ## Conventions
 
 - Config and profile files are YAML (`puddle.yaml`, `profiles.yaml`), read with libyaml.
+- Nothing is public. Every route is authenticated (owner token, or a signed request from a peer), and
+  a failed check is answered `404` like an unknown path, never `401`/`403`, so strangers learn nothing.
 - The HTTP APIs use only GET and POST. GET reads and never changes state; POST does everything
   else, with the verb in the path (`dm/delete`, `user/unblock`). No PUT, PATCH, DELETE or HEAD in
   the specs.

@@ -42,6 +42,14 @@ Puddle is its always-on replica.
 without rotating. More machinery (device certificates, revocation lists); worth it if lost phones
 turn out to be common.
 
+### The owner token
+
+Until pairing is built, the owner API has one credential: a random 64-hex **owner token** made on first
+run in `<data_dir>/state/owner-token` (mode 0600), presented as `Authorization: Bearer <token>`. The
+Puddle's own app and the owner's tools read it from that file. Paired phones will get tokens of
+their own. Without a valid token every route, including `/health`, answers `404` as if it did not exist.
+(`src/core/auth.c`.)
+
 ## Rotation (in v1, optional, owner-triggered)
 
 Implemented in `src/core/identity.c`; the flow is in streams.md. Keys can be replaced without
