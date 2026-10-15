@@ -68,6 +68,12 @@ identity if this computer is lost, and anyone who has it can take your identity 
 - If you quit before confirming, that identity is thrown away on the next start and a fresh one is made,
   so you can never be left with an identity whose phrase you didn't write down.
 
+**If this computer is lost**, put Puddle on another one and run
+`puddled --restore --chain chain.jsonl` from a terminal. It asks for your **latest** recovery phrase (the one
+from your most recent key change, or from the start if you never changed them) and needs a copy of your chain,
+which is `identity/chain.jsonl` in your data folder. The chain is not secret, so it is worth keeping a copy
+somewhere. Your id comes back unchanged. An older phrase is refused.
+
 **Changing your keys** is optional and never happens by itself. Stop the Puddle and run `puddled --roll`
 from a terminal: it asks for your *current* phrase (not echoed), gives you a **new** phrase, and only
 once you confirm the new one is written down does it change anything. From then on the new phrase is the

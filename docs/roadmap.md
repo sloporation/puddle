@@ -82,13 +82,21 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   wrong `prev`, wrong `seq`, a replayed rotation, and a rotation moved onto another identity's chain.
   `puddled --roll` needs a terminal and takes the data directory's lock, so it refuses while the Puddle is
   running (which would keep using the old keys). The HTTP endpoint comes with 2.4.
-- [ ] **1.4 Restore.** From the *latest* phrase plus a copy of the chain, rebuild the identity on a new
-  machine: the phrase gives that generation's keys, and peers recognise them as current. Getting the
-  chain from a friend comes later, in 3.6. An older phrase cannot restore: its keys are retired.
-  *Done when:* losing `identity/` entirely and restoring from phrase + chain gives the same id.
-
-What this makes important: **the new phrase must be written down at every roll**, and the app has to
-make that unmistakable. After a roll commits, the old phrase no longer recovers anything.
+- [x] **1.4 Restore.** `puddle_identity_restore` and `puddled --restore --chain FILE`. From the *latest* phrase
+  plus a copy of the chain (not secret; `identity/chain.jsonl`, or later a friend's copy) the identity is rebuilt on
+  a new machine: the same id, the same keys file byte for byte, the chain exactly as given, nothing to confirm.
+  Everything is checked first and nothing is made on any failure: the chain must be valid, and the phrase must be
+  exactly the one the newest record announces and commits to. An **older** phrase is refused and recognised as an
+  older one of this identity; a wrong phrase, a typo, a stale or foreign chain, a tampered chain, and a forged
+  chain handed to the owner (right keys, thief's roll commitment) are each refused with a reason. Line endings and
+  blank lines in a pasted chain are tidied without touching any signature. Restoring never overwrites an identity,
+  and prints the advice to roll straight away if the old computer may be in other hands. Shares one atomic
+  "build privately, move into place" step with creation. Run end to end through a real terminal against a
+  simulated new computer. **Getting the chain from a friend** is still step 3.6.
+  **A flaw found and fixed on the way:** the user id was the hash of the first signing key alone, so someone with
+  just the daily keys could sign a different first record, with a roll key of their own, and have it be a valid
+  chain for the same id. The id now also commits to the first roll key's hash, so any such forgery gets a
+  different id. It is still derivable from the phrase alone.
 
 *Commit point.*
 

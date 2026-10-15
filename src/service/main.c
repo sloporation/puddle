@@ -22,12 +22,15 @@ static void on_signal(int sig)
 static void usage(FILE *out)
 {
     fprintf(out,
-            "usage: puddled [-c|--config FILE] [--init | --roll]\n"
+            "usage: puddled [-c|--config FILE] [--init | --roll | --restore --chain FILE]\n"
             "\n"
             "  --init   make this Puddle's identity and show its recovery phrase, then exit\n"
             "           (a first run from a terminal does this by itself and carries on)\n"
             "  --roll   change your keys: asks for your current recovery phrase, gives you a new one, and\n"
-            "           retires the old. The Puddle must not be running.\n");
+            "           retires the old. The Puddle must not be running.\n"
+            "  --restore --chain FILE\n"
+            "           rebuild your identity on a new computer from your LATEST recovery phrase and a copy\n"
+            "           of your chain (FILE: the identity/chain.jsonl from a backup; it is not secret).\n");
 }
 
 /* The phrase goes to the terminal and nowhere else: never to the log, which a service manager keeps. */
@@ -141,10 +144,64 @@ done:
     return rc;
 }
 
+/* Rebuild the identity here from the latest recovery phrase and a copy of the chain. */
+static int restore_identity(const puddle_config *cfg, const char *chain_path)
+{
+    char err[512];
+    if (!chain_path) {
+        fprintf(stderr, "puddled: --restore needs --chain FILE: a copy of your identity's chain.jsonl (it is not\n"
+                        "secret; keep one somewhere safe). Without a copy, a friend's Puddle can give you one.\n");
+        return 2;
+    }
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        fprintf(stderr, "puddled: --restore needs a terminal: it asks for your recovery phrase.\n");
+        return 1;
+    }
+    if (puddle_identity_exists(cfg->data_dir)) {
+        fprintf(stderr, "puddled: there is already an identity in %s, and it is not overwritten.\n", cfg->data_dir);
+        return 1;
+    }
+    FILE *f = fopen(chain_path, "rb");
+    if (!f) {
+        fprintf(stderr, "puddled: cannot read %s\n", chain_path);
+        return 1;
+    }
+    static char chain[(1 << 20) + 1];
+    size_t n = fread(chain, 1, sizeof chain - 1, f);
+    int too_big = fgetc(f) != EOF;
+    fclose(f);
+    if (too_big) {
+        fprintf(stderr, "puddled: %s is too large to be a chain.\n", chain_path);
+        return 1;
+    }
+
+    char phrase[128];
+    if (read_secret("Your LATEST recovery phrase (the one from your most recent key change): ", phrase, sizeof phrase) != 0) {
+        fprintf(stderr, "puddled: no phrase given.\n");
+        return 1;
+    }
+    puddle_identity *id = puddle_identity_restore(cfg->data_dir, phrase, chain, n, err, sizeof err);
+    memset(phrase, 0, sizeof phrase);
+    if (!id) {
+        fprintf(stderr, "puddled: %s\n", err);
+        return 1;
+    }
+    char uid[PUDDLE_USER_ID_LEN + 1];
+    uint64_t seq;
+    puddle_identity_id(id, uid);
+    puddle_identity_public(id, NULL, NULL, &seq);
+    puddle_identity_close(id);
+    printf("Restored your identity %s here.\n"
+           "Your recovery phrase is unchanged. If the old computer might be in someone else's hands, change your\n"
+           "keys now with `puddled --roll`, so that anything left on it stops working.\n", uid);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *path = NULL;
-    int init = 0, roll = 0;
+    int init = 0, roll = 0, restore = 0;
+    const char *chain_path = NULL;
     for (int i = 1; i < argc; i++) {
         if ((!strcmp(argv[i], "-c") || !strcmp(argv[i], "--config")) && i + 1 < argc) {
             path = argv[++i];
@@ -152,6 +209,10 @@ int main(int argc, char **argv)
             init = 1;
         } else if (!strcmp(argv[i], "--roll")) {
             roll = 1;
+        } else if (!strcmp(argv[i], "--restore")) {
+            restore = 1;
+        } else if (!strcmp(argv[i], "--chain") && i + 1 < argc) {
+            chain_path = argv[++i];
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(stdout);
             return 0;
@@ -168,8 +229,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (init + roll + restore > 1) {
+        usage(stderr);
+        return 2;
+    }
     if (roll)
-        return init ? 2 : roll_keys(&cfg);
+        return roll_keys(&cfg);
+    if (restore)
+        return restore_identity(&cfg, chain_path);
 
     int unfinished = puddle_identity_unconfirmed(cfg.data_dir);
     if (!puddle_identity_exists(cfg.data_dir) || unfinished) {

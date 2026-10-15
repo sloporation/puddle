@@ -66,6 +66,8 @@ static void seterr(char *err, size_t n, const char *fmt, ...)
     va_end(ap);
 }
 
+static void phrase_problem(int parse_result, char *err, size_t errlen);
+
 static int64_t now_ms(void)
 {
     struct timespec ts;
@@ -141,12 +143,27 @@ void puddle_key_id(const unsigned char sign_pub[32], char out[65])
     puddle_sha256_hex(sign_pub, 32, out);
 }
 
-static void user_id_of(const unsigned char first_sign_pub[32], char out[PUDDLE_USER_ID_LEN + 1])
+/* The user id binds the first signing key AND the commitment to the first roll key: SHA-256 of the key
+ * followed by SHA-256 of the roll key. A thief who holds only the daily keys can sign a different first
+ * record, but not one whose id comes out the same, because his roll key hashes to something else. */
+static void user_id_of(const unsigned char first_sign_pub[32], const unsigned char first_roll_commit[32],
+                       char out[PUDDLE_USER_ID_LEN + 1])
 {
-    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned char both[64], md[EVP_MAX_MD_SIZE];
     unsigned mdlen = 0;
-    EVP_Digest(first_sign_pub, 32, md, &mdlen, EVP_sha256(), NULL);
+    memcpy(both, first_sign_pub, 32);
+    memcpy(both + 32, first_roll_commit, 32);
+    EVP_Digest(both, sizeof both, md, &mdlen, EVP_sha256(), NULL);
     puddle_base32_encode(md, mdlen, out, PUDDLE_USER_ID_LEN + 1);
+}
+
+static void user_id_from_roll_pub(const unsigned char first_sign_pub[32], const unsigned char first_roll_pub[32],
+                                  char out[PUDDLE_USER_ID_LEN + 1])
+{
+    unsigned char commit[EVP_MAX_MD_SIZE];
+    unsigned n = 0;
+    EVP_Digest(first_roll_pub, 32, commit, &n, EVP_sha256(), NULL);
+    user_id_of(first_sign_pub, commit, out);
 }
 
 int puddle_identity_keys_from_phrase(const char *phrase, puddle_phrase_keys *out)
@@ -331,7 +348,9 @@ int puddle_chain_verify(const char *text, size_t len, const char *expected_id, p
         if (count == 1) {
             if (strcmp(type, "identity.inception") != 0 || seq != 0)
                 return cfail(err, errlen, count, "the chain must start with an inception record");
-            user_id_of(sp, h.id);
+            unsigned char commit_raw[32];
+            puddle_hex_decode(next, commit_raw, 32); /* already checked to be 64 hex characters */
+            user_id_of(sp, commit_raw, h.id);
             if (expected_id && strcmp(expected_id, h.id) != 0)
                 return cfail(err, errlen, count, "this chain belongs to a different id");
             if (!puddle_verify_signature(sp, rec, rl, sig))
@@ -653,12 +672,8 @@ puddle_roll *puddle_identity_roll_prepare(puddle_identity *id, const char *curre
 {
     char canon[PUDDLE_PHRASE_LEN + 1];
     int pr = puddle_phrase_parse(current_phrase, canon);
-    if (pr == PUDDLE_PHRASE_BAD_CHECKSUM) {
-        seterr(err, errlen, "that recovery phrase has a typo in it; check each group against what you wrote down");
-        return NULL;
-    }
     if (pr != PUDDLE_PHRASE_OK) {
-        seterr(err, errlen, "that doesn't look like a recovery phrase: it should be eight groups of four characters");
+        phrase_problem(pr, err, errlen);
         return NULL;
     }
 
@@ -799,6 +814,56 @@ out:
     return rc;
 }
 
+/* A phrase that didn't parse, in words for the owner. */
+static void phrase_problem(int parse_result, char *err, size_t errlen)
+{
+    if (parse_result == PUDDLE_PHRASE_BAD_CHECKSUM)
+        seterr(err, errlen, "that recovery phrase has a typo in it; check each group against what you wrote down");
+    else
+        seterr(err, errlen, "that doesn't look like a recovery phrase: it should be eight groups of four characters");
+}
+
+/* Build <data_dir>/identity in a private directory and move it into place in one step, so a crash leaves
+ * nothing half made and two processes can't both succeed. `unconfirmed` adds the marker (a new identity whose
+ * phrase has not yet been acknowledged). 0 or -1 (message set). */
+static int install_identity(const char *data_dir, const char *final_dir, const char *id, const keypair *sign,
+                            const keypair *enc, const char *chain_text, size_t chain_len, int unconfirmed,
+                            char *err, size_t errlen)
+{
+    char tmp[PUDDLE_PATH_MAX], keys[PUDDLE_PATH_MAX], chain[PUDDLE_PATH_MAX], marker[PUDDLE_PATH_MAX];
+    snprintf(tmp, sizeof tmp, "%s/identity.new-%ld", data_dir, (long)getpid());
+    snprintf(keys, sizeof keys, "%s/keys", tmp);
+    snprintf(chain, sizeof chain, "%s/chain.jsonl", tmp);
+    remove_tree(tmp);
+    if (puddle_mkdir_p(tmp) != 0) {
+        seterr(err, errlen, "cannot create %s: %s", tmp, strerror(errno));
+        return -1;
+    }
+    if (write_keys(tmp, keys, id, sign, enc) != 0 || puddle_write_file_atomic(tmp, chain, chain_text, chain_len) != 0) {
+        seterr(err, errlen, "cannot write the identity files in %s: %s", tmp, strerror(errno));
+        remove_tree(tmp);
+        return -1;
+    }
+    if (unconfirmed) {
+        static const char note[] = "the recovery phrase was shown but not yet confirmed as written down\n";
+        marker_path(tmp, marker);
+        if (puddle_write_file_atomic(tmp, marker, note, sizeof note - 1) != 0) {
+            seterr(err, errlen, "cannot write the identity files in %s: %s", tmp, strerror(errno));
+            remove_tree(tmp);
+            return -1;
+        }
+    }
+    puddle_fsync_dir(tmp);
+    if (rename(tmp, final_dir) != 0) {
+        seterr(err, errlen, errno == ENOTEMPTY || errno == EEXIST ? "an identity already exists in %s"
+               : "cannot put the identity in place in %s", data_dir);
+        remove_tree(tmp);
+        return -1;
+    }
+    puddle_fsync_dir(data_dir);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ create */
 
 static void remove_tree(const char *dir)
@@ -841,7 +906,7 @@ puddle_identity *puddle_identity_create(const char *data_dir, char phrase_out[PU
     }
     id->sign = g.sign;
     id->enc = g.enc;
-    user_id_of(g.sign.pub, id->id);
+    user_id_from_roll_pub(g.sign.pub, g.roll.pub, id->id);
     puddle_sha256_hex(g.roll.pub, 32, id->next);
 
     char line[800];
@@ -851,38 +916,8 @@ puddle_identity *puddle_identity_create(const char *data_dir, char phrase_out[PU
         goto fail;
     }
 
-    /* built in a private directory and moved into place in one step, so a crash leaves nothing half made
-     * and two processes can't both succeed */
-    char tmp[PUDDLE_PATH_MAX], keys[PUDDLE_PATH_MAX], chain[PUDDLE_PATH_MAX];
-    snprintf(tmp, sizeof tmp, "%s/identity.new-%ld", data_dir, (long)getpid());
-    snprintf(keys, sizeof keys, "%s/keys", tmp);
-    snprintf(chain, sizeof chain, "%s/chain.jsonl", tmp);
-    remove_tree(tmp);
-    if (puddle_mkdir_p(tmp) != 0) {
-        seterr(err, errlen, "cannot create %s: %s", tmp, strerror(errno));
+    if (install_identity(data_dir, id->dir, id->id, &g.sign, &g.enc, line, ll, 1, err, errlen) != 0)
         goto fail;
-    }
-    if (write_keys(tmp, keys, id->id, &g.sign, &g.enc) != 0 || puddle_write_file_atomic(tmp, chain, line, ll) != 0) {
-        seterr(err, errlen, "cannot write the identity files in %s: %s", tmp, strerror(errno));
-        remove_tree(tmp);
-        goto fail;
-    }
-    char marker[PUDDLE_PATH_MAX];
-    marker_path(tmp, marker);
-    static const char note[] = "the recovery phrase was shown but not yet confirmed as written down\n";
-    if (puddle_write_file_atomic(tmp, marker, note, sizeof note - 1) != 0) {
-        seterr(err, errlen, "cannot write the identity files in %s: %s", tmp, strerror(errno));
-        remove_tree(tmp);
-        goto fail;
-    }
-    puddle_fsync_dir(tmp);
-    if (rename(tmp, id->dir) != 0) {
-        seterr(err, errlen, errno == ENOTEMPTY || errno == EEXIST ? "an identity already exists in %s"
-               : "cannot put the identity in place in %s", data_dir);
-        remove_tree(tmp);
-        goto fail;
-    }
-    puddle_fsync_dir(data_dir);
 
     memcpy(phrase_out, phrase, sizeof phrase);
     goto out;
@@ -892,6 +927,118 @@ fail:
 out:
     memset(&g, 0, sizeof g);
     memset(phrase, 0, sizeof phrase);
+    return id;
+}
+
+/* -------------------------------------------------------------------- restore */
+
+/* The chain with line endings and blank lines tidied: every record on its own line ending in "\n". The
+ * records themselves are not touched, so their signatures still hold. malloc'd. */
+static char *normalize_chain(const char *text, size_t len, size_t *out_len)
+{
+    char *out = malloc(len + 2);
+    if (!out)
+        return NULL;
+    size_t o = 0, pos = 0;
+    while (pos < len) {
+        const char *nl = memchr(text + pos, '\n', len - pos);
+        size_t ll = nl ? (size_t)(nl - (text + pos)) : len - pos;
+        size_t keep = ll;
+        while (keep && (text[pos + keep - 1] == '\r' || text[pos + keep - 1] == ' ' || text[pos + keep - 1] == '\t'))
+            keep--;
+        if (keep) {
+            memcpy(out + o, text + pos, keep);
+            o += keep;
+            out[o++] = '\n';
+        }
+        pos += ll + (nl ? 1 : 0);
+    }
+    out[o] = '\0';
+    *out_len = o;
+    return out;
+}
+
+/* Does an EARLIER record of this chain announce `sign_pub`? (Then the phrase is an old one.) */
+static int announced_earlier(const char *chain, size_t len, const unsigned char sign_pub[32], uint64_t head_seq)
+{
+    size_t pos = 0;
+    uint64_t n = 0;
+    while (pos < len) {
+        const char *nl = memchr(chain + pos, '\n', len - pos);
+        size_t ll = nl ? (size_t)(nl - (chain + pos)) : len - pos;
+        puddle_span rv;
+        unsigned char k[32];
+        if (n < head_seq && puddle_json_member(chain + pos, ll, "record", &rv) == 0 &&
+            get_key(rv.p, rv.len, "signing", k) == 0 && memcmp(k, sign_pub, 32) == 0)
+            return 1;
+        n++;
+        pos += ll + (nl ? 1 : 0);
+    }
+    return 0;
+}
+
+puddle_identity *puddle_identity_restore(const char *data_dir, const char *phrase, const char *chain_text,
+                                         size_t chain_len, char *err, size_t errlen)
+{
+    generation g;
+    memset(&g, 0, sizeof g);
+    char canon[PUDDLE_PHRASE_LEN + 1], *chain = NULL;
+    puddle_identity *id = NULL;
+
+    if (puddle_identity_exists(data_dir)) {
+        seterr(err, errlen, "an identity already exists in %s; it is not overwritten", data_dir);
+        return NULL;
+    }
+    int pr = puddle_phrase_parse(phrase, canon);
+    if (pr != PUDDLE_PHRASE_OK) {
+        phrase_problem(pr, err, errlen);
+        return NULL;
+    }
+    if (derive_generation(canon, &g) != 0) {
+        seterr(err, errlen, "cannot derive keys from that phrase");
+        goto out;
+    }
+
+    size_t clen = 0;
+    chain = chain_text ? normalize_chain(chain_text, chain_len, &clen) : NULL;
+    puddle_chain_head h;
+    char why[200];
+    if (!chain || clen == 0 || puddle_chain_verify(chain, clen, NULL, &h, why, sizeof why) != 0) {
+        seterr(err, errlen, "that chain is not usable: %s", chain && clen ? why : "it is empty");
+        goto out;
+    }
+
+    char roll_hash[65];
+    puddle_sha256_hex(g.roll.pub, 32, roll_hash);
+    if (memcmp(g.sign.pub, h.sign_pub, 32) != 0 || memcmp(g.enc.pub, h.enc_pub, 32) != 0 || strcmp(roll_hash, h.next) != 0) {
+        if (announced_earlier(chain, clen, g.sign.pub, h.seq))
+            seterr(err, errlen, "that is an older recovery phrase for this identity: its keys were retired when you "
+                   "changed your keys. Use the phrase you wrote down most recently");
+        else
+            seterr(err, errlen, "that phrase doesn't belong to this chain. It may be a different identity's, or the "
+                   "chain may be out of date: get a newer copy (from a backup, or a friend) and try again");
+        goto out;
+    }
+
+    id = blank(data_dir);
+    if (!id) {
+        seterr(err, errlen, "out of memory");
+        goto out;
+    }
+    id->sign = g.sign;
+    id->enc = g.enc;
+    memcpy(id->id, h.id, sizeof id->id);
+    id->seq = h.seq;
+    memcpy(id->head_hash, h.head_hash, 65);
+    memcpy(id->next, h.next, 65);
+    if (install_identity(data_dir, id->dir, id->id, &g.sign, &g.enc, chain, clen, 0, err, errlen) != 0) {
+        puddle_identity_close(id);
+        id = NULL;
+    }
+out:
+    memset(&g, 0, sizeof g);
+    memset(canon, 0, sizeof canon);
+    free(chain);
     return id;
 }
 
@@ -943,7 +1090,9 @@ puddle_identity *puddle_identity_open(const char *data_dir, char *err, size_t er
         goto fail;
     }
     if (strcmp(file_id, h.id) != 0) {
-        seterr(err, errlen, "%s and %s belong to different identities", id->keys_path, id->chain_path);
+        seterr(err, errlen, "%s and %s belong to different identities (or one was made before the id format changed "
+               "in this development version; if so, move %s aside and make a new identity with `puddled --init`)",
+               id->keys_path, id->chain_path, id->dir);
         goto fail;
     }
     if (memcmp(h.sign_pub, id->sign.pub, 32) != 0 || memcmp(h.enc_pub, id->enc.pub, 32) != 0) {

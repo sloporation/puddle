@@ -105,7 +105,7 @@ static int rm_cb(const char *p, const struct stat *sb, int t, struct FTW *f) { (
 #define KAT_SIGN "a608989739fe6a72e390aaff469b13784d623a835d55d7fd4fb0374e7187d328"
 #define KAT_ENC  "2a2d8b337a9af9734a3469e985292e62103548c9d8409b79498cdcf47def3d08"
 #define KAT_ROLL "1e9ce499e8ef59ae734002c67857c5a2f2cce1646cfc0d58ab885c7a682f6fd2"
-#define KAT_ID   "ud2ryfxjucmqunkpbr2zihoz6bszlgsunc26iruarpiu7ng53v5a"
+#define KAT_ID   "yvq4bfjwaelmoies6wjziyscagw3cjjjygqvhrw237b2mkcqsjya"
 #define KAT_NEXT "6379abf92797ab8fd67ccf291c35c51c20fd6172b218e2f6620491c9ecaef50a"
 
 static void test_known_answer(void)
@@ -118,15 +118,17 @@ static void test_known_answer(void)
     unhex(KAT_ROLL, want, 32); CHECK(memcmp(k.roll_pub, want, 32) == 0);
 
     char hash[65];
-    puddle_sha256_hex(k.sign_pub, 32, hash);
-    unsigned char md[32], raw[32];
-    unhex(hash, md, 32);
+    unsigned char both[64], md[32];
+    memcpy(both, k.sign_pub, 32);
+    puddle_sha256_hex(k.roll_pub, 32, hash);                 /* the commitment to the roll key */
+    CHECK(strcmp(hash, KAT_NEXT) == 0);
+    unhex(hash, both + 32, 32);
+    char hash2[65];
+    puddle_sha256_hex(both, 64, hash2);                      /* the id: the signing key AND that commitment */
+    unhex(hash2, md, 32);
     char id[53];
     puddle_base32_encode(md, 32, id, sizeof id);
     CHECK(strcmp(id, KAT_ID) == 0);
-    puddle_sha256_hex(k.roll_pub, 32, hash);
-    CHECK(strcmp(hash, KAT_NEXT) == 0);
-    (void)raw;
 
     /* any spelling of the phrase gives the same keys; a bad phrase gives none */
     puddle_phrase_keys k2;
@@ -160,11 +162,14 @@ static void test_create_and_reopen(void)
     puddle_phrase_keys k;
     CHECK(puddle_identity_keys_from_phrase(phrase, &k) == 0);
     CHECK(memcmp(sp, k.sign_pub, 32) == 0 && memcmp(ep, k.enc_pub, 32) == 0);
-    char hash[65];
-    unsigned char md[32];
+    char hash[65], hash2[65];
+    unsigned char md[32], both[64];
     char want_id[53];
-    puddle_sha256_hex(k.sign_pub, 32, hash);
-    unhex(hash, md, 32);
+    memcpy(both, k.sign_pub, 32);
+    puddle_sha256_hex(k.roll_pub, 32, hash);
+    unhex(hash, both + 32, 32);
+    puddle_sha256_hex(both, 64, hash2);
+    unhex(hash2, md, 32);
     puddle_base32_encode(md, 32, want_id, sizeof want_id);
     CHECK(strcmp(id, want_id) == 0);
 
@@ -253,6 +258,7 @@ static void test_create_and_reopen(void)
     puddle_identity_close(b);
 }
 
+
 static void test_chain_verify(void)
 {
     char err[300], id[53], other[53], verr[300], phrase[PUDDLE_PHRASE_LEN + 1];
@@ -287,7 +293,8 @@ static void test_chain_verify(void)
     snprintf(t, sizeof t, "%s", chain);                      /* change the roll commitment */
     p = strstr(t, "\"next\":\"") + 8;
     p[0] = (p[0] == '0') ? '1' : '0';
-    CHECK(verify(t, id, &h, verr) == -1 && strstr(verr, "bad signature"));
+    CHECK(verify(t, id, &h, verr) == -1 && strstr(verr, "different id"));  /* the id commits to it, so it is a different id */
+    CHECK(verify(t, NULL, &h, verr) == -1 && strstr(verr, "bad signature")); /* and with no id to check, the signature fails */
     snprintf(t, sizeof t, "%.*s", (int)(strlen(chain) - 40), chain);
     CHECK(verify(t, id, &h, verr) == -1);                    /* cut off mid-line */
     CHECK(puddle_chain_verify("", 0, NULL, &h, verr, sizeof verr) == -1);
@@ -508,6 +515,48 @@ static void head_hash_of(const char *chain, char out[65])
     char e[200];
     if (puddle_chain_verify(chain, strlen(chain), NULL, &h, e, sizeof e) != 0) { fprintf(stderr, "chain: %s\n", e); exit(2); }
     memcpy(out, h.head_hash, 65);
+}
+
+/* A thief with the daily keys of a never-changed identity signs a DIFFERENT first record: same signing key, but
+ * committing to a roll key of his own. It must not be a valid chain for the victim's id. */
+static void test_forged_inception(void)
+{
+    char err[600], p0[PUDDLE_PHRASE_LEN + 1], px[PUDDLE_PHRASE_LEN + 1], verr[300];
+    puddle_identity *a = create_ok(dir_for("forge-first"), p0, err, sizeof err);
+    char id[53];
+    puddle_identity_id(a, id);
+    size_t cl;
+    char *chain = puddle_identity_chain(a, &cl);
+    puddle_identity_close(a);
+    tgen g0, gx;
+    puddle_phrase_generate(px);
+    gen_of(p0, &g0);
+    gen_of(px, &gx);
+
+    char sp[64], ep[64], next[65], rec[500], sig[100], line[800];
+    b64(g0.sign_pub, sp); b64(g0.enc_pub, ep);                    /* the victim's real daily keys... */
+    puddle_sha256_hex(gx.roll_pub, 32, next);                      /* ...but the thief's own roll key */
+    int n = snprintf(rec, sizeof rec,
+                     "{\"type\":\"identity.inception\",\"seq\":0,\"signing\":\"%s\",\"encryption\":\"%s\",\"next\":\"%s\",\"ts\":1}",
+                     sp, ep, next);
+    ed_sign(g0.sign_priv, rec, (size_t)n, sig);                    /* validly signed by the stolen key */
+    snprintf(line, sizeof line, "{\"record\":%s,\"sig\":\"%s\"}\n", rec, sig);
+
+    puddle_chain_head h;
+    CHECK(verify(line, NULL, &h, verr) == 0);                      /* it is a well-formed chain, for SOME id... */
+    CHECK(strcmp(h.id, id) != 0);                                  /* ...but not the victim's */
+    CHECK(verify(line, id, &h, verr) == -1 && strstr(verr, "different id")); /* so a link's id rejects it */
+    CHECK(verify(chain, id, &h, verr) == 0);                       /* while the real one still verifies */
+
+    /* and it can't be fed to the owner either: their own phrase matches its keys, but not what it commits to */
+    char rdir[600];
+    snprintf(rdir, sizeof rdir, "%s", dir_for("forge-restore"));
+    CHECK(puddle_identity_restore(rdir, p0, line, strlen(line), err, sizeof err) == NULL && strstr(err, "doesn't belong"));
+    CHECK(!puddle_identity_exists(rdir));
+    puddle_identity *back = puddle_identity_restore(rdir, p0, chain, cl, err, sizeof err); /* the real one works */
+    CHECK(back != NULL);
+    puddle_identity_close(back);
+    free(chain);
 }
 
 static void test_rotation_rules(void)
@@ -872,6 +921,182 @@ static void test_interrupted_roll(void)
 }
 
 
+
+/* ============================ restore ============================ */
+
+static void rm_dir(const char *path) { nftw(path, rm_cb, 16, FTW_DEPTH | FTW_PHYS); }
+
+/* a copy of `chain` with every line ending changed and a blank line and some padding added */
+static char *messy(const char *chain)
+{
+    size_t n = strlen(chain);
+    char *out = malloc(n * 2 + 64);
+    size_t o = 0;
+    o += (size_t)sprintf(out + o, "\r\n  \r\n");           /* leading blanks */
+    for (size_t i = 0; i < n; i++) {
+        if (chain[i] == '\n') { out[o++] = '\r'; out[o++] = '\n'; out[o++] = '\r'; out[o++] = '\n'; }
+        else out[o++] = chain[i];
+    }
+    while (o && (out[o - 1] == '\n' || out[o - 1] == '\r')) o--; /* and no final newline */
+    out[o] = '\0';
+    return out;
+}
+
+static void test_restore(void)
+{
+    char err[900], p0[PUDDLE_PHRASE_LEN + 1], p1[PUDDLE_PHRASE_LEN + 1], p2[PUDDLE_PHRASE_LEN + 1], p3[PUDDLE_PHRASE_LEN + 1];
+    char d[600], d_identity[700];
+    snprintf(d, sizeof d, "%s", dir_for("rst")); /* dir_for() reuses one buffer, so keep our own copy */
+    snprintf(d_identity, sizeof d_identity, "%s/identity", d);
+
+    /* an identity that has changed its keys twice */
+    puddle_identity *a = create_ok(d, p0, err, sizeof err);
+    char id[53];
+    puddle_identity_id(a, id);
+    size_t chain0_len;
+    char *chain0 = puddle_identity_chain(a, &chain0_len);
+    puddle_roll *r = puddle_identity_roll_prepare(a, p0, p1, err, sizeof err);
+    CHECK(r && puddle_identity_roll_commit(a, r, err, sizeof err) == 0);
+    r = puddle_identity_roll_prepare(a, p1, p2, err, sizeof err);
+    CHECK(r && puddle_identity_roll_commit(a, r, err, sizeof err) == 0);
+    size_t chain_len, keys_len;
+    char *chain = puddle_identity_chain(a, &chain_len);
+    char *keys = file_text(d, "keys", &keys_len);
+    unsigned char sp[32], ep[32];
+    uint64_t seq;
+    puddle_identity_public(a, sp, ep, &seq);
+    CHECK(seq == 2 && lines(chain) == 3);
+    puddle_identity_close(a);
+
+    /* everything on the machine is lost */
+    rm_dir(d_identity);
+    CHECK(!puddle_identity_exists(d));
+
+    /* the wrong phrases make nothing, and say why */
+    char stranger[PUDDLE_PHRASE_LEN + 1], typo[PUDDLE_PHRASE_LEN + 1];
+    puddle_phrase_generate(stranger);
+    snprintf(typo, sizeof typo, "%s", p2);
+    typo[1] = (typo[1] == '0') ? '1' : '0';
+    CHECK(puddle_identity_restore(d, p1, chain, chain_len, err, sizeof err) == NULL && strstr(err, "older recovery phrase"));
+    CHECK(puddle_identity_restore(d, p0, chain, chain_len, err, sizeof err) == NULL && strstr(err, "older recovery phrase"));
+    CHECK(puddle_identity_restore(d, stranger, chain, chain_len, err, sizeof err) == NULL && strstr(err, "doesn't belong to this chain"));
+    CHECK(puddle_identity_restore(d, typo, chain, chain_len, err, sizeof err) == NULL && strstr(err, "typo"));
+    CHECK(puddle_identity_restore(d, "hello", chain, chain_len, err, sizeof err) == NULL && strstr(err, "doesn't look like"));
+    CHECK(puddle_identity_restore(d, "", chain, chain_len, err, sizeof err) == NULL);
+    CHECK(puddle_identity_restore(d, NULL, chain, chain_len, err, sizeof err) == NULL);
+    CHECK(!puddle_identity_exists(d)); /* none of that made anything */
+
+    /* the wrong chains */
+    CHECK(puddle_identity_restore(d, p2, "", 0, err, sizeof err) == NULL && strstr(err, "not usable"));
+    CHECK(puddle_identity_restore(d, p2, NULL, 0, err, sizeof err) == NULL);
+    CHECK(puddle_identity_restore(d, p2, "garbage\n", 8, err, sizeof err) == NULL && strstr(err, "not usable"));
+    char t[6000];
+    snprintf(t, sizeof t, "%s", chain);
+    char *ts = strstr(strchr(t, '\n') + 1, "\"ts\":");             /* altered after signing */
+    ts[5] = (ts[5] == '1') ? '2' : '1';
+    CHECK(puddle_identity_restore(d, p2, t, strlen(t), err, sizeof err) == NULL && strstr(err, "not usable"));
+    /* a copy that is behind (the newest record missing): the phrase can't be matched to it, and nothing can fix that */
+    const char *second_nl = strchr(strchr(chain, '\n') + 1, '\n');
+    CHECK(puddle_identity_restore(d, p2, chain, (size_t)(second_nl + 1 - chain), err, sizeof err) == NULL &&
+          strstr(err, "out of date"));
+    /* another identity's chain */
+    char po[PUDDLE_PHRASE_LEN + 1];
+    puddle_identity *o = create_ok(dir_for("rst-other"), po, err, sizeof err);
+    size_t ol;
+    char *ochain = puddle_identity_chain(o, &ol);
+    puddle_identity_close(o);
+    CHECK(puddle_identity_restore(d, p2, ochain, ol, err, sizeof err) == NULL && strstr(err, "doesn't belong"));
+    CHECK(puddle_identity_restore(d, po, chain, chain_len, err, sizeof err) == NULL && strstr(err, "doesn't belong"));
+    free(ochain);
+    CHECK(!puddle_identity_exists(d));
+
+    /* the right phrase and chain: the very same identity comes back */
+    puddle_identity *x = puddle_identity_restore(d, p2, chain, chain_len, err, sizeof err);
+    if (!x) fprintf(stderr, "restore: %s\n", err);
+    CHECK(x != NULL);
+    if (x) {
+        char xid[53];
+        unsigned char xsp[32], xep[32];
+        uint64_t xseq;
+        puddle_identity_id(x, xid);
+        puddle_identity_public(x, xsp, xep, &xseq);
+        CHECK(strcmp(xid, id) == 0 && xseq == 2 && memcmp(xsp, sp, 32) == 0 && memcmp(xep, ep, 32) == 0);
+        size_t cl, kl;
+        char *c = puddle_identity_chain(x, &cl);
+        char *k = file_text(d, "keys", &kl);
+        CHECK(cl == chain_len && memcmp(c, chain, cl) == 0);          /* the chain is exactly what was given */
+        CHECK(kl == keys_len && memcmp(k, keys, kl) == 0);            /* and the keys file is byte-for-byte what it was */
+        free(c); free(k);
+        CHECK(!puddle_identity_unconfirmed(d));                       /* nothing new was shown, so nothing to confirm */
+        unsigned char sig[64];
+        CHECK(puddle_identity_sign(x, "same me", 7, sig) == 0 && puddle_verify_signature(sp, "same me", 7, sig));
+        puddle_identity_close(x);
+
+        /* it is a full identity: it opens, and it can roll again with the phrase it was restored from */
+        x = puddle_identity_open(d, err, sizeof err);
+        CHECK(x != NULL);
+        puddle_roll *rr = puddle_identity_roll_prepare(x, p2, p3, err, sizeof err);
+        CHECK(rr && puddle_identity_roll_commit(x, rr, err, sizeof err) == 0);
+        puddle_identity_public(x, NULL, NULL, &xseq);
+        CHECK(xseq == 3);
+        puddle_identity_close(x);
+    }
+
+    /* never over an identity that is there */
+    CHECK(puddle_identity_restore(d, p2, chain, chain_len, err, sizeof err) == NULL && strstr(err, "already exists"));
+
+    /* the secret is not left lying around */
+    unsigned char seed2[32];
+    puddle_phrase_seed(p2, seed2);
+    char seed_hex[65], bare[40];
+    puddle_hex_encode(seed2, 32, seed_hex);
+    size_t o2 = 0;
+    for (const char *q = p2; *q; q++) if (*q != '-') bare[o2++] = *q;
+    bare[o2] = '\0';
+    nneedles = 0; needles[nneedles++] = p2; needles[nneedles++] = bare; needles[nneedles++] = seed_hex;
+    found_in_files = 0;
+    nftw(d, scan_cb, 16, FTW_PHYS);
+    CHECK(found_in_files == 0);
+
+    /* a chain copy as it might arrive: other line endings, blank lines, no final newline */
+    char *m = messy(chain);
+    rm_dir(d_identity);
+    x = puddle_identity_restore(d, p2, m, strlen(m), err, sizeof err);
+    CHECK(x != NULL);
+    if (x) {
+        size_t cl;
+        char *c = puddle_identity_chain(x, &cl);
+        CHECK(cl == chain_len && memcmp(c, chain, cl) == 0);          /* tidied back to the canonical form */
+        free(c);
+        puddle_identity_close(x);
+    }
+    free(m);
+
+    /* an identity that never changed its keys comes back too */
+    char d0[600], d0_identity[700];
+    snprintf(d0, sizeof d0, "%s", dir_for("rst0"));
+    snprintf(d0_identity, sizeof d0_identity, "%s/identity", d0);
+    char q0[PUDDLE_PHRASE_LEN + 1];
+    a = create_ok(d0, q0, err, sizeof err);
+    size_t c0l, k0l;
+    char *c0 = puddle_identity_chain(a, &c0l);
+    char *k0 = file_text(d0, "keys", &k0l);
+    puddle_identity_close(a);
+    rm_dir(d0_identity);
+    x = puddle_identity_restore(d0, q0, c0, c0l, err, sizeof err);
+    CHECK(x != NULL);
+    if (x) {
+        size_t kl;
+        char *k = file_text(d0, "keys", &kl);
+        CHECK(kl == k0l && memcmp(k, k0, kl) == 0);
+        free(k);
+        puddle_identity_close(x);
+    }
+    free(c0); free(k0);
+
+    free(chain); free(keys); free(chain0);
+}
+
 /* two processes making an identity at once: exactly one wins, and what remains is whole */
 static void test_create_race(void)
 {
@@ -917,9 +1142,11 @@ int main(void)
     test_chain_verify();
     test_damaged_and_old();
     test_unconfirmed();
+    test_forged_inception();
     test_rotation_rules();
     test_roll_flow();
     test_interrupted_roll();
+    test_restore();
     test_create_race();
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
     return failures ? 1 : 0;

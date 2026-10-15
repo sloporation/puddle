@@ -16,10 +16,14 @@ owner once when the identity is made and never stored or logged (`phrase.c`). Th
 encryption keys are the *daily keys*. They live on this machine in `<data_dir>/identity/keys`
 (mode 0600), and are what a phone is given. The roll key exists only while the phrase is typed in.
 
-**User id = `base32(SHA-256(genesis signing public key))`**, where the genesis key is the very
-first one. The id never changes, even when keys roll (below). It is self-certifying: given an id
-and the identity's key chain, anyone can check they belong together, with no registry or server.
-It does not depend on an IP address, a hostname or a TLS certificate, so it survives the user moving.
+**User id = `base32(SHA-256(first signing public key ‖ SHA-256(first roll public key)))`**, taken from the very
+first generation. The id never changes, even when keys roll (below). It is self-certifying: given an id and
+the identity's key chain, anyone can check they belong together, with no registry or server. It does not
+depend on an IP address, a hostname or a TLS certificate, so it survives the user moving.
+
+The roll key's hash is part of the id on purpose. Someone who steals only the daily keys can sign a *different*
+first record (with a roll key of their own), but its id comes out different, so a link's id rejects it. With the
+id covering only the signing key, that forgery would have been a valid chain for the victim's id.
 
 ## Devices (phones)
 
@@ -78,6 +82,22 @@ a new phrase. Authority to roll comes from a **roll key**, derived from the phra
 Built in `src/core/identity.c`; run it with `puddled --roll`. If it is interrupted, the next start finishes it:
 the signed record and the new keys are written together to a journal before either real file changes.
 
+## Restoring on a new computer
+
+Built in `src/core/identity.c` (`puddle_identity_restore`) and run with `puddled --restore --chain FILE`.
+It needs two things:
+
+- the owner's **latest** recovery phrase, the one written down at the most recent roll (or at the start, if
+  they never rolled). It re-derives that generation's daily keys and roll key.
+- a copy of the **chain**. It is not secret: it is `identity/chain.jsonl`, and it is worth keeping a copy
+  somewhere. If none exists, a friend's Puddle holds one (step 3.6 will fetch it).
+
+Everything is checked before anything is made: the chain must be valid, and the phrase's keys must be exactly the
+ones its newest record announces and commits to. An **older** phrase is refused and recognised as such (its keys
+were retired by a later roll). A chain that is out of date, or belongs to someone else, is refused too. The
+restored files are byte-for-byte what they were, and no new phrase is made. If the old computer might be in
+someone else's hands, roll the keys straight afterwards.
+
 ## Transport
 
 TLS stays self-signed and only provides confidentiality on the wire. Servers authenticate each other
@@ -92,7 +112,7 @@ events are dropped.
 ## Becoming contacts (the handshake)
 
 1. A gets B's **invite**: `puddle://<B-user-id>@<address>` (link, QR code, or pasted). The id pins
-   B's genesis key; a man-in-the-middle cannot substitute another identity without changing the id.
+   B's first keys; a man-in-the-middle cannot substitute another identity without changing the id.
 2. A sends B a signed **contact request**: A's key chain, address and display name.
 3. B's user accepts. B replies signed, with B's key chain.
 4. Each stores the other's chain and address. Optionally, both compare a short fingerprint out of band.

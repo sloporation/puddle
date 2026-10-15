@@ -35,6 +35,14 @@ key with a passphrase or the OS keychain; and search. Search inside one chat is 
 is decrypted in memory. Searching across all chats means decrypting them all or keeping an index, and
 an on-disk index is plaintext unless it is encrypted too.
 
+## 4. Forked histories after a leaked old phrase
+
+A leaked *old* phrase can't take over the real chain, but it does hold that generation's daily keys and roll key,
+so its holder could build an alternative chain that branches from the same earlier record. Peers who already
+hold the genuine chain keep it and reject the fork; someone who has seen only the fork has no way to tell. A new
+contact normally gets the chain straight from the owner's Puddle, which is what protects them. Stronger answers
+(witnesses, or friends comparing the chains they hold) are for later.
+
 ## Carried over from earlier
 
 - Name for the group-only connection (a scoped stream). Options floated: Brook, Rill, Tributary.

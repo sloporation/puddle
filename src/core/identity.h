@@ -38,6 +38,17 @@ int puddle_identity_exists(const char *data_dir);
 puddle_identity *puddle_identity_create(const char *data_dir, char phrase_out[PUDDLE_PHRASE_LEN + 1],
                                         char *err, size_t errlen);
 
+/* Rebuild an identity on a new machine (the old one lost or replaced) from the owner's **latest** recovery
+ * phrase and a copy of the chain, which is not secret: it is `identity/chain.jsonl` from a backup, or
+ * what a friend's Puddle holds. The chain must be valid, and the phrase must be the one its newest record
+ * announces: that phrase is what the daily keys and roll key derive from. Nothing is made if anything is
+ * wrong. No new phrase is made, and no confirmation is needed, because the owner already has theirs.
+ *
+ * An older phrase is refused with a message saying so: its keys were retired by a later roll. Refuses if
+ * an identity already exists. NULL + message in `err` on failure. */
+puddle_identity *puddle_identity_restore(const char *data_dir, const char *phrase, const char *chain_text,
+                                         size_t chain_len, char *err, size_t errlen);
+
 /* Is there an identity whose phrase was shown but never confirmed (the owner quit part way)? 1 or 0. */
 int puddle_identity_unconfirmed(const char *data_dir);
 

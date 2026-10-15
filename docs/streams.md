@@ -41,7 +41,7 @@ name, its policy, or whether it is even a Puddle. The one request it must accept
 doesn't know is a request for a stream, and its answer to that is always the same.
 
 1. The owner gets a **link**: `puddle://<user id>@<address>`, optionally `?invite=<token>`. The id is
-   the hash of the other Puddle's first signing key, and is what their answer will be checked against.
+   a hash of the other Puddle's first keys, and is what their answer will be checked against.
 2. A's Puddle sends `POST /stream/v1/access` straight to that address: its own key chain, address, a
    profile (the one the owner chose), a short note (up to 500 characters), and the invite token if
    there is one, signed with its key. It records `pending_out`. Nothing is fetched first.
@@ -144,7 +144,8 @@ Built in `src/core/identity.c` and `phrase.c`; the plan and status are in `roadm
 
 **Creation.** On first run the Puddle makes a **recovery phrase** (eight groups of four characters),
 shows it to the owner once, and derives three keys from it: an Ed25519 signing key, an X25519
-encryption key, and an Ed25519 **roll key**. The user id is the base32 hash of the first signing key.
+encryption key, and an Ed25519 **roll key**. The user id is the base32 hash of the first signing key together
+with the commitment to the first roll key.
 Only the two daily keys are kept, in `<data_dir>/identity/keys` (mode 0600). The roll key and the phrase
 are never stored or logged. The first record in `chain.jsonl` is signed by the signing key and commits
 to the hash of the roll key.

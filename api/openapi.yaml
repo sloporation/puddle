@@ -759,7 +759,7 @@ components:
 
     UserId:
       type: string
-      description: Hash of the user's key, base32, lowercase
+      description: Hash of the user's first signing key and first roll-key commitment, base32, lowercase
       pattern: "^[a-z2-7]{52}$"
     EventId:
       type: string
