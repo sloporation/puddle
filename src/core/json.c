@@ -1,5 +1,6 @@
 #include "json.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define MAX_DEPTH 64
@@ -299,4 +300,249 @@ int puddle_json_member(const char *json, size_t len, const char *key, puddle_spa
         return 1;
     *val = result;
     return 0;
+}
+
+/* ---- writer ---- */
+
+void puddle_jw_init(puddle_jw *w, char *buf, size_t cap)
+{
+    memset(w, 0, sizeof *w);
+    w->buf = buf;
+    w->cap = cap;
+    if (cap == 0)
+        w->err = 1;
+}
+
+static void put(puddle_jw *w, const char *s, size_t n)
+{
+    if (w->err)
+        return;
+    if (n >= w->cap - w->len) { /* keeps one byte for the NUL */
+        w->err = 1;
+        return;
+    }
+    memcpy(w->buf + w->len, s, n);
+    w->len += n;
+}
+
+static void putc_(puddle_jw *w, char c) { put(w, &c, 1); }
+
+/* what comes before a value: nothing, or a comma, and the check that a value is allowed here */
+static void before_value(puddle_jw *w)
+{
+    if (w->err)
+        return;
+    if (w->depth == 0) {
+        if (w->done)
+            w->err = 1;
+        return;
+    }
+    int top = w->depth - 1;
+    if (w->kind[top] == 'o') {
+        if (!w->key_pending) {
+            w->err = 1;
+            return;
+        }
+        w->key_pending = 0; /* the comma came with the key */
+    } else {
+        if (w->count[top])
+            putc_(w, ',');
+        w->count[top] = 1;
+    }
+}
+
+static void after_value(puddle_jw *w)
+{
+    if (w->depth == 0)
+        w->done = 1;
+}
+
+static void open_(puddle_jw *w, char kind)
+{
+    before_value(w);
+    if (w->err)
+        return;
+    if (w->depth >= 64) {
+        w->err = 1;
+        return;
+    }
+    putc_(w, kind == 'o' ? '{' : '[');
+    w->kind[w->depth] = kind;
+    w->count[w->depth] = 0;
+    w->depth++;
+}
+
+static void close_(puddle_jw *w, char kind)
+{
+    if (w->err)
+        return;
+    if (w->depth == 0 || w->kind[w->depth - 1] != kind || w->key_pending) {
+        w->err = 1;
+        return;
+    }
+    putc_(w, kind == 'o' ? '}' : ']');
+    w->depth--;
+    after_value(w);
+}
+
+void puddle_jw_object(puddle_jw *w) { open_(w, 'o'); }
+void puddle_jw_array(puddle_jw *w) { open_(w, 'a'); }
+void puddle_jw_end_object(puddle_jw *w) { close_(w, 'o'); }
+void puddle_jw_end_array(puddle_jw *w) { close_(w, 'a'); }
+
+/* Length of the valid UTF-8 sequence at s (n bytes left), or 0 if it is not valid: no overlong forms, no
+ * surrogates, nothing above U+10FFFF. */
+static size_t utf8_len(const unsigned char *s, size_t n)
+{
+    if (s[0] < 0x80)
+        return 1;
+    if (s[0] >= 0xC2 && s[0] <= 0xDF)
+        return n >= 2 && (s[1] & 0xC0) == 0x80 ? 2 : 0;
+    if (s[0] >= 0xE0 && s[0] <= 0xEF) {
+        if (n < 3 || (s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80)
+            return 0;
+        if (s[0] == 0xE0 && s[1] < 0xA0)
+            return 0; /* overlong */
+        if (s[0] == 0xED && s[1] >= 0xA0)
+            return 0; /* surrogate */
+        return 3;
+    }
+    if (s[0] >= 0xF0 && s[0] <= 0xF4) {
+        if (n < 4 || (s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80 || (s[3] & 0xC0) != 0x80)
+            return 0;
+        if (s[0] == 0xF0 && s[1] < 0x90)
+            return 0; /* overlong */
+        if (s[0] == 0xF4 && s[1] >= 0x90)
+            return 0; /* above U+10FFFF */
+        return 4;
+    }
+    return 0;
+}
+
+static void quoted(puddle_jw *w, const char *s, size_t n)
+{
+    putc_(w, '"');
+    const unsigned char *u = (const unsigned char *)s;
+    size_t i = 0;
+    while (i < n && !w->err) {
+        unsigned char c = u[i];
+        if (c == '"' || c == '\\') {
+            char e[2] = {'\\', (char)c};
+            put(w, e, 2);
+            i++;
+        } else if (c < 0x20) {
+            char e[8];
+            switch (c) {
+            case '\n': strcpy(e, "\\n"); break;
+            case '\r': strcpy(e, "\\r"); break;
+            case '\t': strcpy(e, "\\t"); break;
+            case '\b': strcpy(e, "\\b"); break;
+            case '\f': strcpy(e, "\\f"); break;
+            default: snprintf(e, sizeof e, "\\u%04x", c); break;
+            }
+            put(w, e, strlen(e));
+            i++;
+        } else if (c < 0x80) {
+            putc_(w, (char)c);
+            i++;
+        } else {
+            size_t k = utf8_len(u + i, n - i);
+            if (k) {
+                put(w, s + i, k);
+                i += k;
+            } else {
+                put(w, "\xEF\xBF\xBD", 3); /* U+FFFD, in place of the one bad byte */
+                i++;
+            }
+        }
+    }
+    putc_(w, '"');
+}
+
+void puddle_jw_key(puddle_jw *w, const char *key)
+{
+    if (w->err)
+        return;
+    if (w->depth == 0 || w->kind[w->depth - 1] != 'o' || w->key_pending) {
+        w->err = 1;
+        return;
+    }
+    int top = w->depth - 1;
+    if (w->count[top])
+        putc_(w, ',');
+    w->count[top] = 1;
+    quoted(w, key, strlen(key));
+    putc_(w, ':');
+    w->key_pending = 1;
+}
+
+void puddle_jw_string_n(puddle_jw *w, const char *s, size_t n)
+{
+    before_value(w);
+    quoted(w, s, n);
+    after_value(w);
+}
+
+void puddle_jw_string(puddle_jw *w, const char *s)
+{
+    if (!s) {
+        puddle_jw_null(w);
+        return;
+    }
+    puddle_jw_string_n(w, s, strlen(s));
+}
+
+void puddle_jw_int(puddle_jw *w, int64_t v)
+{
+    char t[32];
+    snprintf(t, sizeof t, "%lld", (long long)v);
+    before_value(w);
+    put(w, t, strlen(t));
+    after_value(w);
+}
+
+void puddle_jw_uint(puddle_jw *w, uint64_t v)
+{
+    char t[32];
+    snprintf(t, sizeof t, "%llu", (unsigned long long)v);
+    before_value(w);
+    put(w, t, strlen(t));
+    after_value(w);
+}
+
+void puddle_jw_bool(puddle_jw *w, int v)
+{
+    before_value(w);
+    put(w, v ? "true" : "false", v ? 4 : 5);
+    after_value(w);
+}
+
+void puddle_jw_null(puddle_jw *w)
+{
+    before_value(w);
+    put(w, "null", 4);
+    after_value(w);
+}
+
+void puddle_jw_raw(puddle_jw *w, const char *json, size_t n)
+{
+    if (n == 0) {
+        w->err = 1;
+        return;
+    }
+    before_value(w);
+    put(w, json, n);
+    after_value(w);
+}
+
+void puddle_jw_str(puddle_jw *w, const char *key, const char *s) { puddle_jw_key(w, key); puddle_jw_string(w, s); }
+void puddle_jw_num(puddle_jw *w, const char *key, int64_t v) { puddle_jw_key(w, key); puddle_jw_int(w, v); }
+void puddle_jw_flag(puddle_jw *w, const char *key, int v) { puddle_jw_key(w, key); puddle_jw_bool(w, v); }
+
+size_t puddle_jw_finish(puddle_jw *w)
+{
+    if (w->err || w->depth != 0 || !w->done)
+        return 0;
+    w->buf[w->len] = '\0';
+    return w->len;
 }

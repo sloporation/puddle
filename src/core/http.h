@@ -13,10 +13,14 @@ typedef struct {
     char target[1100];  /* path and query exactly as sent (what request signatures cover) */
     char authorization[512];   /* "" if absent */
     char signature[1024];      /* X-Puddle-Signature, "" if absent */
+    size_t content_length;     /* 0 if absent */
+    int expect_continue;       /* the client asked "100-continue" before sending its body */
 } puddle_request;
 
-/* Parse the request line and the two headers we use of a (complete) header block. A repeated
- * Authorization or X-Puddle-Signature, or one that is too long, is malformed. 0 = ok, -1 = malformed. */
+/* Parse the request line and the headers we use of a (complete) header block. Anything that could make two
+ * parsers disagree about where a request ends is malformed: a repeated Authorization, X-Puddle-Signature or
+ * Content-Length, a Content-Length that is not plain digits, any Transfer-Encoding (chunked bodies are not
+ * supported), or an Expect other than 100-continue. 0 = ok, -1 = malformed. */
 int puddle_http_parse(const char *buf, size_t len, puddle_request *req);
 
 /* Build a full HTTP/1.1 response for `req` (NULL = malformed) into `out`.

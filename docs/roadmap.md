@@ -102,9 +102,25 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
 
 ## Phase 2: Server plumbing
 
-- [ ] **2.1 Read request bodies.** `Content-Length`, a size cap per route, a deadline; the signature
-  covers a hash of the body, so it must be read first.
-- [ ] **2.2 JSON writer.** Escaping and building objects/arrays; handlers need it for every response.
+- [x] **2.1 Read request bodies.** `src/core/serve.c`, with the header parsing in `http.c`. Serving one request is
+  now its own module over an abstract connection (TLS in the server, a scripted fake in `tests/serve_test.c`), which is
+  what makes the awkward cases testable. The rules: **the limit is decided before a body is read**, from the headers
+  alone, and capped at 4 MiB whatever a route asks for, so memory is bounded by a number we choose and not by the
+  sender. A body over the limit is **not read**: the owner gets `413`, anyone else gets exactly the `404` an unknown
+  path gets, so a stranger can't learn which routes take bodies from the size at which they stop. The whole request has
+  a deadline, so a body (or headers) trickled in slowly is cut off with `408`. `Expect: 100-continue` is honoured, but
+  only for a body that will be accepted. **Anything that could make two parsers disagree about where a request ends is
+  refused with `400`:** a repeated or non-numeric `Content-Length`, any `Transfer-Encoding` (chunked is not supported), a
+  body on a GET or HEAD, an unknown `Expect`. One request per connection; anything after the first is ignored. Bodies
+  are read exactly, binary-safe (NULs and a blank line inside a body are fine), and NUL-terminated for convenience.
+  **No route takes a body yet**, so the limit function returns 0 until the route table (2.3) supplies real ones; the
+  mechanism is exercised by the tests and by `curl` against the real server. Tests also now run with the allocator
+  poisoning new and freed memory, which exposed one missed check (a body that wasn't NUL-terminated).
+- [x] **2.2 JSON writer.** Escaping and building objects/arrays; handlers need it for every response.
+  Built in `src/core/json.c` (`puddle_jw_*`): writes into the caller's buffer, no allocation, commas and
+  quoting automatic. Misuse (value without key, unbalanced ends, depth over 64, full buffer) is remembered
+  and reported once by `puddle_jw_finish`, which returns 0. Strings are always valid UTF-8 out: bad bytes
+  become U+FFFD, control characters are escaped, so a peer's display name can't break a response.
 - [ ] **2.3 Route table and handler context.** Method + path → handler, each with access to the store,
   identity, profiles and (later) streams, and one of three auth kinds: owner token, signed peer, or
   chain-proven (stream requests and key-roll pushes). One replay memory per Puddle. `/health` moves onto it.

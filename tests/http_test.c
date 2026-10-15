@@ -75,5 +75,16 @@ int main(void)
     snprintf(raw, sizeof raw, "GET / HTTP/1.1\r\nX-Other: %s\r\n\r\n", big); /* other headers may be long */
     CHECK(parse(raw, &req) == 0);
 
+    /* body headers */
+    CHECK(parse("POST /x HTTP/1.1\r\nContent-Length: 42\r\n\r\n", &req) == 0 && req.content_length == 42 && !req.expect_continue);
+    CHECK(parse("POST /x HTTP/1.1\r\ncontent-length:  7 \r\nEXPECT: 100-Continue\r\n\r\n", &req) == 0 && req.content_length == 7 && req.expect_continue);
+    CHECK(parse("GET /x HTTP/1.1\r\n\r\n", &req) == 0 && req.content_length == 0 && !req.expect_continue);
+    CHECK(parse("POST /x HTTP/1.1\r\nContent-Length: 4294967295\r\n\r\n", &req) == 0 && req.content_length == 4294967295u);
+    CHECK(parse("POST /x HTTP/1.1\r\nContent-Length: 4294967296\r\n\r\n", &req) == -1);
+    CHECK(parse("POST /x HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n", &req) == -1);
+    CHECK(parse("POST /x HTTP/1.1\r\nContent-Length: 1_0\r\n\r\n", &req) == -1);
+    CHECK(parse("POST /x HTTP/1.1\r\nTransfer-Encoding: identity\r\n\r\n", &req) == -1);
+    CHECK(parse("POST /x HTTP/1.1\r\nExpect: 100-continue\r\nExpect: 100-continue\r\n\r\n", &req) == -1);
+
     return failures ? 1 : 0;
 }

@@ -28,6 +28,43 @@ int puddle_json_member(const char *json, size_t len, const char *key, puddle_spa
 int puddle_json_int64(puddle_span v, int64_t *out);
 int puddle_json_string(puddle_span v, char *out, size_t cap); /* unescaped UTF-8, NUL-terminated */
 
+/* Writer. Builds one JSON value into a caller's buffer, with no allocation. Commas, quotes and escaping are
+ * handled here, so a handler only says what goes in. Mistakes (a value with no key in an object, a key in an
+ * array, unbalanced ends, nesting past 64, a full buffer) are remembered, and puddle_jw_finish reports them
+ * once, so a handler checks one result rather than every call.
+ *
+ * Strings are written as valid UTF-8 whatever they hold: a byte that is not valid UTF-8 (a peer's display
+ * name can contain anything) becomes U+FFFD, and control characters are escaped. */
+typedef struct {
+    char *buf;
+    size_t cap, len;
+    int err;
+    int depth;
+    int key_pending, done;
+    char kind[64];  /* 'o' or 'a' per level */
+    char count[64]; /* 0 = empty so far, 1 = has members */
+} puddle_jw;
+
+void puddle_jw_init(puddle_jw *w, char *buf, size_t cap);
+void puddle_jw_object(puddle_jw *w); /* open {  (as a value) */
+void puddle_jw_end_object(puddle_jw *w);
+void puddle_jw_array(puddle_jw *w);  /* open [  (as a value) */
+void puddle_jw_end_array(puddle_jw *w);
+void puddle_jw_key(puddle_jw *w, const char *key); /* inside an object; the next call is its value */
+void puddle_jw_string(puddle_jw *w, const char *s);
+void puddle_jw_string_n(puddle_jw *w, const char *s, size_t n);
+void puddle_jw_int(puddle_jw *w, int64_t v);
+void puddle_jw_uint(puddle_jw *w, uint64_t v);
+void puddle_jw_bool(puddle_jw *w, int v);
+void puddle_jw_null(puddle_jw *w);
+void puddle_jw_raw(puddle_jw *w, const char *json, size_t n); /* already-valid JSON, e.g. a stored event: the caller vouches for it */
+/* Shorthand for key + value. */
+void puddle_jw_str(puddle_jw *w, const char *key, const char *s);
+void puddle_jw_num(puddle_jw *w, const char *key, int64_t v);
+void puddle_jw_flag(puddle_jw *w, const char *key, int v);
+/* NUL-terminates and returns the length, or 0 if anything went wrong or the value is not complete. */
+size_t puddle_jw_finish(puddle_jw *w);
+
 #ifdef __cplusplus
 }
 #endif

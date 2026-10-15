@@ -11,6 +11,9 @@ info:
 
     Conventions:
     - JSON everywhere, UTF-8. Versioned under `/api/v1`; `/health` is unversioned and public.
+    - Request bodies have a size limit per route, decided from the headers before any of the body is read (4 MiB
+      at most, whatever a route allows). Over it, the owner gets `413`. `Transfer-Encoding` (chunked) is not
+      supported, and a GET or HEAD may not carry a body.
     - Only GET and POST are used. GET reads and never changes anything; POST does everything else
       (including delete and unblock, which are `.../delete` and `.../unblock`).
     - Errors use the `Error` schema.

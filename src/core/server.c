@@ -5,6 +5,7 @@
 #include "identity.h"
 #include "log.h"
 #include "profile.h"
+#include "serve.h"
 #include "store.h"
 #include "tls.h"
 
@@ -27,7 +28,6 @@
 #define MAX_CONNECTIONS 64
 #define IO_TIMEOUT_SEC 10
 #define REQUEST_DEADLINE_SEC 15
-#define REQUEST_MAX 8192
 
 struct puddle_server {
     puddle_config cfg;
@@ -219,61 +219,63 @@ void puddle_server_destroy(puddle_server *s)
     free(s);
 }
 
-static int ssl_write_all(SSL *ssl, const char *p, size_t n)
+/* TLS as a connection for puddle_http_serve(). The socket's receive timeout makes a stalled read fail with
+ * EAGAIN, which is reported as a timeout (< 0) rather than as the other side closing (0). */
+static int ssl_read_cb(void *io, void *buf, size_t cap)
 {
-    while (n) {
-        int w = SSL_write(ssl, p, (int)n);
+    SSL *ssl = io;
+    errno = 0;
+    int n = SSL_read(ssl, buf, (int)cap);
+    if (n > 0)
+        return n;
+    int e = errno;
+    if (SSL_get_error(ssl, n) == SSL_ERROR_ZERO_RETURN)
+        return 0;
+    return (e == EAGAIN || e == EWOULDBLOCK) ? -1 : 0;
+}
+
+static int ssl_write_cb(void *io, const void *buf, size_t len)
+{
+    SSL *ssl = io;
+    const char *p = buf;
+    while (len) {
+        int w = SSL_write(ssl, p, (int)len);
         if (w <= 0)
             return -1;
         p += w;
-        n -= (size_t)w;
+        len -= (size_t)w;
     }
     return 0;
 }
 
+static int owner_check_cb(void *user, const char *authorization)
+{
+    return puddle_auth_check_bearer(((puddle_server *)user)->auth, authorization);
+}
+
+/* No route takes a body yet; the table that says which do arrives with the route table (roadmap 2.3). */
+static size_t body_limit_cb(void *user, const puddle_request *req, int owner_ok)
+{
+    (void)user; (void)req; (void)owner_ok;
+    return 0;
+}
+
+static size_t route_cb(void *user, const puddle_request *req, int owner_ok, const unsigned char *body,
+                       size_t body_len, char *out, size_t cap, int *status)
+{
+    (void)user; (void)body; (void)body_len;
+    return puddle_http_route(req, owner_ok, out, cap, status);
+}
+
 static void handle_request(puddle_server *srv, SSL *ssl, const char *peer)
 {
-    char buf[REQUEST_MAX + 1];
-    char out[2048];
-    size_t len = 0;
-    int complete = 0, status = 0;
-    size_t outlen;
-    time_t deadline = time(NULL) + REQUEST_DEADLINE_SEC;
-
-    while (len < REQUEST_MAX) {
-        int n = SSL_read(ssl, buf + len, (int)(REQUEST_MAX - len));
-        if (n <= 0)
-            return; /* closed, reset or timed out before a full request */
-        len += (size_t)n;
-        buf[len] = '\0';
-        if (strstr(buf, "\r\n\r\n")) {
-            complete = 1;
-            break;
-        }
-        if (time(NULL) > deadline) {
-            status = 408;
-            outlen = puddle_http_error(408, out, sizeof out);
-            goto send;
-        }
-    }
-
-    if (!complete) {
-        status = 431;
-        outlen = puddle_http_error(431, out, sizeof out);
-        goto send;
-    }
-
-    puddle_request req;
-    int ok = puddle_http_parse(buf, len, &req) == 0;
-    int owner_ok = ok && puddle_auth_check_bearer(srv->auth, req.authorization);
-    outlen = puddle_http_route(ok ? &req : NULL, owner_ok, out, sizeof out, &status);
-    /* the owner reads this log, so say why a 404 happened; the client is told nothing */
-    puddle_log(PUDDLE_LOG_INFO, "%s %s %s [%s] -> %d", peer, ok ? req.method : "-", ok ? req.path : "-",
-               !ok ? "malformed" : owner_ok ? "owner token" : req.authorization[0] ? "wrong token" : "no token",
-               status);
-send:
-    if (outlen)
-        ssl_write_all(ssl, out, outlen);
+    puddle_http_handler h = { .owner_check = owner_check_cb, .body_limit = body_limit_cb, .route = route_cb,
+                              .user = srv, .deadline_seconds = REQUEST_DEADLINE_SEC };
+    puddle_io io = { .read = ssl_read_cb, .write = ssl_write_cb, .io = ssl };
+    puddle_serve_info info;
+    puddle_http_serve(&h, &io, &info);
+    if (info.status) /* the owner reads this log, so say why a 404 happened; the client is told nothing */
+        puddle_log(PUDDLE_LOG_INFO, "%s %s %s [%s] -> %d", peer, info.method, info.path, info.auth, info.status);
 }
 
 static void *conn_main(void *arg)

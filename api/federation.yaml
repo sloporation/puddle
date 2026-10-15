@@ -17,6 +17,8 @@ info:
 
     Conventions:
     - JSON over HTTPS, versioned under `/stream/v1`. Peers are found by the address in their link.
+    - Bodies are limited per route (4 MiB at most), decided before they are read. A request over its limit is
+      answered `404`, like anything else a stranger sends. Chunked bodies are not supported.
     - Only GET and POST are used. GET reads and never changes anything; POST does everything else.
     - **Events are sent as strings.** An event's id is the SHA-256 of its exact bytes, so `event` is the
       raw JSON text as a string, never re-serialized. See docs/storage.md.

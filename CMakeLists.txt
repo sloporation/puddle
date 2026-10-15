@@ -49,6 +49,7 @@ add_library(puddle_core STATIC
   src/core/phrase.c
   src/core/profile.c
   src/core/reqsig.c
+  src/core/serve.c
   src/core/server.c
   src/core/store.c
   src/core/tls.c
@@ -111,10 +112,12 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity auth reqsig phrase)
+foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)
+  # fill new and freed heap memory with garbage, so reading memory nobody wrote shows up as a failure
+  set_tests_properties(${t} PROPERTIES ENVIRONMENT "MallocScribble=1;MALLOC_PERTURB_=165")
 endforeach()
 
 install(FILES dist/puddled.service DESTINATION share/puddle)

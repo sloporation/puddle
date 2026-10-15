@@ -12,6 +12,7 @@ static const char *reason(int status)
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 408: return "Request Timeout";
+    case 413: return "Payload Too Large";
     case 431: return "Request Header Fields Too Large";
     default:  return "Internal Server Error";
     }
@@ -83,7 +84,7 @@ int puddle_http_parse(const char *buf, size_t len, puddle_request *req)
     /* headers: only Authorization and X-Puddle-Signature matter */
     const char *p = eol + 1;
     const char *end = buf + len;
-    int seen_auth = 0, seen_sig = 0;
+    int seen_auth = 0, seen_sig = 0, seen_len = 0, seen_expect = 0;
     while (p < end) {
         const char *le = memchr(p, '\n', (size_t)(end - p));
         if (!le)
@@ -111,6 +112,27 @@ int puddle_http_parse(const char *buf, size_t len, puddle_request *req)
             dst = req->authorization; cap = sizeof req->authorization; seen = &seen_auth;
         } else if (nl == 18 && strncasecmp(p, "X-Puddle-Signature", 18) == 0) {
             dst = req->signature; cap = sizeof req->signature; seen = &seen_sig;
+        }
+        if (nl == 14 && strncasecmp(p, "Content-Length", 14) == 0) {
+            if (seen_len || vl == 0 || vl > 10)
+                return -1;
+            unsigned long long n = 0;
+            for (size_t i = 0; i < vl; i++) {
+                if (v[i] < '0' || v[i] > '9')
+                    return -1; /* no sign, no spaces, no hex: plain digits only */
+                n = n * 10 + (unsigned)(v[i] - '0');
+            }
+            if (n > 0xFFFFFFFFULL)
+                return -1;
+            seen_len = 1;
+            req->content_length = (size_t)n;
+        } else if (nl == 17 && strncasecmp(p, "Transfer-Encoding", 17) == 0) {
+            return -1;
+        } else if (nl == 6 && strncasecmp(p, "Expect", 6) == 0) {
+            if (seen_expect || vl != 12 || strncasecmp(v, "100-continue", 12) != 0)
+                return -1;
+            seen_expect = 1;
+            req->expect_continue = 1;
         }
         if (dst) {
             if (*seen || vl >= cap)
