@@ -33,6 +33,11 @@ static const char DEFAULT_CONFIG[] =
     "# TCP port for the HTTPS listener.\n"
     "port: 8443\n"
     "\n"
+    "# The address other people use to reach you, for your link: \"203.0.113.7:8443\", \"[2001:db8::1]:8443\"\n"
+    "# or \"home.example.org:8443\". Needed when address above is \"::\" or 0.0.0.0; otherwise it defaults to\n"
+    "# address and port.\n"
+    "# advertise: 203.0.113.7:8443\n"
+    "\n"
     "# Where chats, keys and profile images are stored. Uncomment to change the platform default.\n"
     "# data_dir: /path/to/puddle-data\n"
     "\n"
@@ -345,6 +350,14 @@ int puddle_config_load(puddle_config *cfg, const char *path, char *err, size_t e
                 goto fail;
             }
             cfg->port = (uint16_t)p;
+        } else if (strcmp(key, "advertise") == 0) {
+            if (ynode_is_null(v))
+                continue;
+            if (!s || !*s || strlen(s) >= sizeof cfg->advertise || strpbrk(s, " \t/@?#")) {
+                bad(err, errlen, path, v, "advertise must look like host:port, e.g. \"203.0.113.7:8443\"");
+                goto fail;
+            }
+            snprintf(cfg->advertise, sizeof cfg->advertise, "%s", s);
         } else if (strcmp(key, "data_dir") == 0) {
             if (!s || !*s || puddle_resolve_path(cfg->dir, s, cfg->data_dir, sizeof cfg->data_dir) != 0) {
                 bad(err, errlen, path, v, "data_dir must be a folder path");

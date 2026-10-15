@@ -102,30 +102,74 @@ paths:
     post:
       tags: [identity]
       operationId: rollIdentity
-      summary: Replace your keys (optional)
+      summary: Start replacing your keys (optional), step 1 of 2
       description: |
-        Never happens on its own. Needs your current recovery phrase, which authorizes the roll; the Puddle
-        makes a **new phrase**, which must be written down before the roll is committed, and the old one
-        stops working. Sends the change to every active stream. Your user id stays the same. Use it after
-        losing a device that held your keys. **The roll itself is built (`puddled --roll`); this endpoint, in two
-        phases like the command, arrives with docs/roadmap.md 2.4, and the request and response below are the
-        old shape until then.** Streams that are offline learn at their next contact.
+        Never happens on its own. Send your **current** recovery phrase, which authorizes the roll. The
+        Puddle makes a **new phrase** and returns it; **nothing has changed yet**, and the old phrase still
+        works. Show the new phrase to the owner, and once it is written down call `identity/roll/confirm`.
+        Starting again replaces an unfinished roll; one left for 10 minutes is dropped. A phrase that is
+        mistyped, or that is an older one (spent by an earlier roll), is `400 bad_phrase` with a `message`
+        the owner can read. Use a roll after losing a device that held your keys.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [confirm]
+              required: [phrase]
               properties:
-                confirm: { type: boolean }
+                phrase: { type: string, description: "Your current recovery phrase, e.g. `K7QM-2XPD-…`" }
+      responses:
+        "200":
+          description: Prepared. The only time the new phrase is shown; it is stored nowhere.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [new_phrase, expires_in]
+                properties:
+                  new_phrase: { type: string }
+                  expires_in: { type: integer, description: Seconds to confirm in }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/identity/roll/confirm:
+    post:
+      tags: [identity]
+      operationId: confirmRoll
+      summary: The new phrase is written down, step 2 of 2
+      description: |
+        Commits the roll started by `identity/roll`: the keys are replaced, the old private key is deleted
+        from this computer, and from now on only the new phrase counts. Your user id does not change.
+        Sending the new keys to every active stream arrives with the streams (docs/roadmap.md, phase 4).
+        `409 no_roll_pending` if none was started, it was cancelled, or it timed out.
       responses:
         "200":
           description: Rolled
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Identity" }
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: No roll waiting to be confirmed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/identity/roll/cancel:
+    post:
+      tags: [identity]
+      operationId: cancelRoll
+      summary: Keep the old keys
+      description: Drops a started roll. Harmless if none is waiting.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cancelled]
+                properties:
+                  cancelled: { type: boolean, description: False if there was nothing to cancel }
 
   # --- profiles ----------------------------------------------------------------
   /api/v1/profile:
@@ -845,8 +889,8 @@ components:
           description: Your default profile
           $ref: "#/components/schemas/OwnProfile"
         link:
-          type: string
-          description: Share this so others can request a stream, `puddle://<user id>@<address>`
+          type: [string, "null"]
+          description: Share this so others can request a stream, `puddle://<user id>@<address>`; `null` when the address isn't known (see Identity)
           example: puddle://ab…@203.0.113.7:8443
 
     AccessPolicy:
@@ -867,8 +911,10 @@ components:
       properties:
         id: { $ref: "#/components/schemas/UserId" }
         link:
-          type: string
-          description: Share this to be asked for a stream
+          type: [string, "null"]
+          description: |
+            Share this to be asked for a stream. `null` while the Puddle listens on every interface and has no
+            `advertise:` address in its config, because then it can't tell which address others should use.
         seq:
           type: integer
           minimum: 0

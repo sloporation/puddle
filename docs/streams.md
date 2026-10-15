@@ -7,7 +7,7 @@ Puddles call on each other).
 
 Built so far: the identity, its recovery phrase and rolling (`src/core/identity.c`), and request
 signing and checking (`src/core/reqsig.c`: Alice's side signs, Bob's side runs the checks below in
-order, with a bounded nonce memory). Everything else here is design.
+order, with a bounded nonce memory), and the route table that applies them (`src/core/router.c`). Everything else here is design.
 
 ## What each side keeps
 

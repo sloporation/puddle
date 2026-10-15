@@ -71,6 +71,16 @@ int main(void)
     CHECK(puddle_config_load(&c, path, err, sizeof err) == -1 && strstr(err, "quotes"));
     write_conf("port: [unclosed\naddress: 127.0.0.1\n"); /* the hint only appears for IPv6-looking addresses */
     CHECK(puddle_config_load(&c, path, err, sizeof err) == -1 && !strstr(err, "quotes"));
+    write_conf("advertise: 203.0.113.7:8443\n");
+    CHECK(puddle_config_load(&c, path, err, sizeof err) == 0 && strcmp(c.advertise, "203.0.113.7:8443") == 0);
+    write_conf("advertise: \"[2001:db8::1]:8443\"\n");
+    CHECK(puddle_config_load(&c, path, err, sizeof err) == 0 && strcmp(c.advertise, "[2001:db8::1]:8443") == 0);
+    write_conf("port: 8443\n");
+    CHECK(puddle_config_load(&c, path, err, sizeof err) == 0 && c.advertise[0] == '\0');
+    write_conf("advertise: \"a b:1\"\n");
+    CHECK(puddle_config_load(&c, path, err, sizeof err) == -1 && strstr(err, "advertise"));
+    write_conf("advertise: \"puddle://x@y\"\n");
+    CHECK(puddle_config_load(&c, path, err, sizeof err) == -1 && strstr(err, "advertise"));
     write_conf("port: 70000\n");
     CHECK(puddle_config_load(&c, path, err, sizeof err) == -1 && strstr(err, "port"));
     write_conf("port: abc\n");

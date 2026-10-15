@@ -1,0 +1,150 @@
+#include "router.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+#define BODY_BUF 28000 /* what a handler may write; the rest of the 32 KB response is headers */
+
+static int64_t clock_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static const puddle_route *find(const puddle_router *r, const char *method, const char *path)
+{
+    for (size_t i = 0; i < r->count; i++)
+        if (!strcmp(r->routes[i].path, path) && !strcmp(r->routes[i].method, method))
+            return &r->routes[i];
+    return NULL;
+}
+
+size_t puddle_router_body_limit(const puddle_router *r, const puddle_request *req, int owner_ok)
+{
+    const puddle_route *rt = find(r, req->method, req->path);
+    if (!rt || (rt->auth == PUDDLE_AUTH_OWNER && !owner_ok))
+        return 0;
+    return rt->body_max;
+}
+
+int puddle_fail(puddle_jw *w, int status, const char *code)
+{
+    puddle_jw_object(w);
+    puddle_jw_str(w, "error", code);
+    puddle_jw_end_object(w);
+    return status;
+}
+
+static int no_peer(void *u, const char *a, const char *b, unsigned char c[32])
+{
+    (void)u; (void)a; (void)b; (void)c;
+    return 0;
+}
+
+typedef struct {
+    puddle_ctx *ctx;
+    const puddle_route *route;
+    const unsigned char *body;
+    size_t len;
+} chain_look;
+
+static int chain_lookup(void *u, const char *sender, const char *kid, unsigned char pub[32])
+{
+    chain_look *c = u;
+    return c->route->chain_key && c->route->chain_key(c->ctx, c->body, c->len, sender, kid, pub);
+}
+
+static size_t not_found(char *out, size_t cap, int *status)
+{
+    *status = 404;
+    return puddle_http_error(404, out, cap);
+}
+
+size_t puddle_router_handle(const puddle_router *r, const puddle_request *req, int owner_ok,
+                            const unsigned char *body, size_t body_len, char *out, size_t cap, int *status)
+{
+    char json[BODY_BUF];
+    puddle_jw w;
+    puddle_ctx *ctx = r->ctx;
+    const puddle_route *rt = find(r, req->method, req->path);
+
+    if (!rt) {
+        /* The owner is told when a path exists but not for that method; anyone else learns nothing. */
+        if (owner_ok) {
+            char allow[64] = "";
+            for (size_t i = 0; i < r->count; i++)
+                if (!strcmp(r->routes[i].path, req->path) && r->routes[i].auth == PUDDLE_AUTH_OWNER &&
+                    strlen(allow) + strlen(r->routes[i].method) + 4 < sizeof allow)
+                    snprintf(allow + strlen(allow), sizeof allow - strlen(allow), "%s%s", *allow ? ", " : "",
+                             r->routes[i].method);
+            if (*allow) {
+                char hdr[96];
+                snprintf(hdr, sizeof hdr, "Allow: %s\r\n", allow);
+                *status = 405;
+                return puddle_http_response(405, hdr, "{\"error\":\"Method Not Allowed\"}", 29, out, cap);
+            }
+        }
+        return not_found(out, cap, status);
+    }
+    if (body_len > rt->body_max)
+        return not_found(out, cap, status); /* the server never reads this much; belt and braces */
+
+    puddle_call call = { .ctx = ctx, .req = req, .body = body, .body_len = body_len, .auth = rt->auth };
+    char sender[PUDDLE_USER_ID_LEN + 1];
+
+    if (rt->auth == PUDDLE_AUTH_OWNER) {
+        if (!owner_ok)
+            return not_found(out, cap, status);
+    } else {
+        char me[PUDDLE_USER_ID_LEN + 1];
+        puddle_identity_id(ctx->identity, me);
+        chain_look cl = { ctx, rt, body, body_len };
+        puddle_peer_key_fn lookup = rt->auth == PUDDLE_AUTH_CHAIN ? chain_lookup : (ctx->peer_key ? ctx->peer_key : no_peer);
+        void *user = rt->auth == PUDDLE_AUTH_CHAIN ? (void *)&cl : ctx->peer_key_user;
+        int64_t now = ctx->now_ms ? ctx->now_ms() : clock_ms();
+        puddle_reqsig sig;
+        puddle_authn a = puddle_reqsig_authenticate(req->signature, req->method, req->target, body, body_len, me,
+                                                    lookup, user, ctx->replay, now, &sig);
+        if (a == PUDDLE_AUTHN_REJECT)
+            return not_found(out, cap, status);
+        /* from here the sender is who it says, so it may be told what went wrong */
+        puddle_jw_init(&w, json, sizeof json);
+        if (a == PUDDLE_AUTHN_SKEW) {
+            puddle_jw_object(&w);
+            puddle_jw_str(&w, "error", "clock_skew");
+            puddle_jw_num(&w, "now", now);
+            puddle_jw_end_object(&w);
+            *status = 401;
+        } else if (a == PUDDLE_AUTHN_REPLAYED) {
+            *status = puddle_fail(&w, 401, "replayed");
+        } else if (a != PUDDLE_AUTHN_OK) {
+            *status = puddle_fail(&w, 503, "busy");
+        } else {
+            memcpy(sender, sig.id, sizeof sender);
+            call.sender = sender;
+            goto run;
+        }
+        size_t n = puddle_jw_finish(&w);
+        return puddle_http_response(*status, "", json, n, out, cap);
+    }
+
+run:
+    puddle_jw_init(&w, json, sizeof json);
+    int st = rt->fn(&call, &w);
+    size_t n = 0;
+    if (w.len == 0 && !w.err) {
+        json[0] = '\0'; /* empty answer */
+    } else {
+        n = puddle_jw_finish(&w);
+        if (n == 0) {
+            *status = 500;
+            return puddle_http_error(500, out, cap);
+        }
+    }
+    *status = st;
+    size_t total = puddle_http_response(st, "", json, n, out, cap);
+    memset(json, 0, sizeof json); /* may have held a recovery phrase */
+    return total;
+}

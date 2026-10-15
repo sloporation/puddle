@@ -14,6 +14,7 @@ extern "C" {
 typedef struct {
     char address[64];          /* IPv4 or IPv6 literal; "::" = all interfaces */
     uint16_t port;
+    char advertise[128];       /* host:port others should use to reach this Puddle; "" = work it out from address/port */
     char dir[PUDDLE_PATH_MAX]; /* directory of the config file; TLS material lives here */
     char data_dir[PUDDLE_PATH_MAX]; /* chats, keys, profile images, media (docs/storage.md) */
     char profile_files[PUDDLE_MAX_PROFILE_FILES][PUDDLE_PATH_MAX]; /* absolute or config-relative, resolved */

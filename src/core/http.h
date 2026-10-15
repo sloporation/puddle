@@ -23,11 +23,10 @@ typedef struct {
  * supported), or an Expect other than 100-continue. 0 = ok, -1 = malformed. */
 int puddle_http_parse(const char *buf, size_t len, puddle_request *req);
 
-/* Build a full HTTP/1.1 response for `req` (NULL = malformed) into `out`.
- * `owner_ok` says the request carried the owner token. Anything that needs it and doesn't have it is
- * answered exactly like a path that doesn't exist. Stores the status code in *status and returns the
- * byte length. */
-size_t puddle_http_route(const puddle_request *req, int owner_ok, char *out, size_t cap, int *status);
+/* A full HTTP/1.1 response with a JSON body of `blen` bytes (0 = none). `extra_headers` is "" or header lines
+ * each ending \r\n. Returns the byte length, or 0 if it does not fit in `cap`. */
+size_t puddle_http_response(int status, const char *extra_headers, const char *body, size_t blen, char *out,
+                            size_t cap);
 
 /* Build a bodyless-routing error response (e.g. 408, 431). */
 size_t puddle_http_error(int status, char *out, size_t cap);

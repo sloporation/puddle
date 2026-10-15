@@ -8,20 +8,22 @@ static const char *reason(int status)
 {
     switch (status) {
     case 200: return "OK";
+    case 202: return "Accepted";
     case 400: return "Bad Request";
+    case 401: return "Unauthorized";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 408: return "Request Timeout";
     case 413: return "Payload Too Large";
+    case 503: return "Service Unavailable";
     case 431: return "Request Header Fields Too Large";
     default:  return "Internal Server Error";
     }
 }
 
-static size_t respond(char *out, size_t cap, int status, const char *extra_headers,
-                      const char *body, int head_only)
+size_t puddle_http_response(int status, const char *extra_headers, const char *body, size_t blen, char *out,
+                            size_t cap)
 {
-    size_t blen = strlen(body);
     int n = snprintf(out, cap,
                      "HTTP/1.1 %d %s\r\n"
                      "Content-Type: application/json\r\n"
@@ -29,19 +31,19 @@ static size_t respond(char *out, size_t cap, int status, const char *extra_heade
                      "Cache-Control: no-store\r\n"
                      "Connection: close\r\n"
                      "%s"
-                     "\r\n"
-                     "%s",
-                     status, reason(status), blen, extra_headers, head_only ? "" : body);
-    if (n < 0 || (size_t)n >= cap)
+                     "\r\n",
+                     status, reason(status), blen, extra_headers ? extra_headers : "");
+    if (n < 0 || (size_t)n >= cap || blen >= cap - (size_t)n)
         return 0;
-    return (size_t)n;
+    memcpy(out + n, body, blen); /* by length: the body is ours, but nothing here relies on it being text */
+    return (size_t)n + blen;
 }
 
 size_t puddle_http_error(int status, char *out, size_t cap)
 {
     char body[96];
     snprintf(body, sizeof body, "{\"error\":\"%s\"}\n", reason(status));
-    return respond(out, cap, status, "", body, 0);
+    return puddle_http_response(status, "", body, strlen(body), out, cap);
 }
 
 int puddle_http_parse(const char *buf, size_t len, puddle_request *req)
@@ -144,26 +146,4 @@ int puddle_http_parse(const char *buf, size_t len, puddle_request *req)
         p = le + 1;
     }
     return 0;
-}
-
-size_t puddle_http_route(const puddle_request *req, int owner_ok, char *out, size_t cap, int *status)
-{
-    if (!req) {
-        *status = 400;
-        return puddle_http_error(400, out, cap);
-    }
-
-    if (strcmp(req->path, "/health") == 0 && owner_ok) {
-        int is_get = strcmp(req->method, "GET") == 0;
-        int is_head = strcmp(req->method, "HEAD") == 0;
-        if (is_get || is_head) {
-            *status = 200;
-            return respond(out, cap, 200, "", "{\"status\":\"ok\"}\n", is_head);
-        }
-        *status = 405;
-        return respond(out, cap, 405, "Allow: GET, HEAD\r\n", "{\"error\":\"Method Not Allowed\"}\n", 0);
-    }
-
-    *status = 404;
-    return puddle_http_error(404, out, cap);
 }

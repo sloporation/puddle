@@ -7,7 +7,7 @@
 
 #define HEADER_MAX 8192
 #define DEFAULT_DEADLINE_SECONDS 15
-#define RESPONSE_MAX 4096
+#define RESPONSE_MAX 32768 /* a profile's longest fields alone can pass 10 KB once escaped */
 
 static int64_t system_now(void) { return (int64_t)time(NULL); }
 
@@ -132,6 +132,7 @@ int puddle_http_serve(const puddle_http_handler *h, puddle_io *io, puddle_serve_
         outlen = puddle_http_error(500, out, sizeof out);
     }
     io->write(io->io, out, outlen);
+    memset(out, 0, sizeof out); /* an answer can hold a recovery phrase; don't leave it on the stack */
     info->status = status;
     return status;
 }

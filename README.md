@@ -50,7 +50,8 @@ Outputs: `build/puddled` and `build/Puddle` (`build/Puddle.app` on macOS).
 On first run `~/.config/puddle/puddle.yaml` is created (Windows: `%APPDATA%\puddle\`)
 with `address: 127.0.0.1` and `port: 8443`, a starter `profiles.yaml` next to it, and a
 self-signed `cert.pem` / `key.pem` in the same folder. Edit the config and restart to change the
-listener (`address: "::"` listens on all IPv4 and IPv6 interfaces; put IPv6 addresses in quotes).
+listener (`address: "::"` listens on all IPv4 and IPv6 interfaces; put IPv6 addresses in quotes). Set `advertise: host:port`
+to the address friends should use if it isn't the one you listen on; it goes in your link.
 
 Your profiles (display name, picture, blurb, colors, ...) live in `profiles.yaml`, and the
 `profiles:` setting names the file or files. See [docs/profiles.md](docs/profiles.md).

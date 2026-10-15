@@ -5,6 +5,8 @@
 #include "identity.h"
 #include "log.h"
 #include "profile.h"
+#include "reqsig.h"
+#include "router.h"
 #include "serve.h"
 #include "store.h"
 #include "tls.h"
@@ -31,12 +33,16 @@
 
 struct puddle_server {
     puddle_config cfg;
-    SSL_CTX *ctx;
+    SSL_CTX *tls;
     puddle_store *store;
     puddle_auth *auth;
     puddle_identity *identity;
     puddle_profiles profiles;
     puddle_assignments *assignments;
+    puddle_replay *replay;
+    puddle_roll_slot *roll_slot;
+    puddle_ctx ctx;
+    puddle_router router;
     int listen_fd;
     int stop_pipe[2];
     pthread_mutex_t mu;
@@ -147,10 +153,23 @@ puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t 
     s->assignments = puddle_assignments_open(cfg->data_dir, err, errlen);
     if (!s->assignments)
         goto fail;
+    s->replay = puddle_replay_new(0);
+    if (!s->replay) {
+        seterr(err, errlen, "out of memory");
+        goto fail;
+    }
+    s->roll_slot = puddle_roll_slot_new();
+    if (!s->roll_slot) {
+        seterr(err, errlen, "out of memory");
+        goto fail;
+    }
+    s->ctx = (puddle_ctx){ .config = &s->cfg, .roll_slot = s->roll_slot, .identity = s->identity, .store = s->store, .profiles = &s->profiles,
+                           .assignments = s->assignments, .replay = s->replay };
+    s->router = (puddle_router){ .routes = puddle_routes, .count = puddle_routes_count, .ctx = &s->ctx };
     puddle_log(PUDDLE_LOG_INFO, "%zu profile%s loaded, default '%s'", s->profiles.count,
                s->profiles.count == 1 ? "" : "s", s->profiles.items[0].id);
-    s->ctx = puddle_tls_context(cfg->dir, err, errlen);
-    if (!s->ctx)
+    s->tls = puddle_tls_context(cfg->dir, err, errlen);
+    if (!s->tls)
         goto fail;
     if (open_listener(s, err, errlen) != 0)
         goto fail;
@@ -208,7 +227,9 @@ void puddle_server_destroy(puddle_server *s)
     if (s->listen_fd >= 0) close(s->listen_fd);
     if (s->stop_pipe[0] >= 0) close(s->stop_pipe[0]);
     if (s->stop_pipe[1] >= 0) close(s->stop_pipe[1]);
-    SSL_CTX_free(s->ctx);
+    SSL_CTX_free(s->tls);
+    puddle_replay_free(s->replay);
+    puddle_roll_slot_free(s->roll_slot);
     puddle_assignments_close(s->assignments);
     puddle_identity_close(s->identity);
     puddle_auth_close(s->auth);
@@ -253,18 +274,15 @@ static int owner_check_cb(void *user, const char *authorization)
     return puddle_auth_check_bearer(((puddle_server *)user)->auth, authorization);
 }
 
-/* No route takes a body yet; the table that says which do arrives with the route table (roadmap 2.3). */
 static size_t body_limit_cb(void *user, const puddle_request *req, int owner_ok)
 {
-    (void)user; (void)req; (void)owner_ok;
-    return 0;
+    return puddle_router_body_limit(&((puddle_server *)user)->router, req, owner_ok);
 }
 
 static size_t route_cb(void *user, const puddle_request *req, int owner_ok, const unsigned char *body,
                        size_t body_len, char *out, size_t cap, int *status)
 {
-    (void)user; (void)body; (void)body_len;
-    return puddle_http_route(req, owner_ok, out, cap, status);
+    return puddle_router_handle(&((puddle_server *)user)->router, req, owner_ok, body, body_len, out, cap, status);
 }
 
 static void handle_request(puddle_server *srv, SSL *ssl, const char *peer)
@@ -283,7 +301,7 @@ static void *conn_main(void *arg)
     conn *c = arg;
     puddle_server *s = c->srv;
 
-    SSL *ssl = SSL_new(s->ctx);
+    SSL *ssl = SSL_new(s->tls);
     if (ssl && SSL_set_fd(ssl, c->fd) == 1) {
         if (SSL_accept(ssl) == 1) {
             handle_request(s, ssl, c->peer);

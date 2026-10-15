@@ -81,7 +81,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   as the roll key), a leaked old phrase after a later roll, each of the three signatures wrong or missing,
   wrong `prev`, wrong `seq`, a replayed rotation, and a rotation moved onto another identity's chain.
   `puddled --roll` needs a terminal and takes the data directory's lock, so it refuses while the Puddle is
-  running (which would keep using the old keys). The HTTP endpoint comes with 2.4.
+  running (which would keep using the old keys). The HTTP endpoints (2.4) do the same in two calls while the Puddle runs.
 - [x] **1.4 Restore.** `puddle_identity_restore` and `puddled --restore --chain FILE`. From the *latest* phrase
   plus a copy of the chain (not secret; `identity/chain.jsonl`, or later a friend's copy) the identity is rebuilt on
   a new machine: the same id, the same keys file byte for byte, the chain exactly as given, nothing to confirm.
@@ -121,12 +121,34 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   quoting automatic. Misuse (value without key, unbalanced ends, depth over 64, full buffer) is remembered
   and reported once by `puddle_jw_finish`, which returns 0. Strings are always valid UTF-8 out: bad bytes
   become U+FFFD, control characters are escaped, so a peer's display name can't break a response.
-- [ ] **2.3 Route table and handler context.** Method + path → handler, each with access to the store,
+- [x] **2.3 Route table and handler context.** Method + path → handler, each with access to the store,
   identity, profiles and (later) streams, and one of three auth kinds: owner token, signed peer, or
   chain-proven (stream requests and key-roll pushes). One replay memory per Puddle. `/health` moves onto it.
   *Done when:* an unauthenticated request to any route is the same `404`; tests for each auth kind.
-- [ ] **2.4 First real owner endpoints:** `GET /api/v1/identity`, `GET /api/v1/me`,
+  Built in `src/core/router.c/h` (the machinery) and `routes.c` (the Puddle's table; only `/health` so far).
+  - A route declares its method, path, auth kind, body cap and handler. The router authenticates *before* the
+    handler runs, so a handler only ever sees a request that passed for it. PEER looks the sender's current key
+    up in the Puddle's streams (`ctx->peer_key`; none until phase 3, so every PEER route is `404` for now).
+    CHAIN calls the route's own `chain_key` to find the key in the chain the body carries (written in 3.2).
+  - Failure is the same `404` bytes for an unknown path, a missing token, a bad signature, a wrong
+    recipient, an unknown sender and a key that isn't theirs. Only after the signature passes is a sender
+    told anything: `401 clock_skew` (with our time), `401 replayed`, `503 busy` (nonce memory full).
+  - The owner alone gets `405` + `Allow` for a known path with the wrong method; the body cap of a route a
+    caller can't use is 0, so a stranger's body is refused unread, exactly as for an unknown path.
+  - Handlers write JSON with the writer (2.2) and return a status; writing nothing gives an empty body
+    (`202`); a handler that overflows its 28 KB buffer (a profile's longest fields can pass 10 KB once escaped) is a `500`, not a truncated answer.
+  - HEAD is gone (GET and POST only, as the specs say); `/health` answers `{"status":"ok"}`.
+- [x] **2.4 First real owner endpoints:** `GET /api/v1/identity`, `GET /api/v1/me`,
   `POST /api/v1/identity/roll`. Proves owner auth and JSON end to end.
+  - `identity` and `me` answer as the schemas in `api/openapi.yaml`; `me` carries the default profile, with
+    absent fields left out rather than `null`.
+  - **Rolling is two steps, like `puddled --roll`:** `identity/roll` takes the current phrase and returns a new
+    one with nothing changed; `identity/roll/confirm` commits; `identity/roll/cancel` drops it. One pending
+    roll per Puddle, dropped after 10 minutes (a phrase shown that long ago may never have been written down).
+    The phrase is never logged, never echoed, and the response buffers are wiped after sending.
+  - **The link needs an address.** `advertise: host:port` in the config sets it; without it the link uses the
+    listen address, and is `null` when that is `::` or `0.0.0.0` (the Puddle can't know its public address).
+  - Not yet: telling active streams about the new keys (phase 4: they don't exist yet).
 
 *Commit point.*
 

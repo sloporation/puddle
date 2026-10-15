@@ -79,7 +79,7 @@ a new phrase. Authority to roll comes from a **roll key**, derived from the phra
   is written down. After it commits, the old phrase recovers nothing.
 - Events carry the id of the key that signed them (`kid`), so history signed before a roll still verifies.
 
-Built in `src/core/identity.c`; run it with `puddled --roll`. If it is interrupted, the next start finishes it:
+Built in `src/core/identity.c`; run it with `puddled --roll`, or over the owner API while the Puddle runs (`POST /api/v1/identity/roll`, then `/confirm`). If it is interrupted, the next start finishes it:
 the signed record and the new keys are written together to a journal before either real file changes.
 
 ## Restoring on a new computer

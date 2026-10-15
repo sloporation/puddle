@@ -6,52 +6,32 @@
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
 
-static int status_of(const char *raw, int owner_ok)
-{
-    puddle_request req;
-    char out[2048];
-    int status = 0;
-    int ok = puddle_http_parse(raw, strlen(raw), &req) == 0;
-    puddle_http_route(ok ? &req : NULL, owner_ok, out, sizeof out, &status);
-    return status;
-}
-
 static int parse(const char *raw, puddle_request *req) { return puddle_http_parse(raw, strlen(raw), req); }
 
 int main(void)
 {
-    /* /health needs the owner token; without it, it is exactly a path that doesn't exist */
-    CHECK(status_of("GET /health HTTP/1.1\r\nHost: x\r\n\r\n", 1) == 200);
-    CHECK(status_of("GET /health?verbose=1 HTTP/1.1\r\n\r\n", 1) == 200);
-    CHECK(status_of("HEAD /health HTTP/1.1\r\n\r\n", 1) == 200);
-    CHECK(status_of("POST /health HTTP/1.1\r\n\r\n", 1) == 405);
-    CHECK(status_of("GET /health HTTP/1.1\r\n\r\n", 0) == 404);
-    CHECK(status_of("HEAD /health HTTP/1.1\r\n\r\n", 0) == 404);
-    CHECK(status_of("POST /health HTTP/1.1\r\n\r\n", 0) == 404); /* not even a 405 to a stranger */
-    CHECK(status_of("GET /nope HTTP/1.1\r\n\r\n", 1) == 404);
-    CHECK(status_of("GET /nope HTTP/1.1\r\n\r\n", 0) == 404);
-    CHECK(status_of("garbage\r\n\r\n", 1) == 400);
-    CHECK(status_of("GET /health SPDY/3\r\n\r\n", 1) == 400);
-
-    /* an unauthorized answer is byte-for-byte the same as for a path that isn't there */
-    puddle_request a, b;
-    char out1[2048], out2[2048];
-    int s1, s2;
-    parse("GET /health HTTP/1.1\r\n\r\n", &a);
-    parse("GET /nothing-here HTTP/1.1\r\n\r\n", &b);
-    size_t n1 = puddle_http_route(&a, 0, out1, sizeof out1, &s1);
-    size_t n2 = puddle_http_route(&b, 0, out2, sizeof out2, &s2);
-    CHECK(n1 == n2 && memcmp(out1, out2, n1) == 0 && s1 == 404 && s2 == 404);
-
     puddle_request req;
-    int status;
     char out[2048];
-    CHECK(parse("GET /health HTTP/1.1\r\n\r\n", &req) == 0);
-    puddle_http_route(&req, 1, out, sizeof out, &status);
-    CHECK(strstr(out, "200 OK") != NULL && strstr(out, "{\"status\":\"ok\"}") != NULL);
-    strcpy(req.method, "HEAD");
-    puddle_http_route(&req, 1, out, sizeof out, &status);
-    CHECK(strstr(out, "{\"status\"") == NULL && strstr(out, "Content-Length: 16") != NULL);
+
+    /* responses */
+    size_t n = puddle_http_response(200, "X-A: b\r\n", "{\"a\":1}", 7, out, sizeof out);
+    CHECK(n > 0 && strstr(out, "HTTP/1.1 200 OK\r\n") && strstr(out, "Content-Length: 7\r\n") && strstr(out, "X-A: b\r\n") &&
+          memcmp(out + n - 7, "{\"a\":1}", 7) == 0);
+    CHECK(puddle_http_response(200, "", "abc", 3, out, 10) == 0); /* does not fit */
+    n = puddle_http_response(200, "", "a\0b", 3, out, sizeof out);
+    CHECK(n > 0 && memcmp(out + n - 3, "a\0b", 3) == 0 && strstr(out, "Content-Length: 3\r\n"));
+    puddle_http_error(404, out, sizeof out);
+    CHECK(strstr(out, "404 Not Found") && strstr(out, "{\"error\":\"Not Found\"}"));
+    {
+        int codes[] = {202, 401, 503, 413, 408, 431, 400, 405};
+        for (size_t i = 0; i < sizeof codes / sizeof codes[0]; i++) {
+            puddle_http_response(codes[i], "", "", 0, out, sizeof out);
+            CHECK(!strstr(out, "Internal Server Error"));
+        }
+    }
+
+    CHECK(parse("garbage\r\n\r\n", &req) == -1);
+    CHECK(parse("GET /health SPDY/3\r\n\r\n", &req) == -1);
 
     /* the two headers we read */
     CHECK(parse("GET /a/b?x=1&y=2 HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer abc\r\nx-puddle-signature:  v1 id=z  \r\n\r\n", &req) == 0);
