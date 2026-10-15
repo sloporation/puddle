@@ -46,6 +46,7 @@ add_library(puddle_core STATIC
   src/core/identity.c
   src/core/json.c
   src/core/log.c
+  src/core/phrase.c
   src/core/profile.c
   src/core/reqsig.c
   src/core/server.c
@@ -99,7 +100,7 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity auth reqsig)
+foreach(t http json store config yaml profile encoding identity auth reqsig phrase)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)

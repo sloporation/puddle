@@ -38,5 +38,6 @@ or looks like it conflicts with this list, ask rather than guess.
 - `src/gui/`: `Puddle`, the desktop app (Qt Quick)
 - `api/openapi.yaml`: API for phone clients and the desktop app. `api/federation.yaml`: streams.
 - `docs/storage.md`, `docs/identity.md`, `docs/profiles.md`, `docs/streams.md`: design drafts the code follows
+- `docs/roadmap.md`: the step-by-step plan for keys and streams; work through it in order, one step at a time
 - `docs/discuss-later.md`: open questions parked on purpose; don't raise them unprompted
 - Build and test: `scripts/build.sh`
