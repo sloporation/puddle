@@ -84,7 +84,8 @@ ApplicationWindow {
             }
             Item { Layout.fillWidth: true }
             Label {
-                text: root.backend.error === "" ? "Listening on " + root.backend.listenUrl : "Not running"
+                text: root.backend.needsSetup ? "Setting up"
+                      : root.backend.error === "" ? "Listening on " + root.backend.listenUrl : "Not running"
                 elide: Text.ElideMiddle
                 Layout.maximumWidth: root.width * 0.6
                 opacity: 0.7
@@ -92,8 +93,14 @@ ApplicationWindow {
         }
     }
 
+    Setup {
+        anchors.fill: parent
+        visible: root.backend.needsSetup
+        backend: root.backend
+    }
+
     Label {
-        visible: root.backend.error !== ""
+        visible: root.backend.error !== "" && !root.backend.needsSetup
         anchors.centerIn: parent
         width: parent.width - 2 * root.margin
         horizontalAlignment: Text.AlignHCenter
@@ -103,7 +110,7 @@ ApplicationWindow {
 
     ListView {
         id: logView
-        visible: root.backend.error === ""
+        visible: root.backend.error === "" && !root.backend.needsSetup
         anchors.fill: parent
         anchors.margins: root.margin
         clip: true

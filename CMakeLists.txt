@@ -79,7 +79,7 @@ if(PUDDLE_BUILD_GUI)
     qt_add_qml_module(puddle
       URI Puddle
       VERSION 1.0
-      QML_FILES src/gui/Main.qml
+      QML_FILES src/gui/Main.qml src/gui/Setup.qml
       RESOURCES src/gui/puddle.png)
     target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2)
     if(APPLE)
@@ -93,6 +93,17 @@ if(PUDDLE_BUILD_GUI)
       MACOSX_BUNDLE_GUI_IDENTIFIER io.github.sloporation.puddle
       MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
     install(TARGETS puddle BUNDLE DESTINATION . RUNTIME DESTINATION bin)
+
+    # The first-run state machine, against the real core, with no window (needs the offscreen platform).
+    add_executable(backend_test tests/backend_test.cpp src/gui/backend.cpp src/gui/backend.h)
+    target_include_directories(backend_test PRIVATE src/gui)
+    target_link_libraries(backend_test PRIVATE puddle_core Qt6::Gui)
+    if(APPLE)
+      target_sources(backend_test PRIVATE src/gui/dock_mac.mm)
+      target_link_libraries(backend_test PRIVATE "-framework AppKit")
+    endif()
+    add_test(NAME backend COMMAND backend_test)
+    set_tests_properties(backend PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   else()
     message(WARNING "Qt6 Quick not found; skipping the Puddle app (set -DPUDDLE_BUILD_GUI=OFF to silence)")
   endif()

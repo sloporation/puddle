@@ -5,17 +5,21 @@ devices of that one person. No middleman servers in v1.
 
 ## Identity
 
-The identity has two key pairs, generated on first run:
+The identity is made of:
 
-- **Ed25519** for signing
-- **X25519** for encryption
+- an **Ed25519** signing key
+- an **X25519** encryption key
+- an Ed25519 **roll key**, used only to authorize changing the keys (below)
+
+All three are derived from one **recovery phrase**: eight groups of four characters, shown to the
+owner once when the identity is made and never stored or logged (`phrase.c`). The signing and
+encryption keys are the *daily keys*. They live on this machine in `<data_dir>/identity/keys`
+(mode 0600), and are what a phone is given. The roll key exists only while the phrase is typed in.
 
 **User id = `base32(SHA-256(genesis signing public key))`**, where the genesis key is the very
-first one. The id never changes, even when keys rotate (below). It is self-certifying: given an id
+first one. The id never changes, even when keys roll (below). It is self-certifying: given an id
 and the identity's key chain, anyone can check they belong together, with no registry or server.
 It does not depend on an IP address, a hostname or a TLS certificate, so it survives the user moving.
-
-The private keys live in `<data_dir>/identity/` (mode 0600).
 
 ## Devices (phones)
 
@@ -52,25 +56,27 @@ their own. Without a valid token every route, including `/health`, answers `404`
 
 ## Rotation (in v1, optional, owner-triggered)
 
-Implemented in `src/core/identity.c`; the flow is in streams.md. Keys can be replaced without
-changing the user id, using **pre-rotation**:
+Keys can be replaced without changing the user id. **The phrase rolls with the keys:** every roll makes
+a new phrase. Authority to roll comes from a **roll key**, derived from the phrase and never stored:
 
-- Two key sets exist at all times: *current* and *next*. Every record in the chain commits to the
-  next set as `SHA-256(signing public || encryption public)`.
-- A rotation record announces new keys, names the hash of the previous record (`prev`), increments
-  `seq`, commits to the following set, and is signed by the key it announces. It is valid only if its
-  keys hash to what the previous record committed to.
-- Records are lines of `identity/chain.jsonl`: `{"record":{...},"sig":"<base64>"}`, the signature over
-  the exact record bytes. Peers keep the whole chain and verify it back to the first record, whose
-  signing key hashes to the user id.
-- Someone holding only the *current* keys (a stolen phone: devices are given the current keys, never
-  the next set) cannot make a valid rotation, because they lack the committed next keys.
-- Events carry the id of the key that signed them (`kid`), so history signed before a roll still
-  verifies.
+- Every record in the chain commits to the hash of the *next* roll key. The first record's commitment is
+  to the roll key of the first phrase (`next` in `chain.jsonl`).
+- To roll, the owner types the current phrase, which gives that generation's roll key. The Puddle makes a
+  new phrase, derives the next daily keys and roll key from it, and writes a record that reveals the old
+  roll key, names the new keys, commits to the new roll key, and increments `seq`.
+- The record carries three signatures: from the roll key (authority), from the new signing key
+  (possession), and from the *old* signing key (the old key announcing its successor).
+- Peers keep the whole chain and verify it back to the first record, whose signing key hashes to the
+  user id. A record is valid only if the revealed roll key hashes to what the previous record committed to.
+- Someone holding only the daily keys (a stolen phone: devices are given daily keys, never the roll
+  key) cannot roll. A leaked *old* phrase cannot roll either: its roll key was spent. Only the current
+  phrase is the master secret.
+- The roll is two-phase: the new phrase is shown first, and the roll commits only once the owner confirms it
+  is written down. After it commits, the old phrase recovers nothing.
+- Events carry the id of the key that signed them (`kid`), so history signed before a roll still verifies.
 
-Simplification for now: the next keys are stored in `identity/keys` next to the current ones, so
-someone who copies that whole file can roll. A recovery phrase would let the next keys live offline;
-that is parked in discuss-later.md. Meanwhile, back up `identity/` somewhere offline.
+Built in `src/core/identity.c`; run it with `puddled --roll`. If it is interrupted, the next start finishes it:
+the signed record and the new keys are written together to a journal before either real file changes.
 
 ## Transport
 

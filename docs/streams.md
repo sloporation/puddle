@@ -5,7 +5,7 @@ is sent between two Puddles without one, apart from asking for one. This describ
 endpoints are in `api/openapi.yaml` (what the owner's app calls) and `api/federation.yaml` (what
 Puddles call on each other).
 
-Built so far: the identity, its key chain and key rolling (`src/core/identity.c`), and request
+Built so far: the identity, its recovery phrase and rolling (`src/core/identity.c`), and request
 signing and checking (`src/core/reqsig.c`: Alice's side signs, Bob's side runs the checks below in
 order, with a bounded nonce memory). Everything else here is design.
 
@@ -140,30 +140,32 @@ Events inside chats are signed separately, over their exact bytes, and name the 
 
 ## Keys
 
-**Creation.** On first run the Puddle makes an Ed25519 signing pair and an X25519 encryption pair,
-plus a second "next" pair, and writes an inception record committing to the next pair. The user id is
-the base32 hash of the first signing key. All of it lives in `<data_dir>/identity/` (private keys in
-`keys`, mode 0600; the signed records in `chain.jsonl`).
+Built in `src/core/identity.c` and `phrase.c`; the plan and status are in `roadmap.md` (phase 1).
 
-**Rolling is optional.** It never happens by itself. The owner can do it any time
-(`POST /api/v1/identity/roll`), for example after losing a device that held the keys:
+**Creation.** On first run the Puddle makes a **recovery phrase** (eight groups of four characters),
+shows it to the owner once, and derives three keys from it: an Ed25519 signing key, an X25519
+encryption key, and an Ed25519 **roll key**. The user id is the base32 hash of the first signing key.
+Only the two daily keys are kept, in `<data_dir>/identity/keys` (mode 0600). The roll key and the phrase
+are never stored or logged. The first record in `chain.jsonl` is signed by the signing key and commits
+to the hash of the roll key.
 
-1. the committed next pair become current, and a fresh next pair is generated and committed to
-2. a record signed by the new key is appended to the chain
-3. the Puddle sends the chain to every active stream with `POST /stream/v1/identity`
-4. peers verify it extends the chain they hold and note the new keys; one that doesn't verify is
+**Rolling is optional** (built; `puddled --roll`). It never happens by itself. The owner can do it any
+time, for example after losing a device that held the keys. The owner types the current phrase, which
+re-derives the roll key; the Puddle makes a **new phrase** (written down again) and derives the next
+keys from it. The new record is signed by the roll key, the new signing key and the old signing key,
+and commits to the new phrase's roll key. Then:
+
+1. the Puddle sends the chain to every active stream with `POST /stream/v1/identity`
+2. peers verify it extends the chain they hold and note the new keys; one that doesn't verify is
    ignored and the owner is told. A peer that was offline misses the push, so the sender keeps
    retrying it until that stream acknowledges.
 
 The id does not change, so no one has to re-add anyone. Why it resists a stolen phone: a phone is given
-the *current* keys only. To roll, an attacker would need the *next* pair, which stays on the main
-Puddle, so only the real owner can make a record that peers accept. The chain's rules are in
-`puddle_chain_verify`.
+the *daily* keys only, and rolling needs the roll key, which exists only while the current phrase is
+typed in. A leaked *old* phrase is harmless, because its keys are retired and its roll key was spent.
 
-If the roll is interrupted, the next start finishes it. If `identity/` is lost entirely there is no
-way back to the same id; the Puddle refuses to quietly make a new one over a half-restored backup.
-
-Until a recovery phrase exists (docs/discuss-later.md), **back up `identity/` somewhere offline.**
+**The phrase is the backup.** If the machine is lost, the latest phrase restores the identity (roadmap
+1.4). After a roll, only the new phrase works.
 
 ## Group-only connections
 

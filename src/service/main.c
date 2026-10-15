@@ -1,11 +1,15 @@
-/* puddled: headless Puddle service. Logs to stderr (journald / launchd). */
+/* puddled: headless Puddle. Logs to stderr (journald / launchd). */
 #include "config.h"
+#include "identity.h"
 #include "log.h"
 #include "server.h"
+#include "store.h"
 
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <termios.h>
+#include <unistd.h>
 
 static puddle_server *volatile g_server;
 
@@ -17,15 +21,137 @@ static void on_signal(int sig)
 
 static void usage(FILE *out)
 {
-    fprintf(out, "usage: puddled [-c|--config FILE]\n");
+    fprintf(out,
+            "usage: puddled [-c|--config FILE] [--init | --roll]\n"
+            "\n"
+            "  --init   make this Puddle's identity and show its recovery phrase, then exit\n"
+            "           (a first run from a terminal does this by itself and carries on)\n"
+            "  --roll   change your keys: asks for your current recovery phrase, gives you a new one, and\n"
+            "           retires the old. The Puddle must not be running.\n");
+}
+
+/* The phrase goes to the terminal and nowhere else: never to the log, which a service manager keeps. */
+static void show_phrase(const char *phrase, int interactive)
+{
+    printf("\n"
+           "This Puddle has no identity yet, so one has been made.\n"
+           "\n"
+           "  RECOVERY PHRASE (shown once, and not stored anywhere)\n"
+           "\n"
+           "      %s\n"
+           "\n"
+           "Write it down now, on paper or in a password manager. It is the only way to get your\n"
+           "identity back if this computer is lost, and anyone who has it can take your identity.\n"
+           "Each time you change your keys you will get a new phrase, and the old one stops working.\n"
+           "\n",
+           phrase);
+    fflush(stdout);
+    if (interactive) {
+        printf("Press Enter once you have written it down. ");
+        fflush(stdout);
+        char line[64];
+        if (!fgets(line, sizeof line, stdin)) {
+            /* stdin closed: carry on, the phrase has been shown */
+        }
+        printf("\n");
+    }
+}
+
+/* Read a line from the terminal without showing it. */
+static int read_secret(const char *prompt, char *out, size_t cap)
+{
+    struct termios old, quiet;
+    int have = tcgetattr(STDIN_FILENO, &old) == 0;
+    printf("%s", prompt);
+    fflush(stdout);
+    if (have) {
+        quiet = old;
+        quiet.c_lflag &= (tcflag_t)~ECHO;
+        tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
+    }
+    char *got = fgets(out, (int)cap, stdin);
+    if (have)
+        tcsetattr(STDIN_FILENO, TCSANOW, &old);
+    printf("\n");
+    if (!got)
+        return -1;
+    out[strcspn(out, "\r\n")] = '\0';
+    return 0;
+}
+
+/* Change the keys. Two steps, so that quitting part way costs nothing: the old phrase keeps working until
+ * the new one has been written down. */
+static int roll_keys(const puddle_config *cfg)
+{
+    char err[512];
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        fprintf(stderr, "puddled: --roll needs a terminal: it asks for your recovery phrase and shows a new one.\n");
+        return 1;
+    }
+    /* the data directory's lock, so that no running Puddle is holding the old keys in memory */
+    puddle_store *lock = puddle_store_open(cfg->data_dir, err, sizeof err);
+    if (!lock) {
+        fprintf(stderr, "puddled: %s\n(Stop the running Puddle first; it would keep using the old keys.)\n", err);
+        return 1;
+    }
+    puddle_identity *id = puddle_identity_open(cfg->data_dir, err, sizeof err);
+    if (!id) {
+        fprintf(stderr, "puddled: %s\n", err);
+        puddle_store_close(lock);
+        return 1;
+    }
+
+    int rc = 1;
+    char current[128], fresh[PUDDLE_PHRASE_LEN + 1];
+    printf("Changing your keys. Nothing changes until you confirm the new phrase has been written down.\n\n");
+    if (read_secret("Your CURRENT recovery phrase: ", current, sizeof current) != 0) {
+        fprintf(stderr, "puddled: no phrase given.\n");
+        goto done;
+    }
+    puddle_roll *roll = puddle_identity_roll_prepare(id, current, fresh, err, sizeof err);
+    memset(current, 0, sizeof current);
+    if (!roll) {
+        fprintf(stderr, "puddled: %s\n", err);
+        goto done;
+    }
+    printf("\n  NEW RECOVERY PHRASE (shown once, and not stored anywhere)\n\n      %s\n\n"
+           "Write it down now. The moment you continue, your OLD phrase stops working, so the new one is\n"
+           "the only way back to your identity. To keep the old keys instead, press Ctrl-C now.\n\n"
+           "Press Enter once the new phrase is written down. ", fresh);
+    fflush(stdout);
+    char line[16];
+    if (!fgets(line, sizeof line, stdin)) {
+        printf("\nNo confirmation, so nothing has changed.\n");
+        puddle_roll_abandon(roll);
+        goto done;
+    }
+    printf("\n");
+    if (puddle_identity_roll_commit(id, roll, err, sizeof err) != 0) {
+        fprintf(stderr, "puddled: %s\n", err);
+        puddle_roll_abandon(roll);
+        goto done;
+    }
+    printf("Done. Your keys have changed and your new phrase is the one that counts.\n"
+           "Your user id is the same, so nobody needs to add you again.\n");
+    rc = 0;
+done:
+    memset(fresh, 0, sizeof fresh);
+    puddle_identity_close(id);
+    puddle_store_close(lock);
+    return rc;
 }
 
 int main(int argc, char **argv)
 {
     const char *path = NULL;
+    int init = 0, roll = 0;
     for (int i = 1; i < argc; i++) {
         if ((!strcmp(argv[i], "-c") || !strcmp(argv[i], "--config")) && i + 1 < argc) {
             path = argv[++i];
+        } else if (!strcmp(argv[i], "--init")) {
+            init = 1;
+        } else if (!strcmp(argv[i], "--roll")) {
+            roll = 1;
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(stdout);
             return 0;
@@ -41,6 +167,43 @@ int main(int argc, char **argv)
         fprintf(stderr, "puddled: %s\n", err);
         return 1;
     }
+
+    if (roll)
+        return init ? 2 : roll_keys(&cfg);
+
+    int unfinished = puddle_identity_unconfirmed(cfg.data_dir);
+    if (!puddle_identity_exists(cfg.data_dir) || unfinished) {
+        int interactive = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+        if (!init && !interactive) {
+            fprintf(stderr,
+                    "puddled: this Puddle has no usable identity yet. Run `puddled --init` in a terminal once: "
+                    "it makes the identity and shows the recovery phrase, which must not go to a log.\n");
+            return 1;
+        }
+        if (unfinished) {
+            /* the phrase was shown last time but never confirmed; nothing can have used that identity */
+            printf("An earlier setup was never finished (its recovery phrase may not have been written down), "
+                   "so it is being started again.\n");
+            if (puddle_identity_discard_unconfirmed(cfg.data_dir, err, sizeof err) < 0) {
+                fprintf(stderr, "puddled: %s\n", err);
+                return 1;
+            }
+        }
+        char phrase[PUDDLE_PHRASE_LEN + 1];
+        puddle_identity *id = puddle_identity_create(cfg.data_dir, phrase, err, sizeof err);
+        if (!id) {
+            fprintf(stderr, "puddled: %s\n", err);
+            return 1;
+        }
+        puddle_identity_close(id);
+        show_phrase(phrase, interactive);
+        memset(phrase, 0, sizeof phrase);
+        puddle_identity_confirm(cfg.data_dir); /* shown, and (in a terminal) acknowledged */
+    } else if (init) {
+        printf("puddled: an identity already exists in %s; nothing to do.\n", cfg.data_dir);
+    }
+    if (init)
+        return 0;
 
     puddle_server *srv = puddle_server_create(&cfg, err, sizeof err);
     if (!srv) {

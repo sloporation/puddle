@@ -13,12 +13,13 @@ static int failures;
 static char root[512];
 static int rm_cb(const char *p, const struct stat *sb, int t, struct FTW *f) { (void)sb; (void)t; (void)f; remove(p); return 0; }
 
-static puddle_identity *make(const char *name)
+static puddle_identity *make(const char *name, char *phrase_out)
 {
     char dir[700], err[300];
     snprintf(dir, sizeof dir, "%s/%s", root, name);
-    puddle_identity *id = puddle_identity_open(dir, err, sizeof err);
+    puddle_identity *id = puddle_identity_create(dir, phrase_out, err, sizeof err);
     if (!id) fprintf(stderr, "cannot make %s: %s\n", name, err);
+    else puddle_identity_confirm(dir);
     return id;
 }
 
@@ -75,7 +76,9 @@ int main(void)
     if (!mkdtemp(root))
         return 2;
 
-    puddle_identity *alice = make("alice"), *bob = make("bob"), *carol = make("carol"), *mallory = make("mallory");
+    char alice_phrase[PUDDLE_PHRASE_LEN + 1], other_phrase[PUDDLE_PHRASE_LEN + 1];
+    puddle_identity *alice = make("alice", alice_phrase), *bob = make("bob", other_phrase),
+                    *carol = make("carol", other_phrase), *mallory = make("mallory", other_phrase);
     char aid[53], bid[53], cid[53];
     puddle_identity_id(alice, aid);
     puddle_identity_id(bob, bid);
@@ -183,20 +186,21 @@ int main(void)
     puddle_replay_free(small);
     CHECK(puddle_replay_new(3) == NULL && puddle_replay_new(12) == NULL);
 
-    /* ---- Alice rolls her keys ---- */
+    /* ---- Alice changes her keys ---- */
     puddle_replay *r5 = puddle_replay_new(0);
-    puddle_reqsig_sign(alice, "GET", "/before", NULL, 0, bid, T0, hdr, sizeof hdr);
-    char err[300];
-    CHECK(puddle_identity_roll(alice, err, sizeof err) == 0);
+    puddle_reqsig_sign(alice, "GET", "/before", NULL, 0, bid, T0, hdr, sizeof hdr); /* signed by the key she is about to retire */
+    char err[300], new_phrase[PUDDLE_PHRASE_LEN + 1];
+    puddle_roll *roll = puddle_identity_roll_prepare(alice, alice_phrase, new_phrase, err, sizeof err);
+    CHECK(roll != NULL && puddle_identity_roll_commit(alice, roll, err, sizeof err) == 0);
     puddle_reqsig_sign(alice, "GET", "/after", NULL, 0, bid, T0, hdr2, sizeof hdr2);
-    /* Bob hasn't heard yet: the new key is unknown to him, so he can't tell it from a stranger */
+    /* Bob hasn't heard yet: the new key is unknown to him, so it looks like a stranger */
     CHECK(check(hdr2, "GET", "/after", NULL, bid, &alice_at_bob, r5, T0) == PUDDLE_AUTHN_REJECT);
-    /* ...until her pushed chain verifies and he updates his record */
+    /* once her pushed chain verifies and he updates his record, it is Alice again */
     friend_rec updated;
     learn(&updated, alice);
     CHECK(strcmp(updated.id, aid) == 0 && strcmp(updated.kid, alice_at_bob.kid) != 0); /* same Alice, new key */
     CHECK(check(hdr2, "GET", "/after", NULL, bid, &updated, r5, T0) == PUDDLE_AUTHN_OK);
-    /* a request signed with the retired key can no longer start anything */
+    /* and the key she retired can no longer start anything */
     CHECK(check(hdr, "GET", "/before", NULL, bid, &updated, r5, T0) == PUDDLE_AUTHN_REJECT);
     puddle_replay_free(r5);
 

@@ -101,10 +101,12 @@ paths:
       operationId: rollIdentity
       summary: Replace your keys (optional)
       description: |
-        Never happens on its own. Promotes the pre-committed next keys, commits to a fresh set, and
-        sends the change to every active stream. Your user id stays the same, so nobody has to re-add
-        you. Use it after losing a device that held your keys. `confirm` must be `true`. Streams that
-        are offline learn at their next contact.
+        Never happens on its own. Needs your current recovery phrase, which authorizes the roll; the Puddle
+        makes a **new phrase**, which must be written down before the roll is committed, and the old one
+        stops working. Sends the change to every active stream. Your user id stays the same. Use it after
+        losing a device that held your keys. **The roll itself is built (`puddled --roll`); this endpoint, in two
+        phases like the command, arrives with docs/roadmap.md 2.4, and the request and response below are the
+        old shape until then.** Streams that are offline learn at their next contact.
       requestBody:
         required: true
         content:

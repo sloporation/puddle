@@ -1,12 +1,15 @@
 #include "backend.h"
 
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QEvent>
+#include <QGuiApplication>
 #include <QSettings>
 
 #include "dock.h"
 
 extern "C" {
+#include "identity.h"
 #include "log.h"
 }
 
@@ -31,27 +34,18 @@ Backend::Backend(QObject *parent) : QObject(parent)
     qApp->installEventFilter(this);
 
     char err[512];
-    puddle_config cfg;
-    if (puddle_config_load(&cfg, nullptr, err, sizeof err) != 0) {
+    if (puddle_config_load(&cfg_, nullptr, err, sizeof err) != 0) {
         error_ = QString::fromUtf8(err);
         return;
     }
+    haveConfig_ = true;
 
-    g_self = this;
-    puddle_log_set_sink(logSink, nullptr);
-
-    srv_ = puddle_server_create(&cfg, err, sizeof err);
-    if (!srv_) {
-        error_ = QString::fromUtf8(err);
-        puddle_log_set_sink(nullptr, nullptr);
-        g_self = nullptr;
-        return;
-    }
-
-    const QString addr = QString::fromUtf8(cfg.address);
-    listenUrl_ = (addr.contains(':') ? QStringLiteral("https://[%1]:%2") : QStringLiteral("https://%1:%2"))
-                     .arg(addr).arg(cfg.port);
-    worker_ = std::thread([s = srv_] { puddle_server_run(s); });
+    // No identity, or one whose phrase was shown but never confirmed: setup comes first, and the
+    // server stays off until the owner has written the phrase down.
+    setupRedo_ = puddle_identity_unconfirmed(cfg_.data_dir) != 0;
+    needsSetup_ = setupRedo_ || !puddle_identity_exists(cfg_.data_dir);
+    if (!needsSetup_)
+        startServer();
 }
 
 Backend::~Backend()
@@ -63,6 +57,80 @@ Backend::~Backend()
         g_self = nullptr;
         puddle_server_destroy(srv_);
     }
+}
+
+void Backend::setError(const QString &message)
+{
+    if (error_ == message)
+        return;
+    error_ = message;
+    emit errorChanged();
+}
+
+void Backend::startServer()
+{
+    char err[512];
+    g_self = this;
+    puddle_log_set_sink(logSink, nullptr);
+
+    srv_ = puddle_server_create(&cfg_, err, sizeof err);
+    if (!srv_) {
+        setError(QString::fromUtf8(err));
+        puddle_log_set_sink(nullptr, nullptr);
+        g_self = nullptr;
+        return;
+    }
+
+    const QString addr = QString::fromUtf8(cfg_.address);
+    listenUrl_ = (addr.contains(':') ? QStringLiteral("https://[%1]:%2") : QStringLiteral("https://%1:%2"))
+                     .arg(addr).arg(cfg_.port);
+    worker_ = std::thread([s = srv_] { puddle_server_run(s); });
+    emit startedChanged();
+}
+
+QString Backend::createIdentity()
+{
+    if (!haveConfig_ || !needsSetup_)
+        return QString();
+    char err[512], phrase[PUDDLE_PHRASE_LEN + 1];
+    setError(QString());
+
+    if (puddle_identity_unconfirmed(cfg_.data_dir) &&
+        puddle_identity_discard_unconfirmed(cfg_.data_dir, err, sizeof err) < 0) {
+        setError(QString::fromUtf8(err));
+        return QString();
+    }
+    puddle_identity *id = puddle_identity_create(cfg_.data_dir, phrase, err, sizeof err);
+    if (!id) {
+        setError(QString::fromUtf8(err));
+        return QString();
+    }
+    puddle_identity_close(id);
+
+    const QString result = QString::fromLatin1(phrase);
+    memset(phrase, 0, sizeof phrase);
+    return result;
+}
+
+bool Backend::finishSetup()
+{
+    if (!haveConfig_ || !needsSetup_)
+        return false;
+    if (puddle_identity_confirm(cfg_.data_dir) != 0) {
+        setError(QStringLiteral("Could not save your identity. Check that the data folder can be written to."));
+        return false;
+    }
+    needsSetup_ = false;
+    setupRedo_ = false;
+    emit needsSetupChanged();
+    startServer();
+    return running();
+}
+
+void Backend::copyText(const QString &text)
+{
+    if (QClipboard *c = QGuiApplication::clipboard())
+        c->setText(text);
 }
 
 bool Backend::eventFilter(QObject *watched, QEvent *event)

@@ -54,10 +54,25 @@ listener (`address: "::"` listens on all IPv4 and IPv6 interfaces; put IPv6 addr
 
 Your profiles (display name, picture, blurb, colors, ...) live in `profiles.yaml`, and the
 `profiles:` setting names the file or files. See [docs/profiles.md](docs/profiles.md).
-On first run Puddle also creates your identity: a signing key and an encryption key in
-`<data_dir>/identity/`, and your user id (shown in the log). **Back that folder up somewhere
-offline**: lose it and you cannot be the same person again. Rolling the keys is optional and
-never automatic ([docs/streams.md](docs/streams.md)).
+Your identity is made from a **recovery phrase**: eight groups of four characters, such as
+`7QK4-M2XB-9TDW-HC5R-ZP3E-A8VN-4YJF-X2K7`. It is shown once, when the identity is made, and is not stored
+anywhere. **Write it down** (on paper, or in a password manager): it is the only way back to your
+identity if this computer is lost, and anyone who has it can take your identity over.
+
+- Run `puddled` from a terminal the first time and it shows the phrase, waits for you to write it
+  down, then carries on. Started as a service with no terminal it refuses, so the phrase can't land in a
+  log; run `puddled --init` once from a terminal first.
+- The desktop app does the same on first launch with a short setup screen: it shows the phrase in
+  groups, with a copy button, and only starts the Puddle once you tick "I have written my recovery
+  phrase down".
+- If you quit before confirming, that identity is thrown away on the next start and a fresh one is made,
+  so you can never be left with an identity whose phrase you didn't write down.
+
+**Changing your keys** is optional and never happens by itself. Stop the Puddle and run `puddled --roll`
+from a terminal: it asks for your *current* phrase (not echoed), gives you a **new** phrase, and only
+once you confirm the new one is written down does it change anything. From then on the new phrase is the
+one that counts and the old one stops working. Your user id stays the same. Quitting before you confirm
+changes nothing.
 
 Chats are stored under the data directory (`data_dir` in the config; default
 `~/Library/Application Support/Puddle` on macOS, `~/.local/share/puddle` on Linux).

@@ -42,25 +42,46 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   is caught, checked exhaustively over 200 phrases; any other slip is missed one time in a million.
   The seed is HKDF-SHA256 of the data characters, pinned by a known-answer test cross-checked against
   an independent implementation.
-- [ ] **1.2 Keys from a phrase.** From the seed, derive the signing pair, the encryption pair and the
-  roll key, with a label for each. Creating an identity makes the phrase, derives the first keys, and
-  commits to the hash of the roll key. The `keys` file keeps the daily keys only. The phrase goes back
-  to whoever created the identity, never stored or logged. **`puddled`** prints it once on first run
-  when attached to a terminal; started as a service (the journal would keep it) it refuses and says to
-  run `puddled --init` once from a terminal.
-  *Done when:* the same phrase gives the same keys and id; no phrase or roll key is ever on disk.
-- [ ] **1.2b First-run screen in the app.** One small dialog: the phrase in groups, a copy button, and an
-  "I have written it down" step before the Puddle starts. Not the rest of the GUI (that waits for 4.4),
-  but needed now: the app creates the identity on first launch, usually from Finder with no terminal.
-- [ ] **1.3 Roll.** The owner types the *current* phrase. The Puddle derives that generation's roll key,
-  makes a **new phrase**, and derives the next daily keys and roll key from it. Two phases: it shows the
-  new phrase, and only after "I have written it down" is the roll committed, so a roll can't strand
-  anyone. The new record is signed three times: by the roll key (authority), by the new signing key
-  (possession), and by the *old* signing key (the old key announcing its successor). The old private
-  key is deleted from the machine. Chain verification requires all three, and that the revealed roll key
-  hashes to what the previous record committed to.
-  *Done when:* a thief with the daily keys can't roll; a wrong phrase is refused; a leaked old phrase
-  can't roll; an interrupted roll recovers; old records still verify.
+- [x] **1.2 Keys from a phrase.** `src/core/identity.c`. The seed gives three keys through HKDF with
+  fixed labels (`signing`, `encryption`, `roll`); the labels are pinned by a test against values worked
+  out independently. Creating an identity makes the phrase, derives the keys, and writes a first record
+  that commits to the hash of the roll key. `keys` holds the two daily keys only (mode 0600); tests prove
+  the phrase, its seed and the roll key appear in no file. Creation is all-or-nothing (built in a private
+  directory, moved into place in one rename; two processes racing, one wins). **`puddled`** prints the
+  phrase once when attached to a terminal, waits for Enter, and carries on; with no terminal it refuses
+  and says to run `puddled --init`. An identity from before phrases is refused with instructions, never
+  replaced. What changed under it: the old pre-generated "next keys" and the roll built on them are gone,
+  so **chains of more than one record are refused until 1.3**, and the roll tests (including a retired
+  key in the request-signing test) come back with 1.3.
+- [x] **1.2b First-run screen in the app.** `src/gui/Setup.qml` and the Backend's start-up state machine.
+  Welcome step, then the phrase as eight numbered groups (four across when wide, two on a phone-width
+  window; light and dark), a copy button, and a "written down" tick before Continue enables. The Puddle
+  does not start until Continue. Checked by rendering the screen in both palettes and by `tests/backend_test.cpp`.
+  One addition the roadmap didn't have: quitting while the phrase is on screen would leave an identity
+  nobody wrote down, discovered only much later. So a new identity is **unconfirmed** (a marker inside the
+  identity folder, created atomically with it) until the owner confirms; the server refuses to open an
+  unconfirmed identity; and an unfinished one is safe to throw away and redo, because nothing could have
+  used it. A confirmed identity can never be discarded. `puddled` follows the same rule.
+
+- [x] **1.3 Roll.** `puddle_identity_roll_prepare` and `puddle_identity_roll_commit` in `src/core/identity.c`,
+  and `puddled --roll`. The owner types the *current* phrase (not echoed); the Puddle checks it is the one
+  the chain committed to, makes a **new phrase** and the next keys from it, and only after "the new phrase
+  is written down" commits. Phase 1 changes nothing on disk, so stopping there costs nothing and the old
+  phrase still works. The new record carries three signatures over its exact bytes: the roll key
+  (`sig_roll`), the new signing key (`sig`), and the old signing key (`sig_prev`). It reveals the roll key
+  (`roll`), names the previous record (`prev`), and commits to the new phrase's roll key (`next`).
+  `puddle_chain_verify` now accepts rolled chains: each record must follow the last, reveal a roll key that
+  hashes to what the last one committed to, and have all three signatures. The old private key is gone from
+  the machine afterwards (tests scan every file for the old key, the old roll key, and both phrases).
+  **Crash safety:** the signed record and the new keys file are first written to one journal
+  (`roll.pending`) in a single atomic step, and `puddle_identity_open` finishes any journal it finds, so a
+  death at any point either changes nothing or completes. Tested at each stage, and a journal that doesn't
+  belong to the chain, has keys that don't match its record, or is damaged is refused without touching
+  anything. Tested forgeries: someone with only the daily keys (including passing the stolen signing key off
+  as the roll key), a leaked old phrase after a later roll, each of the three signatures wrong or missing,
+  wrong `prev`, wrong `seq`, a replayed rotation, and a rotation moved onto another identity's chain.
+  `puddled --roll` needs a terminal and takes the data directory's lock, so it refuses while the Puddle is
+  running (which would keep using the old keys). The HTTP endpoint comes with 2.4.
 - [ ] **1.4 Restore.** From the *latest* phrase plus a copy of the chain, rebuild the identity on a new
   machine: the phrase gives that generation's keys, and peers recognise them as current. Getting the
   chain from a friend comes later, in 3.6. An older phrase cannot restore: its keys are retired.
