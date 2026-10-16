@@ -18,11 +18,17 @@ int puddle_my_address(const puddle_config *cfg, char *out, size_t cap);
  * 0, or -1 if we cannot say where we are (see puddle_my_address). */
 int puddle_flow_write_self(puddle_ctx *ctx, const char *peer, puddle_jw *w);
 
-/* Ask the Puddle named by `link` for a stream: records `pending_out`, shows them `profile_id` (NULL = the
- * default), and queues the request. Returns 0 and fills `out_id`, or an HTTP status for the owner with `code`
+/* Ask the Puddle at the address in `link` for a stream: records `pending_out` under a made-up id (a ticket stands in until their
+ * answer says who they are; that id is returned in `out_id`), shows them `profile_id` (NULL = the default), and queues the
+ * request. Returns 0 and fills `out_id`, or an HTTP status for the owner with `code`
  * and `message` saying why (400 bad link, 409 already, ...). */
 int puddle_flow_request(puddle_ctx *ctx, const puddle_link *link, const char *message, const char *profile_id,
                         char out_id[PUDDLE_USER_ID_LEN + 1], const char **code, const char **message_out);
+
+/* The answer to a request we sent to an address has said who it is (the ticket in it is the one we sent): refile the
+ * provisional record under `real_id`. 0 if it is now theirs; nonzero if there was no such request, a record for them
+ * already existed, or they are blocked (the request is dropped). */
+int puddle_flow_adopt(puddle_ctx *ctx, const char *ticket, const char *real_id);
 
 /* Queue what we owe `peer` for its `owed` state (an approval or refusal of its request, or the news that we closed).
  * 0, or -1 if it could not be queued (the record keeps saying we owe it, and puddle_flow_resume tries again). */

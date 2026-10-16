@@ -36,11 +36,11 @@ static void make_id(int i, char *out)
     snprintf(out, 64, "%s", ids[i]);
 }
 
-static puddle_link link_to(const char *id, const char *addr, const char *invite)
+static puddle_link link_to(const char *addr, const char *invite)
 {
     puddle_link l;
     char t[400], err[100];
-    puddle_link_format(id, addr, invite, t, sizeof t);
+    puddle_link_format(addr, invite, t, sizeof t);
     if (puddle_link_parse(t, &l, err, sizeof err) != 0) { fprintf(stderr, "bad link %s: %s\n", t, err); exit(2); }
     return l;
 }
@@ -156,11 +156,12 @@ int main(void)
         CHECK(!puddle_my_address(&c2, out, 8));                                                   /* does not fit */
     }
 
-    /* ---- asking ---- */
+    /* ---- asking: by address; the record is filed under a made-up id until the answer says who it is ---- */
+    char pa[64]; /* the made-up id of the request to `l` */
     {
-        puddle_link self = link_to(my_id, "127.0.0.1:8443", NULL);
+        puddle_link self = link_to("127.0.0.1:8443", NULL);
         CHECK(puddle_flow_request(&ctx, &self, "", NULL, id_out, &code, &msg) == 400 && !strcmp(code, "cannot_request_yourself"));
-        puddle_link l = link_to(a, "203.0.113.7:9000", "abcdefghijklmnopqrstuvwxy2");
+        puddle_link l = link_to("203.0.113.7:9000", "abcdefghijklmnopqrstuvwxy2");
         char longmsg[700];
         memset(longmsg, 'm', 501); longmsg[501] = 0;
         CHECK(puddle_flow_request(&ctx, &l, longmsg, NULL, id_out, &code, &msg) == 400 && !strcmp(code, "bad_request"));
@@ -172,24 +173,27 @@ int main(void)
             noaddr.config = &c2;
             CHECK(puddle_flow_request(&noaddr, &l, "hi", NULL, id_out, &code, &msg) == 409 && !strcmp(code, "no_address") && strstr(msg, "advertise"));
         }
-        CHECK(puddle_streams_block(ss, b, T0, err, sizeof err) == 0);
-        puddle_link lb = link_to(b, "203.0.113.8:9000", NULL);
-        CHECK(puddle_flow_request(&ctx, &lb, "hi", NULL, id_out, &code, &msg) == 409 && !strcmp(code, "blocked"));
-        CHECK(puddle_streams_unblock(ss, b, err, sizeof err) == 0);
-        CHECK(queued_of(a, NULL) == 0 && queued_of(b, NULL) == 0);                                /* none of those sent anything */
-        CHECK(puddle_streams_get(ss, a, &rec) == 1);
+        {
+            puddle_stream *all;
+            size_t n;
+            CHECK(puddle_streams_list(ss, &all, &n) == 0 && n == 0);                              /* none of those left a record... */
+            puddle_stream_list_free(all, n);
+        }
 
         /* the real thing */
         char path[128];
-        CHECK(puddle_flow_request(&ctx, &l, "  hello\\there  ", "work", id_out, &code, &msg) == 0 && !strcmp(id_out, a));
-        rec_of(a, &rec);
-        CHECK(rec.state == PUDDLE_STREAM_PENDING_OUT && rec.naddr == 1 && !strcmp(rec.addresses[0], "203.0.113.7:9000") &&
-              !strcmp(rec.note, "hello\\there") && rec.owed == PUDDLE_OWED_NONE && rec.created_ms == T0);
+        CHECK(puddle_flow_request(&ctx, &l, "  hello\\there  ", "work", id_out, &code, &msg) == 0 && puddle_id_valid(id_out));
+        memcpy(pa, id_out, sizeof pa);
+        rec_of(pa, &rec);
+        CHECK(rec.state == PUDDLE_STREAM_PENDING_OUT && rec.provisional && strlen(rec.ticket) == 32 && rec.naddr == 1 &&
+              !strcmp(rec.addresses[0], "203.0.113.7:9000") && !strcmp(rec.note, "hello\\there") && rec.owed == PUDDLE_OWED_NONE && rec.created_ms == T0);
+        char ticket_a[33];
+        memcpy(ticket_a, rec.ticket, sizeof ticket_a);
         puddle_stream_free(&rec);
         char prof[PUDDLE_PROFILE_ID_MAX + 1];
-        CHECK(puddle_assignments_get(as, a, prof) == 0 && !strcmp(prof, "work"));               /* they see the profile we chose */
-        CHECK(queued_of(a, "access") == 1);
-        char *body = last_body(a, "access", path);
+        CHECK(puddle_assignments_get(as, pa, prof) == 0 && !strcmp(prof, "work"));              /* they see the profile we chose */
+        CHECK(queued_of(pa, PUDDLE_OB_KIND_OPEN_ACCESS) == 1 && queued_of(pa, "access") == 0);
+        char *body = last_body(pa, PUDDLE_OB_KIND_OPEN_ACCESS, path);
         CHECK(body && !strcmp(path, "/stream/v1/access"));
         {
             puddle_span req, v;
@@ -206,38 +210,43 @@ int main(void)
             puddle_peer_info_free(&pi);
             CHECK(puddle_json_member(body, strlen(body), "message", &v) == 0 && puddle_json_string(v, s, sizeof s) == 0 && !strcmp(s, "hello\\there"));
             CHECK(puddle_json_member(body, strlen(body), "invite", &v) == 0 && puddle_json_string(v, s, sizeof s) == 0 && !strcmp(s, "abcdefghijklmnopqrstuvwxy2"));
+            CHECK(puddle_json_member(body, strlen(body), "ticket", &v) == 0 && puddle_json_string(v, s, sizeof s) == 0 && !strcmp(s, ticket_a)); /* and the ticket */
         }
         free(body);
 
-        /* what is already there */
+        /* the same address again, while one is waiting, or once it is a stream */
         CHECK(puddle_flow_request(&ctx, &l, "again", NULL, id_out, &code, &msg) == 409 && !strcmp(code, "already_requested"));
-        set_record(a, PUDDLE_STREAM_ACTIVE, PUDDLE_OWED_NONE, "");
+        set_record(pa, PUDDLE_STREAM_ACTIVE, PUDDLE_OWED_NONE, "");
         CHECK(puddle_flow_request(&ctx, &l, "again", NULL, id_out, &code, &msg) == 409 && !strcmp(code, "already_streaming"));
-        set_record(a, PUDDLE_STREAM_PENDING_IN, PUDDLE_OWED_NONE, "");
+        set_record(pa, PUDDLE_STREAM_PENDING_IN, PUDDLE_OWED_NONE, "");
         CHECK(puddle_flow_request(&ctx, &l, "again", NULL, id_out, &code, &msg) == 409 && !strcmp(code, "they_asked") && strstr(msg, "accept"));
-        CHECK(queued_of(a, "access") == 1);
-        set_record(a, PUDDLE_STREAM_CLOSED, PUDDLE_OWED_NONE, "an old failure");                  /* closed: ask again, and start clean */
+        CHECK(queued_of(pa, PUDDLE_OB_KIND_OPEN_ACCESS) == 1);
+        set_record(pa, PUDDLE_STREAM_CLOSED, PUDDLE_OWED_NONE, "an old failure");                  /* closed: ask again, as a new request */
         clock_now += 5000;
-        CHECK(puddle_flow_request(&ctx, &l, "second try", NULL, id_out, &code, &msg) == 0);
-        rec_of(a, &rec);
-        CHECK(rec.state == PUDDLE_STREAM_PENDING_OUT && !rec.error[0] && !strcmp(rec.note, "second try") && rec.created_ms == T0 && rec.updated_ms == T0 + 5000);
+        CHECK(puddle_flow_request(&ctx, &l, "second try", NULL, id_out, &code, &msg) == 0 && strcmp(id_out, pa) != 0);
+        rec_of(id_out, &rec);
+        CHECK(rec.state == PUDDLE_STREAM_PENDING_OUT && rec.provisional && !rec.error[0] && !strcmp(rec.note, "second try") && rec.created_ms == T0 + 5000 &&
+              strcmp(rec.ticket, ticket_a) != 0);
         puddle_stream_free(&rec);
-        CHECK(queued_of(a, "access") == 2);
-        body = last_body(a, "access", NULL);
+        CHECK(queued_of(id_out, PUDDLE_OB_KIND_OPEN_ACCESS) == 1);
+        body = last_body(id_out, PUDDLE_OB_KIND_OPEN_ACCESS, NULL);
         CHECK(body && strstr(body, "second try") && strstr(body, "\"invite\":\"abcdefghijklmnopqrstuvwxy2\""));
         free(body);
 
         /* the outbox is full: nothing is left half done */
+        puddle_link lb = link_to("203.0.113.8:9000", NULL), lc = link_to("203.0.113.9:9000", NULL), ld = link_to("203.0.113.10:9000", NULL),
+                    le = link_to("203.0.113.11:9000", NULL), lg = link_to("203.0.113.12:9000", NULL);
         CHECK(puddle_flow_request(&ctx, &lb, "x", NULL, id_out, &code, &msg) == 0);              /* 3 queued */
-        puddle_link lc = link_to(c, "203.0.113.9:9000", NULL), ld = link_to(d, "203.0.113.10:9000", NULL), le = link_to(e, "203.0.113.11:9000", NULL),
-                    lg = link_to(g, "203.0.113.12:9000", NULL);
         CHECK(puddle_flow_request(&ctx, &lc, "x", NULL, id_out, &code, &msg) == 0);              /* 4 */
         CHECK(puddle_flow_request(&ctx, &ld, "x", NULL, id_out, &code, &msg) == 0);              /* 5 */
         CHECK(puddle_flow_request(&ctx, &le, "x", NULL, id_out, &code, &msg) == 0);              /* 6: full */
+        puddle_stream *before, *after;
+        size_t nb, na;
+        CHECK(puddle_streams_list(ss, &before, &nb) == 0);
         CHECK(puddle_flow_request(&ctx, &lg, "x", NULL, id_out, &code, &msg) == 500);
-        rec_of(g, &rec);
-        CHECK(rec.state == PUDDLE_STREAM_CLOSED && strstr(rec.error, "queued"));                  /* not left looking like it is on its way */
-        puddle_stream_free(&rec);
+        CHECK(puddle_streams_list(ss, &after, &na) == 0 && na == nb);                             /* no record left looking like it is on its way */
+        puddle_stream_list_free(before, nb);
+        puddle_stream_list_free(after, na);
     }
 
     /* ---- what is owed ---- */

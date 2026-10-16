@@ -16,7 +16,9 @@ Rectangle {
     property string streamState: ""
     property string note: ""
     property string error: ""
+    property bool provisional: false
     property bool certChanged: false
+    property bool developer: false // Developer Mode: show what is normally hidden
     signal message()
 
     implicitHeight: Math.max(col.implicitHeight, 40) + 20
@@ -37,7 +39,7 @@ Rectangle {
 
     Menu {
         id: menu
-        MenuItem { text: qsTr("Copy user ID"); onTriggered: chats.copy(row.userId) }
+        MenuItem { text: qsTr("Copy user ID"); visible: row.developer && !row.provisional; height: visible ? implicitHeight : 0; onTriggered: chats.copy(row.userId) }
         MenuItem {
             text: qsTr("Message"); visible: row.mode === "friend"; height: visible ? implicitHeight : 0
             onTriggered: row.message()
@@ -80,13 +82,15 @@ Rectangle {
                 text: "“" + row.note + "”"
             }
             // Someone we do not know can claim any name. The code and the id are what to compare with them.
+            // Developer Mode only: who they claim to be, and the code derived from it
             Label {
-                visible: row.streamState === "pending_in"
+                objectName: "codeLabel"
+                visible: row.developer && !row.provisional
                 Layout.fillWidth: true
                 opacity: 0.65
                 font.pixelSize: 12
                 wrapMode: Text.WrapAnywhere
-                text: qsTr("Code %1").arg(chats.shortCode(row.userId))
+                text: qsTr("ID %1  ·  Code %2").arg(row.userId).arg(chats.shortCode(row.userId))
             }
             Label {
                 visible: row.error !== "" && row.mode !== "blocked"

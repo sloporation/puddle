@@ -122,7 +122,7 @@ static int node_make(node *n, const char *name, const char *display)
     puddle_identity_close(id);
     puddle_identity_confirm(n->cfg.data_dir);
     if (node_up(n) != 0) return -1;
-    snprintf(n->link, sizeof n->link, "puddle://%s@127.0.0.1:%u", n->uid, n->cfg.port);
+    snprintf(n->link, sizeof n->link, "127.0.0.1:%u", n->cfg.port);
     return 0;
 }
 
@@ -320,6 +320,13 @@ static const char *status_of(node *to, puddle_identity *who, const char *who_id)
 
 static void stream_body(char *out, size_t cap, const char *id) { snprintf(out, cap, "{\"stream\":\"%s\"}", id); }
 
+/* has this node asked someone at an address, and not heard who it is yet? */
+static int has_provisional(node *n)
+{
+    char body[8000];
+    return api(n, "GET", "/api/v1/stream?state=pending_out", NULL, body, sizeof body) == 200 && strstr(body, "\"provisional\":true") != NULL;
+}
+
 static int json_has(const char *needle) { return strstr(resp, needle) != NULL; }
 
 static void rmtree(const char *p) { nftw(p, rm_cb, 16, FTW_DEPTH | FTW_PHYS); }
@@ -346,8 +353,7 @@ int main(void)
     CHECK(get(&alice, "/api/v1/stream?state=pending_in") == 200 && json_has(bob.uid) && json_has("\"message\":\"hi, it is Bob\"") &&
           json_has("\"display_name\":\"Bob\""));
     {
-        puddle_stream_state s;
-        CHECK(stream_state(&bob, alice.uid, &s) && s == PUDDLE_STREAM_PENDING_OUT);               /* Bob does not know yet */
+        CHECK(has_provisional(&bob));                                                              /* Bob does not know yet, nor who she is */
     }
     stream_body(body, sizeof body, bob.uid);
     CHECK(post(&alice, "/api/v1/stream/accept", body) == 200 && json_has("\"state\":\"active\""));
@@ -620,7 +626,7 @@ int main(void)
     usleep(700000);
     {
         puddle_stream_state s;
-        CHECK(stream_state(&eve, alice.uid, &s) && s == PUDDLE_STREAM_PENDING_OUT);               /* Eve sees "pending", as ever */
+        CHECK(has_provisional(&eve));                                                              /* Eve sees "pending", as ever */
         CHECK(!stream_state(&alice, eve.uid, &s));                                                /* and Alice holds nothing of Eve */
     }
     CHECK(wait_owed_cleared(&eve, alice.uid) || 1);
@@ -631,7 +637,7 @@ int main(void)
         usleep(700000);
         puddle_stream_state s;
         CHECK(stream_state(&alice, carol.uid, &s) && s == PUDDLE_STREAM_CLOSED);                  /* nothing new recorded */
-        CHECK(stream_state(gina, alice.uid, &s) && s == PUDDLE_STREAM_PENDING_OUT);
+        CHECK(has_provisional(gina));
     }
     CHECK(post(&alice, "/api/v1/stream/policy", "{\"access\":\"manual\"}") == 200);
     /* what the question "is my request still waiting?" gets: pending for a block, a closed door and a stranger alike */
@@ -754,36 +760,34 @@ int main(void)
         CHECK(wait_owed_cleared(&alice, bob.uid));
     }
 
-    /* ---- a request that can't be sent is refused at once or fails with its reason ---- */
+    /* ---- a request that can't be sent is refused at once, or waits ---- */
     request(&alice, &alice, "me", alice.link, 400);                                                /* not yourself */
     CHECK(json_has("cannot_request_yourself"));
-    request(&alice, &bob, "x", "puddle://nonsense@1.2.3.4:1", 400);
+    request(&alice, &bob, "x", "nonsense!@1.2.3.4:1", 400);
+    CHECK(json_has("bad_link"));
+    request(&alice, &bob, "x", "puddle://" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@127.0.0.1:1", 400); /* an id has no place in an address */
     CHECK(json_has("bad_link"));
     {
         char l[300];
-        snprintf(l, sizeof l, "puddle://%s@127.0.0.1:%u", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", free_port());
+        snprintf(l, sizeof l, "127.0.0.1:%u", free_port());
         request(&alice, &bob, "to nobody", l, 201);                                                /* nothing there: waits, and is not a failure */
         usleep(800000);
-        CHECK(get(&alice, "/api/v1/stream?state=pending_out") == 200 && json_has("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        CHECK(get(&alice, "/api/v1/stream?state=pending_out") == 200 && json_has(l) && json_has("\"provisional\":true"));
+        request(&alice, &bob, "to nobody again", l, 409);                                          /* once is enough */
+        CHECK(json_has("already_requested"));
     }
     {
-        /* someone answers, but not as a Puddle: the request fails once, with a reason the owner can read */
-        char l[300];
-        snprintf(l, sizeof l, "puddle://%s@127.0.0.1:%u", eve.uid, dave.cfg.port);              /* Dave's port, Eve's id */
-        stream_body(body, sizeof body, eve.uid);
-        request(&alice, &eve, "who are you", l, 409);                                              /* Alice blocked Eve */
-        CHECK(json_has("\"blocked\""));
+        /* blocking is by id, which is only known once someone answers: Alice blocks Eve, then asks at Eve's address; Eve says yes,
+         * and Alice drops it on seeing whose answer it is */
+        snprintf(body, sizeof body, "{\"user\":\"%s\"}", eve.uid);
+        CHECK(post(&alice, "/api/v1/user/block", body) == 201);
+        request(&alice, &eve, "who are you", eve.link, 201);
+        CHECK(wait_state(&eve, alice.uid, PUDDLE_STREAM_ACTIVE));                                  /* Eve had asked Alice too: both asked, so yes */
+        usleep(1000000);
+        puddle_stream_state s;
+        CHECK(!stream_state(&alice, eve.uid, &s));                                                 /* Alice holds nothing of Eve */
         snprintf(body, sizeof body, "{\"user\":\"%s\"}", eve.uid);
         CHECK(post(&alice, "/api/v1/user/unblock", body) == 204);
-        request(&alice, &eve, "who are you", l, 201);
-        int failed = 0;
-        for (int i = 0; i < 100 && !failed; i++) {
-            puddle_stream_state s;
-            failed = stream_state(&alice, eve.uid, &s) && s == PUDDLE_STREAM_CLOSED;
-            if (!failed) usleep(50000);
-        }
-        CHECK(failed);                                                                             /* Dave answered 404: not who was asked for */
-        CHECK(get(&alice, "/api/v1/stream?state=closed") == 200 && json_has("\"error\":\"they could not be asked"));
     }
 
     /* ---- strangers ---- */

@@ -52,6 +52,15 @@ static int apply_answer(void *user, puddle_stream *st, int exists)
     return 0;
 }
 
+static int owe_closed(void *user, puddle_stream *st, int exists)
+{
+    (void)user;
+    if (!exists || st->state != PUDDLE_STREAM_CLOSED)
+        return 1;
+    st->owed = PUDDLE_OWED_CLOSED;
+    return 0;
+}
+
 /* Whoever signs this has proved they hold the key of the id they claim, which any stranger can: what matters is
  * that we have a record of asking exactly that id (the link pinned it), and then the answer is theirs to give.
  * Everything else is dropped without a word. */
@@ -65,6 +74,20 @@ static int result_post(const puddle_call *c, puddle_jw *w)
         return 202;
     int approved = puddle_json_member(b, c->body_len, "approved", &ap) == 0 && ap.len == 4 && !memcmp(ap.p, "true", 4);
     int valid_bool = puddle_json_member(b, c->body_len, "approved", &ap) == 0 && (approved || (ap.len == 5 && !memcmp(ap.p, "false", 5)));
+    /* An answer to a request we sent to an address says who they are; the ticket in it is the one only they were given. */
+    puddle_span tv;
+    char ticket[33] = "";
+    if (valid_bool && !strcmp(p.id, c->sender) && puddle_json_member(b, c->body_len, "ticket", &tv) == 0 &&
+        puddle_json_string(tv, ticket, sizeof ticket) == 0 && ticket[0]) {
+        int ar = puddle_flow_adopt(c->ctx, ticket, p.id);
+        if (ar == 0) {
+            puddle_log(PUDDLE_LOG_INFO, "%.12s… answered our request", p.id);
+            /* we withdrew the request, and they have said yes anyway: tell them the stream is closed */
+            char oerr[200];
+            if (approved && puddle_streams_update(c->ctx->streams, p.id, owe_closed, NULL, oerr, sizeof oerr) == 0)
+                puddle_flow_owe(c->ctx, p.id, PUDDLE_OWED_CLOSED);
+        }
+    }
     if (valid_bool && !strcmp(p.id, c->sender)) {
         answer a = { &p, approved, puddle_call_now_ms(c) };
         char err[300];

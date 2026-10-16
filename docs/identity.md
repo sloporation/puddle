@@ -22,8 +22,8 @@ the identity's key chain, anyone can check they belong together, with no registr
 depend on an IP address, a hostname or a TLS certificate, so it survives the user moving.
 
 The roll key's hash is part of the id on purpose. Someone who steals only the daily keys can sign a *different*
-first record (with a roll key of their own), but its id comes out different, so a link's id rejects it. With the
-id covering only the signing key, that forgery would have been a valid chain for the victim's id.
+first record (with a roll key of their own), but its id comes out different, so a chain from the daily keys alone cannot
+be passed off as the same identity. With the id covering only the signing key, that forgery would have been a valid chain for the victim's id.
 
 ## Devices (phones)
 
@@ -111,11 +111,13 @@ events are dropped.
 
 ## Becoming contacts (the handshake)
 
-1. A gets B's **invite**: `puddle://<B-user-id>@<address>` (link, QR code, or pasted). The id pins
-   B's first keys; a man-in-the-middle cannot substitute another identity without changing the id.
-2. A sends B a signed **contact request**: A's key chain, address and display name.
-3. B's user accepts. B replies signed, with B's key chain.
-4. Each stores the other's chain and address. Optionally, both compare a short fingerprint out of band.
+1. A gets B's **address** (`home.example.org:8443`; the port defaults to 443), pasted or in a link. No id is
+   part of it: the id is something the answer tells A (streams.md, "Asking for a stream").
+2. A sends B a signed **contact request** carrying A's id, key chain, address, display name and a random ticket.
+3. B's user accepts. B replies signed, with B's key chain, id and A's ticket.
+4. Each stores the other's chain and address. From here the id is a label for a chain, never typed by anyone;
+   what proves a message is from them is the key in that chain. First contact trusts whoever answers at the
+   address (an owner's choice, recorded in the roadmap); friend codes and a handshake come later.
 
 ## Address changes
 

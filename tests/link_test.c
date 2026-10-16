@@ -28,72 +28,72 @@ int main(void)
     CHECK(!puddle_id_valid(ID "q"));
     CHECK(!puddle_id_valid("../../etc/passwd/../../xxxxxxxxxxxxxxxxxxxxxxxxxxxxq"));
 
-    /* links */
-    CHECK(parse("puddle://" ID "@203.0.113.7:8443", &l) == 0);
-    CHECK(!strcmp(l.id, ID) && !strcmp(l.address.host, "203.0.113.7") && l.address.port == 8443 &&
-          !strcmp(l.address.address, "203.0.113.7:8443") && l.invite[0] == '\0');
-    CHECK(parse("puddle://" ID "@[2001:db8::1]:9000", &l) == 0 && !strcmp(l.address.host, "2001:db8::1") &&
-          l.address.port == 9000 && !strcmp(l.address.address, "[2001:db8::1]:9000"));
-    CHECK(parse("puddle://" ID "@Home.Example.ORG:1", &l) == 0 && !strcmp(l.address.address, "home.example.org:1"));
-    CHECK(parse("puddle://" ID "@home.example.org", &l) == 0 && l.address.port == 8443); /* port defaults */
-    CHECK(parse("puddle://" ID "@[::1]", &l) == 0 && !strcmp(l.address.address, "[::1]:8443"));
-    CHECK(parse("puddle://" ID "@10.0.0.1:8443?invite=" TOKEN, &l) == 0 && !strcmp(l.invite, TOKEN));
-    CHECK(parse("puddle://" ID "@10.0.0.1:8443/", &l) == 0);
-    CHECK(parse("puddle://" ID "@10.0.0.1:8443/?invite=" TOKEN, &l) != 0); /* a path before the query: not ours */
-    CHECK(parse("puddle://" ID "@[::1]:1?invite=" TOKEN, &l) == 0);
+    /* what an owner types or pastes: an address, with or without the scheme */
+    CHECK(parse("203.0.113.7:8443", &l) == 0);
+    CHECK(!strcmp(l.address.host, "203.0.113.7") && l.address.port == 8443 && !strcmp(l.address.address, "203.0.113.7:8443") && l.invite[0] == '\0');
+    CHECK(parse("puddle://203.0.113.7:8443", &l) == 0 && !strcmp(l.address.address, "203.0.113.7:8443"));
+    CHECK(parse("[2001:db8::1]:9000", &l) == 0 && !strcmp(l.address.host, "2001:db8::1") && l.address.port == 9000 &&
+          !strcmp(l.address.address, "[2001:db8::1]:9000"));
+    CHECK(parse("Home.Example.ORG:1", &l) == 0 && !strcmp(l.address.address, "home.example.org:1"));
+    CHECK(parse("home.example.org", &l) == 0 && l.address.port == 443 && !strcmp(l.address.address, "home.example.org:443")); /* port defaults to 443 */
+    CHECK(parse("203.0.113.7", &l) == 0 && l.address.port == 443);
+    CHECK(parse("[::1]", &l) == 0 && !strcmp(l.address.address, "[::1]:443"));
+    CHECK(parse("puddle://[::1]", &l) == 0 && l.address.port == 443);
+    CHECK(parse("10.0.0.1:8443?invite=" TOKEN, &l) == 0 && !strcmp(l.invite, TOKEN));
+    CHECK(parse("puddle://10.0.0.1?invite=" TOKEN, &l) == 0 && !strcmp(l.invite, TOKEN) && l.address.port == 443);
+    CHECK(parse("10.0.0.1:8443/", &l) == 0);
+    CHECK(parse("10.0.0.1:8443/?invite=" TOKEN, &l) != 0); /* a path before the query: not ours */
+    CHECK(parse("[::1]:1?invite=" TOKEN, &l) == 0);
 
     const char *bad[] = {
-        "", "puddle://", "puddle:", "https://" ID "@1.2.3.4:1", "PUDDLE://" ID "@1.2.3.4:1", " puddle://" ID "@1.2.3.4:1",
-        "puddle://" ID "@1.2.3.4:1 ", "puddle://" ID "@1.2.3.4:1\n", "puddle://" ID "@1.2.3.4:1\t",
-        "puddle://" ID, "puddle://" ID "@", "puddle://@1.2.3.4:1", "puddle://abc@1.2.3.4:1",
-        "puddle://" ID "x@1.2.3.4:1", "puddle://omhh6dd2fusc2douu4rdqigbshrjdz2zprtyxdf3j7igten6pmrb@1.2.3.4:1",
-        "puddle://" ID "@1.2.3.4:1@5.6.7.8:1", "puddle://" ID "@evil@1.2.3.4:1",
-        "puddle://" ID "@1.2.3.4:1/path", "puddle://" ID "@1.2.3.4:1#frag", "puddle://" ID "@1.2.3.4:1?x=1",
-        "puddle://" ID "@1.2.3.4:1?invite=", "puddle://" ID "@1.2.3.4:1?invite=short",
-        "puddle://" ID "@1.2.3.4:1?invite=" TOKEN "x", "puddle://" ID "@1.2.3.4:1?invite=ABCDEFGHIJKLMNOPQRSTUVWXY2",
-        "puddle://" ID "@1.2.3.4:1?invite=" TOKEN "&invite=" TOKEN, "puddle://" ID "@1.2.3.4:1?invite=" TOKEN "&x=1",
-        "puddle://" ID "@1.2.3.4:0", "puddle://" ID "@1.2.3.4:65536", "puddle://" ID "@1.2.3.4:-1",
-        "puddle://" ID "@1.2.3.4:", "puddle://" ID "@1.2.3.4:80a", "puddle://" ID "@1.2.3.4:123456",
-        "puddle://" ID "@1.2.3.4:+80", "puddle://" ID "@1.2.3.4:8 0",
-        "puddle://" ID "@999.1.1.1:1", "puddle://" ID "@256.1.1.1:1", "puddle://" ID "@1.2.3.256:1",
-        "puddle://" ID "@1.2.3.4:1?abcdef=" TOKEN, "puddle://" ID "@1.2.3.4:000080", "puddle://" ID "@1.2.3:1", "puddle://" ID "@1.2.3.4.5:1", "puddle://" ID "@1.2.3.:1",
-        "puddle://" ID "@01234.1.1.1:1",
-        "puddle://" ID "@::1:8443", "puddle://" ID "@[::1:8443", "puddle://" ID "@::1]:8443", "puddle://" ID "@[]:1",
-        "puddle://" ID "@[::1]x", "puddle://" ID "@[::1]:", "puddle://" ID "@[g::1]:1", "puddle://" ID "@[1:2:3]:1",
-        "puddle://" ID "@[1::2::3]:1", "puddle://" ID "@[:1]:1", "puddle://" ID "@[1:]:1", "puddle://" ID "@[1:::2]:1",
-        "puddle://" ID "@[12345::]:1", "puddle://" ID "@[1:2:3:4:5:6:7:8:9]:1", "puddle://" ID "@[1:2:3:4:5:6:7:8::]:1",
-        "puddle://" ID "@[::ffff:1.2.3.4]:1", "puddle://" ID "@[fe80::1%eth0]:1",
-        "puddle://" ID "@-a.example:1", "puddle://" ID "@a-.example:1", "puddle://" ID "@a..example:1",
-        "puddle://" ID "@.example:1", "puddle://" ID "@exa_mple.org:1", "puddle://" ID "@exa mple.org:1",
-        "puddle://" ID "@\xC3\xA9xample.org:1", "puddle://" ID "@a.example.:1x",
-        "puddle://" ID "@localhost:8443:9", "puddle://" ID "@[::1]:8443:9",
+        "", "puddle://", "puddle:", "https://1.2.3.4:1", "PUDDLE://1.2.3.4:1", " 1.2.3.4:1", "1.2.3.4:1 ", "1.2.3.4:1\n", "1.2.3.4:1\t",
+        "puddle://" ID "@1.2.3.4:1",                                   /* an id is not part of an address */
+        "bob@1.2.3.4:1", "1.2.3.4:1@5.6.7.8:1", "evil@1.2.3.4:1", "@1.2.3.4:1",
+        "1.2.3.4:1/path", "1.2.3.4:1#frag", "1.2.3.4:1?x=1", "1.2.3.4:1?invite=", "1.2.3.4:1?invite=short",
+        "1.2.3.4:1?invite=" TOKEN "x", "1.2.3.4:1?invite=ABCDEFGHIJKLMNOPQRSTUVWXY2",
+        "1.2.3.4:1?invite=" TOKEN "&invite=" TOKEN, "1.2.3.4:1?invite=" TOKEN "&x=1",
+        "1.2.3.4:0", "1.2.3.4:65536", "1.2.3.4:-1", "1.2.3.4:", "1.2.3.4:80a", "1.2.3.4:123456", "1.2.3.4:+80", "1.2.3.4:8 0",
+        "999.1.1.1:1", "256.1.1.1:1", "1.2.3.256:1", "1.2.3.4:1?abcdef=" TOKEN, "1.2.3.4:000080", "1.2.3:1", "1.2.3.4.5:1", "1.2.3.:1",
+        "01234.1.1.1:1",
+        "::1:8443", "[::1:8443", "::1]:8443", "[]:1", "[::1]x", "[::1]:", "[g::1]:1", "[1:2:3]:1",
+        "[1::2::3]:1", "[:1]:1", "[1:]:1", "[1:::2]:1", "[12345::]:1", "[1:2:3:4:5:6:7:8:9]:1", "[1:2:3:4:5:6:7:8::]:1",
+        "[::ffff:1.2.3.4]:1", "[fe80::1%eth0]:1",
+        "-a.example:1", "a-.example:1", "a..example:1", ".example:1", "exa_mple.org:1", "exa mple.org:1",
+        "\xC3\xA9xample.org:1", "a.example.:1x", "localhost:8443:9", "[::1]:8443:9",
     };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char with_scheme[400];
+        snprintf(with_scheme, sizeof with_scheme, "puddle://%s", bad[i]);
+        if (strncmp(bad[i], "puddle:", 7) && parse(with_scheme, &l) == 0 && strcmp(bad[i], "") && strcmp(bad[i], " 1.2.3.4:1") &&
+            strcmp(bad[i], "1.2.3.4:1 ") && strcmp(bad[i], "1.2.3.4:1\n") && strcmp(bad[i], "1.2.3.4:1\t")) {
+            fprintf(stderr, "FAIL accepted with a scheme: %s\n", bad[i]);
+            failures++;
+        }
         if (parse(bad[i], &l) == 0) {
             fprintf(stderr, "FAIL accepted: %s\n", bad[i]);
             failures++;
         }
     }
     char e[100] = "";
-    CHECK(puddle_link_parse("nope", &l, e, sizeof e) == -1 && e[0]);
+    CHECK(puddle_link_parse("nope!", &l, e, sizeof e) == -1 && e[0]);
     CHECK(puddle_link_parse(NULL, &l, e, sizeof e) == -1);
-    CHECK(puddle_link_parse("puddle://" ID "@1.2.3.4:1", &l, NULL, 0) == 0);
+    CHECK(puddle_link_parse("1.2.3.4:1", &l, NULL, 0) == 0);
 
     /* an over-long hostname label or name */
     char host[400], text[600];
     memset(host, 'a', 64); host[64] = 0;
-    snprintf(text, sizeof text, "puddle://" ID "@%s.example:1", host);
+    snprintf(text, sizeof text, "%s.example:1", host);
     CHECK(parse(text, &l) != 0);
     memset(host, 'a', 63); host[63] = 0;
-    snprintf(text, sizeof text, "puddle://" ID "@%s.example:1", host);
+    snprintf(text, sizeof text, "%s.example:1", host);
     CHECK(parse(text, &l) == 0);
     memset(host, 'a', 300); host[300] = 0;
-    snprintf(text, sizeof text, "puddle://" ID "@%s:1", host);
+    snprintf(text, sizeof text, "%s:1", host);
     CHECK(parse(text, &l) != 0);
 
     /* addresses on their own */
     CHECK(addr("1.2.3.4:5", &a) == 0 && a.port == 5 && !strcmp(a.address, "1.2.3.4:5"));
-    CHECK(addr("fe80::1", &a) != 0 && addr("[fe80::1]", &a) == 0 && !strcmp(a.address, "[fe80::1]:8443"));
+    CHECK(addr("fe80::1", &a) != 0 && addr("[fe80::1]", &a) == 0 && !strcmp(a.address, "[fe80::1]:443"));
     CHECK(addr("[::]:1", &a) == 0 && addr("[::ABCD]:1", &a) == 0 && !strcmp(a.host, "::abcd")); /* case folded */
     CHECK(addr("", &a) != 0 && addr(NULL, &a) != 0 && addr("a b", &a) != 0);
     CHECK(addr("a:1", &a) == 0 && addr("A:1", &a) == 0 && !strcmp(a.host, "a"));
@@ -105,12 +105,16 @@ int main(void)
     CHECK(!puddle_invite_token_valid("abcdefghijklmnopqrstuvwxy1")); /* 1 is not base32 */
     CHECK(!puddle_invite_token_valid("ABCDEFGHIJKLMNOPQRSTUVWXY2"));
 
-    /* formatting, and back */
+    /* formatting, and back: the port everyone assumes is not written */
     char out[300];
-    CHECK(puddle_link_format(ID, "[::1]:8443", NULL, out, sizeof out) == 0 && !strcmp(out, "puddle://" ID "@[::1]:8443"));
-    CHECK(puddle_link_format(ID, "1.2.3.4:5", TOKEN, out, sizeof out) == 0 && parse(out, &l) == 0 && !strcmp(l.invite, TOKEN));
-    CHECK(puddle_link_format(ID, "1.2.3.4:5", "", out, sizeof out) == 0 && !strchr(out, '?'));
-    CHECK(puddle_link_format(ID, "1.2.3.4:5", NULL, out, 20) == -1);
+    CHECK(puddle_link_format("[::1]:8443", NULL, out, sizeof out) == 0 && !strcmp(out, "[::1]:8443"));
+    CHECK(puddle_link_format("[::1]:443", NULL, out, sizeof out) == 0 && !strcmp(out, "[::1]") && parse(out, &l) == 0 && l.address.port == 443);
+    CHECK(puddle_link_format("home.example.org:443", NULL, out, sizeof out) == 0 && !strcmp(out, "home.example.org"));
+    CHECK(puddle_link_format("1.2.3.4:5443", NULL, out, sizeof out) == 0 && !strcmp(out, "1.2.3.4:5443")); /* only exactly :443 */
+    CHECK(puddle_link_format("1.2.3.4:5", TOKEN, out, sizeof out) == 0 && parse(out, &l) == 0 && !strcmp(l.invite, TOKEN) && l.address.port == 5);
+    CHECK(puddle_link_format("1.2.3.4:443", TOKEN, out, sizeof out) == 0 && !strcmp(out, "1.2.3.4?invite=" TOKEN));
+    CHECK(puddle_link_format("1.2.3.4:5", "", out, sizeof out) == 0 && !strchr(out, '?'));
+    CHECK(puddle_link_format("1.2.3.4:5", NULL, out, 4) == -1);
 
     /* nothing random crashes, and what is accepted is always the canonical thing */
     srand(11);
@@ -123,10 +127,10 @@ int main(void)
         t[n] = 0;
         char buf[300];
         if (rand() % 2) { /* sometimes start from something well-formed */
-            snprintf(buf, sizeof buf, "puddle://" ID "@%s", t);
+            snprintf(buf, sizeof buf, "10.0.0.%s", t);
             if (parse(buf, &l) == 0) {
                 char again[300];
-                CHECK(puddle_link_format(l.id, l.address.address, l.invite, again, sizeof again) == 0 && parse(again, &l) == 0);
+                CHECK(puddle_link_format(l.address.address, l.invite, again, sizeof again) == 0 && parse(again, &l) == 0);
             }
         } else {
             (void)parse(t, &l);

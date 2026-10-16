@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
+#include <openssl/sha.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -25,6 +26,7 @@ typedef struct {
     char id[PUDDLE_USER_ID_LEN + 1];
     puddle_stream_state state;
     int has_key;
+    int provisional; /* a request to an address, not yet answered (kept in the index so finding one does not read every file) */
     char kid[65];
     unsigned char sign_pub[32];
 } entry;
@@ -214,6 +216,10 @@ static char *encode(const puddle_stream *st, size_t *out_len)
         puddle_jw_str(&w, "tls_fp", st->tls_fp);
     if (st->tls_fp_seen[0])
         puddle_jw_str(&w, "tls_fp_seen", st->tls_fp_seen);
+    if (st->ticket[0])
+        puddle_jw_str(&w, "ticket", st->ticket);
+    if (st->provisional)
+        puddle_jw_flag(&w, "provisional", 1);
     if (st->error[0])
         puddle_jw_str(&w, "error", st->error);
     if (st->chain_sent >= 0)
@@ -311,6 +317,17 @@ static int decode(const char *json, size_t len, const char *expect_id, puddle_st
             return -1;
     }
     {
+        puddle_span tv;
+        int trc = puddle_json_member(json, len, "ticket", &tv);
+        unsigned char raw[16];
+        if (trc < 0 || (trc == 0 && (puddle_json_string(tv, st->ticket, sizeof st->ticket) != 0 || puddle_hex_decode(st->ticket, raw, 16) != 0)))
+            return -1;
+        int prc = puddle_json_member(json, len, "provisional", &tv);
+        if (prc < 0)
+            return -1;
+        st->provisional = prc == 0 && tv.len == 4 && !memcmp(tv.p, "true", 4);
+    }
+    {
         puddle_span ev;
         int erc = puddle_json_member(json, len, "error", &ev);
         if (erc < 0 || (erc == 0 && puddle_json_string(ev, st->error, sizeof st->error) != 0))
@@ -364,7 +381,7 @@ static entry *find_entry(puddle_streams *s, const char *id)
     return NULL;
 }
 
-static int index_put(puddle_streams *s, const char *id, puddle_stream_state state, const puddle_chain_head *head)
+static int index_put(puddle_streams *s, const char *id, puddle_stream_state state, const puddle_chain_head *head, int provisional)
 {
     entry *e = find_entry(s, id);
     if (!e) {
@@ -381,6 +398,7 @@ static int index_put(puddle_streams *s, const char *id, puddle_stream_state stat
         memcpy(e->id, id, PUDDLE_USER_ID_LEN + 1);
     }
     e->state = state;
+    e->provisional = provisional;
     e->has_key = head != NULL;
     if (head) {
         memcpy(e->sign_pub, head->sign_pub, 32);
@@ -616,7 +634,7 @@ puddle_streams *puddle_streams_open(const char *data_dir, char *err, size_t errl
             free(text);
             continue;
         }
-        index_put(s, id, st.state, has_head ? &head : NULL);
+        index_put(s, id, st.state, has_head ? &head : NULL, st.provisional);
         puddle_stream_free(&st);
         free(text);
     }
@@ -700,7 +718,7 @@ static int put_locked(puddle_streams *s, const puddle_stream *st, char *err, siz
         seterr(err, errlen, "cannot write %s: %s", path, strerror(errno));
         return -1;
     }
-    if (index_put(s, st->id, st->state, st->chain ? &head : NULL) != 0) {
+    if (index_put(s, st->id, st->state, st->chain ? &head : NULL, st->provisional) != 0) {
         seterr(err, errlen, "out of memory");
         return -1;
     }
@@ -766,6 +784,199 @@ int puddle_streams_update(puddle_streams *s, const char *id_in, puddle_stream_up
     }
     puddle_stream_free(&st);
 out:
+    pthread_mutex_unlock(&s->mu);
+    return rc;
+}
+
+/* ---- requests to an address ---- */
+
+int puddle_ticket_new(char out[33])
+{
+    unsigned char raw[16];
+    static const char hex[] = "0123456789abcdef";
+    if (RAND_bytes(raw, sizeof raw) != 1)
+        return -1;
+    for (int i = 0; i < 16; i++) {
+        out[2 * i] = hex[raw[i] >> 4];
+        out[2 * i + 1] = hex[raw[i] & 15];
+    }
+    out[32] = '\0';
+    return 0;
+}
+
+int puddle_provisional_id(const char *ticket, char out[PUDDLE_USER_ID_LEN + 1])
+{
+    char text[64];
+    unsigned char h[32];
+    if (!ticket || strlen(ticket) != 32)
+        return -1;
+    snprintf(text, sizeof text, "puddle-provisional\n%s", ticket);
+    SHA256((const unsigned char *)text, strlen(text), h);
+    return puddle_base32_encode(h, 32, out, PUDDLE_USER_ID_LEN + 1) == PUDDLE_USER_ID_LEN ? 0 : -1;
+}
+
+/* caller holds the lock: the provisional record that `match` accepts */
+static int find_provisional_locked(puddle_streams *s, int (*match)(const puddle_stream *, const char *), const char *key, puddle_stream *out)
+{
+    for (size_t i = 0; i < s->nentries; i++) {
+        if (!s->entries[i].provisional)
+            continue;
+        char path[1200];
+        size_t len;
+        record_path(s, s->entries[i].id, path, sizeof path);
+        char *text = read_all(path, &len);
+        if (!text)
+            continue;
+        puddle_stream st;
+        puddle_chain_head head;
+        int has_head;
+        int ok = decode(text, len, s->entries[i].id, &st, &head, &has_head) == 0;
+        free(text);
+        if (!ok)
+            continue;
+        if (st.provisional && match(&st, key)) {
+            *out = st;
+            return 0;
+        }
+        puddle_stream_free(&st);
+    }
+    return 1;
+}
+
+static int match_ticket(const puddle_stream *st, const char *t) { return t[0] && !strcmp(st->ticket, t); }
+static int match_address(const puddle_stream *st, const char *a) { return st->state == PUDDLE_STREAM_PENDING_OUT && st->naddr > 0 && !strcmp(st->addresses[0], a); }
+
+int puddle_streams_find_ticket(puddle_streams *s, const char *ticket, puddle_stream *out)
+{
+    pthread_mutex_lock(&s->mu);
+    int rc = find_provisional_locked(s, match_ticket, ticket, out);
+    pthread_mutex_unlock(&s->mu);
+    return rc;
+}
+
+int puddle_streams_find_provisional(puddle_streams *s, const char *address, puddle_stream *out)
+{
+    pthread_mutex_lock(&s->mu);
+    int rc = find_provisional_locked(s, match_address, address, out);
+    pthread_mutex_unlock(&s->mu);
+    return rc;
+}
+
+/* caller holds the lock */
+static void drop_locked(puddle_streams *s, const char *id)
+{
+    char path[1200];
+    record_path(s, id, path, sizeof path);
+    unlink(path);
+    for (size_t i = 0; i < s->nentries; i++)
+        if (!strcmp(s->entries[i].id, id)) {
+            memmove(&s->entries[i], &s->entries[i + 1], (s->nentries - i - 1) * sizeof *s->entries);
+            s->nentries--;
+            break;
+        }
+}
+
+int puddle_streams_adopt(puddle_streams *s, const char *provisional_id, const char *real_id, char *err, size_t errlen)
+{
+    if (!puddle_id_valid(provisional_id) || !puddle_id_valid(real_id) || !strcmp(provisional_id, real_id)) {
+        seterr(err, errlen, "not a valid user id");
+        return -1;
+    }
+    char path[1200];
+    size_t len;
+    pthread_mutex_lock(&s->mu);
+    int rc = -1;
+    record_path(s, provisional_id, path, sizeof path);
+    char *text = read_all(path, &len);
+    puddle_stream st;
+    puddle_chain_head head;
+    int has_head;
+    if (!text || decode(text, len, provisional_id, &st, &head, &has_head) != 0) {
+        free(text);
+        seterr(err, errlen, "no such request");
+        goto out;
+    }
+    free(text);
+    if (!st.provisional) {
+        puddle_stream_free(&st);
+        seterr(err, errlen, "not a provisional request");
+        goto out;
+    }
+    if (is_blocked_locked(s, real_id)) {
+        drop_locked(s, provisional_id);
+        puddle_stream_free(&st);
+        rc = 2;
+        goto out;
+    }
+    if (find_entry(s, real_id)) {
+        /* We know them already. If that stream was closed, this request starts it afresh; any other state stands. */
+        puddle_stream old;
+        char rpath[1200];
+        size_t rlen;
+        record_path(s, real_id, rpath, sizeof rpath);
+        char *rtext = read_all(rpath, &rlen);
+        if (rtext && decode(rtext, rlen, real_id, &old, &head, &has_head) == 0) {
+            if (old.state == PUDDLE_STREAM_CLOSED) {
+                old.state = PUDDLE_STREAM_PENDING_OUT;
+                old.owed = PUDDLE_OWED_NONE;
+                old.error[0] = '\0';
+                old.updated_ms = st.updated_ms;
+                snprintf(old.note, sizeof old.note, "%s", st.note);
+                for (int k = 0; k < st.naddr; k++)
+                    puddle_stream_add_address(&old, st.addresses[k]);
+                if (put_locked(s, &old, err, errlen) == 0) {
+                    drop_locked(s, provisional_id);
+                    rc = 0;
+                }
+            } else {
+                drop_locked(s, provisional_id);
+                rc = 1;
+            }
+            puddle_stream_free(&old);
+        } else {
+            drop_locked(s, provisional_id);
+            rc = 1;
+        }
+        free(rtext);
+        puddle_stream_free(&st);
+        goto out;
+    }
+    memcpy(st.id, real_id, PUDDLE_USER_ID_LEN + 1);
+    st.provisional = 0;
+    st.ticket[0] = '\0';
+    if (put_locked(s, &st, err, errlen) != 0) {
+        puddle_stream_free(&st);
+        goto out;
+    }
+    drop_locked(s, provisional_id);
+    puddle_stream_free(&st);
+    rc = 0;
+out:
+    pthread_mutex_unlock(&s->mu);
+    return rc;
+}
+
+int puddle_streams_forget(puddle_streams *s, const char *provisional_id)
+{
+    if (!puddle_id_valid(provisional_id))
+        return -1;
+    char path[1200];
+    size_t len;
+    pthread_mutex_lock(&s->mu);
+    record_path(s, provisional_id, path, sizeof path);
+    char *text = read_all(path, &len);
+    puddle_stream st;
+    puddle_chain_head head;
+    int has_head;
+    int rc = 1;
+    if (text && decode(text, len, provisional_id, &st, &head, &has_head) == 0) {
+        if (st.provisional) {
+            drop_locked(s, provisional_id);
+            rc = 0;
+        }
+        puddle_stream_free(&st);
+    }
+    free(text);
     pthread_mutex_unlock(&s->mu);
     return rc;
 }

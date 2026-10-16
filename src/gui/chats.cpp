@@ -22,7 +22,7 @@ QString shortId(const QString &id)
 
 Chats::Chats(QObject *parent)
     : QObject(parent),
-      people_({ "id", "name", "state", "note", "error", "certificate_changed", "avatar", "color", "updated_at", "address" }),
+      people_({ "id", "name", "state", "note", "error", "certificate_changed", "avatar", "color", "updated_at", "address", "provisional" }),
       conversations_({ "user", "name", "avatar", "color", "stream", "last", "unread" }, nullptr, "user"),
       messages_({ "id", "sender", "senderName", "ts", "body", "outgoing", "edited", "deleted", "reply_to", "avatar", "tint", "grouped",
                   "dayStart", "replyName", "replyText", "replyMissing", "deliveryState", "deliveryReason", "deliveryNext" }),
@@ -184,6 +184,8 @@ void Chats::refreshPeople()
             const QJsonObject profile = s.value("peer").toObject().value("profile").toObject();
             const QString id = s.value("id").toString();
             QString name = profile.value("display_name").toString();
+            if (name.isEmpty() && s.value("provisional").toBool())
+                name = s.value("address").toString(); // nobody has answered yet: all we know is where we asked
             if (name.isEmpty())
                 name = shortId(id);
             names[id] = name;

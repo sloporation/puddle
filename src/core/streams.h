@@ -57,11 +57,19 @@ typedef struct {
     char tls_fp_seen[65];  /* a different certificate we met since, waiting for the owner to say it is fine; else "" */
     int64_t chain_sent;    /* the highest seq of OUR key chain this peer is known to hold; -1 = not known */
     int64_t addr_sent;     /* the highest seq of OUR address record this peer is known to hold; -1 = not known */
+    char ticket[33];       /* 32 hex characters: a request we sent to an address, until its answer names who they are (and the
+                            * same ticket on the record of someone who asked us, to be handed back in our answer); "" if none */
+    int provisional;       /* a request we sent to an address whose owner we do not know yet: filed under a made-up id */
     char error[200];       /* why a request we sent, or an answer we owed, did not get through; "" if nothing went wrong */
     char note[PUDDLE_NOTE_MAX_BYTES + 1]; /* the message sent with the request */
     char *profile;     /* the profile they showed us, as a JSON object; NULL if none */
     int64_t created_ms, updated_ms;
 } puddle_stream;
+
+/* A request to an address, before we know who lives there: it is filed under an id made from a random `ticket`, which
+ * the answer must repeat. Both are made here. */
+int puddle_ticket_new(char out[33]);
+int puddle_provisional_id(const char *ticket, char out[PUDDLE_USER_ID_LEN + 1]);
 
 /* Fill in an empty record for `id`. 0, or -1 if `id` is not a valid user id. */
 int puddle_stream_init(puddle_stream *st, const char *id, puddle_stream_state state, int64_t now_ms);
@@ -99,6 +107,21 @@ int puddle_streams_put(puddle_streams *s, const puddle_stream *st, char *err, si
 typedef int (*puddle_stream_update_fn)(void *user, puddle_stream *st, int exists);
 int puddle_streams_update(puddle_streams *s, const char *id, puddle_stream_update_fn fn, void *user, char *err,
                           size_t errlen);
+
+/* The provisional record with this ticket (a copy, whatever its state), or the one still waiting for a request to this address.
+ * 0 found, 1 none. */
+int puddle_streams_find_ticket(puddle_streams *s, const char *ticket, puddle_stream *out);
+int puddle_streams_find_provisional(puddle_streams *s, const char *address, puddle_stream *out);
+
+/* The answer to a provisional request says who it is: refile the record under `real_id` (state, note, addresses and
+ * certificate carry over; it stops being provisional and its ticket is spent). If `real_id` already has a closed stream, it is
+ * started afresh from the provisional one; any other existing record stands and the provisional one is dropped, as it is if
+ * `real_id` is blocked. Returns 0 refiled, 1 dropped because a record existed,
+ * 2 dropped because blocked, -1 on failure (nothing changed). */
+int puddle_streams_adopt(puddle_streams *s, const char *provisional_id, const char *real_id, char *err, size_t errlen);
+
+/* Forget a provisional record (the owner changed their mind). 0, 1 if there was none, -1. Only provisional ones. */
+int puddle_streams_forget(puddle_streams *s, const char *provisional_id);
 
 /* Every peer. Free with puddle_stream_list_free. 0 or -1. */
 int puddle_streams_list(puddle_streams *s, puddle_stream **out, size_t *count);

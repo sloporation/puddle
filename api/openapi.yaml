@@ -267,13 +267,15 @@ paths:
       summary: Ask another Puddle to become friends
       description: |
         Sends a stream request to the target, with an optional short note ("hey it's Jayden from work").
-        Returns a `pending_out` stream; it becomes `active` when they accept. Requesting someone who
-        has blocked you looks exactly like a request that is still pending. The other Puddle can only answer
-        if it can reach you, so this needs this Puddle's public address (`409 no_address`; set `advertise:`).
-        `409` also for `already_streaming`, `already_requested`, `they_asked` (they have asked you; accept
-        instead) and `blocked`. If the other Puddle can be found but refuses the request (not a Puddle, wrong
-        id) the stream goes to `closed` with an `error` saying why; if it is simply away the request waits and
-        is retried.
+        The target is an address; nobody has to know the other Puddle's user id. Returns a `pending_out` stream, `provisional`
+        until they answer (its `id` is made up for now); it becomes `active` under their real id when they accept, and what
+        the answer says about who they are is trusted on first contact. Requesting someone who has blocked you looks exactly
+        like a request that is still pending. The other Puddle can only answer if it can reach you, so this needs this
+        Puddle's public address (`409 no_address`; set `advertise:`). `409` also for `already_streaming`,
+        `already_requested`, `they_asked` (there is a request from that address already; accept it instead), and `400`
+        `cannot_request_yourself` for your own address. If the other Puddle is simply away the request waits and is
+        retried; one that answers with anything but a Puddle's answer fails the request (`closed`, with an `error`).
+        Blocking is by id, which is only learned from the answer: a request to someone you blocked is dropped when it is.
       requestBody:
         required: true
         content:
@@ -334,7 +336,7 @@ paths:
       operationId: createInvite
       summary: Make an invite link that is approved automatically
       description: |
-        The link is `puddle://<your id>@<address>?invite=<token>`. Whoever requests a stream with it
+        The link is your address with `?invite=<token>`, e.g. `home.example.org:8443?invite=<token>`. Whoever requests a stream with it
         is accepted without waiting for you, until it expires or its uses run out. Share it only with
         people you mean to let in.
       requestBody:
@@ -1095,8 +1097,8 @@ components:
           $ref: "#/components/schemas/OwnProfile"
         link:
           type: [string, "null"]
-          description: Share this so others can request a stream, `puddle://<user id>@<address>`; `null` when the address isn't known (see Identity)
-          example: puddle://ab…@203.0.113.7:8443
+          description: Your address, to give to people so they can ask for a stream (the default port, 443, is left off); `null` when the address isn't known (see Identity)
+          example: 203.0.113.7:8443
 
     AccessPolicy:
       type: object
@@ -1148,7 +1150,12 @@ components:
       type: object
       required: [id, peer, state]
       properties:
-        id: { type: string, description: The peer's user id }
+        id:
+          type: string
+          description: |
+            The peer's user id. For a request to an address nobody has answered yet (`provisional`) it is a made-up id that stands
+            in until they do, and the record then continues under their real id.
+        provisional: { type: boolean, description: "Present, true, for a request to an address that has not been answered yet" }
         peer: { $ref: "#/components/schemas/Person" }
         state: { $ref: "#/components/schemas/StreamState" }
         address: { type: string, description: Where we reach them, host:port }
@@ -1175,7 +1182,7 @@ components:
       properties:
         target:
           type: string
-          description: A `puddle://` link. If it has `?invite=`, the request is accepted automatically.
+          description: An address, `home.example.org`, `203.0.113.7:8443` or `[2001:db8::1]` (port 443 if left out), optionally with a `puddle://` in front. If it has `?invite=`, the request is accepted automatically. There is no user id in it; the Puddle at the address says who it is when it answers.
         message: { type: string, maxLength: 500 }
         profile:
           type: string

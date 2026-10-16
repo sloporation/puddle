@@ -33,6 +33,7 @@ void logSink(puddle_log_level level, const char *msg, void *)
 Backend::Backend(QObject *parent) : QObject(parent)
 {
     qApp->installEventFilter(this);
+    developerMode_ = QSettings().value("developerMode", false).toBool();
 
     char err[512];
     if (puddle_config_load(&cfg_, nullptr, err, sizeof err) != 0) {
@@ -97,7 +98,7 @@ void Backend::startServer()
     char id[PUDDLE_USER_ID_LEN + 1], link[512];
     puddle_identity_id(puddle_server_identity(srv_), id);
     myId_ = QString::fromLatin1(id);
-    myLink_ = puddle_make_link(&cfg_, id, nullptr, link, sizeof link) == 0 ? QString::fromUtf8(link) : QString();
+    myLink_ = puddle_make_link(&cfg_, nullptr, link, sizeof link) ? QString::fromUtf8(link) : QString();
     emit startedChanged();
 }
 
@@ -153,6 +154,15 @@ bool Backend::eventFilter(QObject *watched, QEvent *event)
         emit quittingChanged();
     }
     return QObject::eventFilter(watched, event);
+}
+
+void Backend::setDeveloperMode(bool on)
+{
+    if (developerMode_ == on)
+        return;
+    developerMode_ = on;
+    QSettings().setValue("developerMode", on);
+    emit developerModeChanged();
 }
 
 void Backend::setDockBadge(int count)

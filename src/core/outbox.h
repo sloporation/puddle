@@ -29,6 +29,9 @@
 extern "C" {
 #endif
 
+/* the kind of item that asks an address for a stream; its `peer` is the made-up id of a provisional record */
+#define PUDDLE_OB_KIND_OPEN_ACCESS "open_access"
+
 #define PUDDLE_OUTBOX_MAX_QUEUED 1000
 #define PUDDLE_OUTBOX_MAX_FAILED 200
 #define PUDDLE_OUTBOX_BODY_MAX (128u * 1024)

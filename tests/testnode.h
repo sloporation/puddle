@@ -86,7 +86,7 @@ struct Node {
             return false;
         }
         th = std::thread([s = srv] { puddle_server_run(s); });
-        link = QString("puddle://%1@127.0.0.1:%2").arg(uid).arg(cfg.port);
+        link = QString("127.0.0.1:%1").arg(cfg.port);
         chats = std::make_unique<Chats>();
         chats->setInterval(100);
         return chats->attach(QUrl(QString("https://127.0.0.1:%1").arg(cfg.port)), dir + "/data/state/owner-token", dir + "/cert.pem");

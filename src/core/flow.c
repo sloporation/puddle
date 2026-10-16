@@ -59,8 +59,8 @@ int puddle_flow_write_self(puddle_ctx *ctx, const char *peer, puddle_jw *w)
 
 #define BODY_ROOM(chain_estimate) ((chain_estimate) * 6 + 24 * 1024)
 
-static char *build_body(puddle_ctx *ctx, const char *peer, const char *kind, const char *message, const char *invite, int approved,
-                        size_t *len)
+static char *build_body(puddle_ctx *ctx, const char *peer, const char *kind, const char *message, const char *invite, const char *ticket,
+                        int approved, size_t *len)
 {
     size_t cl = 0;
     char *c = puddle_identity_chain(ctx->identity, &cl);
@@ -80,11 +80,15 @@ static char *build_body(puddle_ctx *ctx, const char *peer, const char *kind, con
             puddle_jw_str(&w, "message", message);
         if (invite && *invite)
             puddle_jw_str(&w, "invite", invite);
+        if (ticket && *ticket)
+            puddle_jw_str(&w, "ticket", ticket);
     } else if (!strcmp(kind, "result")) {
         puddle_jw_key(&w, "responder");
         if (puddle_flow_write_self(ctx, peer, &w) != 0)
             goto bad;
         puddle_jw_flag(&w, "approved", approved);
+        if (ticket && *ticket)
+            puddle_jw_str(&w, "ticket", ticket); /* what they put in their request, so they know which one this answers */
     }
     puddle_jw_end_object(&w);
     size_t n = puddle_jw_finish(&w);
@@ -102,6 +106,7 @@ bad:
 typedef struct {
     const puddle_link *link;
     const char *message;
+    const char *ticket;
     int64_t now;
 } asking;
 
@@ -116,6 +121,8 @@ static int apply_asking(void *user, puddle_stream *st, int exists)
         st->created_ms = a->now;
     }
     st->state = PUDDLE_STREAM_PENDING_OUT;
+    st->provisional = 1;
+    snprintf(st->ticket, sizeof st->ticket, "%s", a->ticket);
     st->owed = PUDDLE_OWED_NONE;
     st->error[0] = '\0';
     st->updated_ms = a->now;
@@ -127,27 +134,31 @@ static int apply_asking(void *user, puddle_stream *st, int exists)
     return 0;
 }
 
-static int apply_failed(void *user, puddle_stream *st, int exists)
+/* is there already a stream, or a request either way, with the Puddle at this address? */
+static int known_at(puddle_ctx *ctx, const char *address, puddle_stream_state *state)
 {
-    (void)user;
-    if (!exists || st->state != PUDDLE_STREAM_PENDING_OUT)
-        return 1;
-    st->state = PUDDLE_STREAM_CLOSED;
-    snprintf(st->error, sizeof st->error, "the request could not be queued");
-    return 0;
+    puddle_stream *all;
+    size_t n;
+    int found = 0;
+    if (puddle_streams_list(ctx->streams, &all, &n) != 0)
+        return 0;
+    for (size_t i = 0; i < n && !found; i++)
+        for (int k = 0; k < all[i].naddr; k++)
+            if (!strcmp(all[i].addresses[k], address) && all[i].state != PUDDLE_STREAM_CLOSED) {
+                *state = all[i].state;
+                found = 1;
+                break;
+            }
+    puddle_stream_list_free(all, n);
+    return found;
 }
 
 int puddle_flow_request(puddle_ctx *ctx, const puddle_link *link, const char *message, const char *profile_id,
                         char out_id[PUDDLE_USER_ID_LEN + 1], const char **code, const char **msg_out)
 {
-    char me[PUDDLE_USER_ID_LEN + 1], addr[PUDDLE_ADDR_MAX], clean[PUDDLE_NOTE_MAX_BYTES + 1], err[300];
+    char addr[PUDDLE_ADDR_MAX], clean[PUDDLE_NOTE_MAX_BYTES + 1], err[300];
     size_t chars;
     *msg_out = "";
-    puddle_identity_id(ctx->identity, me);
-    if (!strcmp(link->id, me)) {
-        *code = "cannot_request_yourself";
-        return 400;
-    }
     if (puddle_clean_text(message ? message : "", message ? strlen(message) : 0, PUDDLE_NOTE_MAX_CHARS, 1, clean, sizeof clean, &chars) != 0) {
         *code = "bad_request";
         *msg_out = "the message is too long (500 characters at most)";
@@ -162,42 +173,66 @@ int puddle_flow_request(puddle_ctx *ctx, const puddle_link *link, const char *me
         *msg_out = "this Puddle doesn't know its public address, so the other side couldn't answer; set `advertise: host:port` in puddle.yaml";
         return 409;
     }
+    if (!strcmp(addr, link->address.address)) {
+        *code = "cannot_request_yourself";
+        return 400;
+    }
     if (!ctx->outbox) {
         *code = "internal";
         return 500;
     }
-    if (puddle_streams_is_blocked(ctx->streams, link->id)) {
-        *code = "blocked";
-        *msg_out = "you have blocked them; unblock them first";
-        return 409;
-    }
-    asking a = { link, clean, puddle_ctx_now_ms(ctx) };
-    int rc = puddle_streams_update(ctx->streams, link->id, apply_asking, &a, err, sizeof err);
-    if (rc == 2 || rc == 3 || rc == 4) {
-        *code = rc == 2 ? "already_streaming" : rc == 3 ? "already_requested" : "they_asked";
-        if (rc == 4)
+    puddle_stream_state have;
+    if (known_at(ctx, link->address.address, &have)) {
+        *code = have == PUDDLE_STREAM_ACTIVE ? "already_streaming" : have == PUDDLE_STREAM_PENDING_OUT ? "already_requested" : "they_asked";
+        if (have == PUDDLE_STREAM_PENDING_IN)
             *msg_out = "they have already asked you; accept their request";
         return 409;
     }
+
+    /* nobody has said who lives there: the request is filed under an id made up from a ticket, which their answer repeats */
+    char ticket[33], pid[PUDDLE_USER_ID_LEN + 1];
+    if (puddle_ticket_new(ticket) != 0 || puddle_provisional_id(ticket, pid) != 0) {
+        *code = "internal";
+        return 500;
+    }
+    asking a = { link, clean, ticket, puddle_ctx_now_ms(ctx) };
+    int rc = puddle_streams_update(ctx->streams, pid, apply_asking, &a, err, sizeof err);
     if (rc != 0) {
         *code = "internal";
-        *msg_out = "";
         return 500;
     }
     if (profile_id)
-        puddle_assignments_set(ctx->assignments, link->id, profile_id, err, sizeof err);
+        puddle_assignments_set(ctx->assignments, pid, profile_id, err, sizeof err);
 
     size_t len;
-    char *body = build_body(ctx, link->id, "access", clean, link->invite, 0, &len);
-    if (!body || puddle_outbox_enqueue(ctx->outbox, link->id, "access", "/stream/v1/access", body, len, err, sizeof err) != 0) {
+    char *body = build_body(ctx, pid, "access", clean, link->invite, ticket, 0, &len);
+    if (!body || puddle_outbox_enqueue(ctx->outbox, pid, PUDDLE_OB_KIND_OPEN_ACCESS, "/stream/v1/access", body, len, err, sizeof err) != 0) {
         free(body);
-        puddle_streams_update(ctx->streams, link->id, apply_failed, NULL, err, sizeof err);
+        puddle_streams_forget(ctx->streams, pid);
         *code = "internal";
         return 500;
     }
     free(body);
-    memcpy(out_id, link->id, PUDDLE_USER_ID_LEN + 1);
+    memcpy(out_id, pid, PUDDLE_USER_ID_LEN + 1);
     return 0;
+}
+
+/* The answer to a provisional request has said who lives there: refile everything under their id. 0 if the record is now
+ * theirs, else nonzero (a record for them already existed, or they are blocked, and the request is dropped). */
+int puddle_flow_adopt(puddle_ctx *ctx, const char *ticket, const char *real_id)
+{
+    puddle_stream st;
+    char err[200], mine[PUDDLE_PROFILE_ID_MAX + 2];
+    if (puddle_streams_find_ticket(ctx->streams, ticket, &st) != 0)
+        return 1;
+    char pid[PUDDLE_USER_ID_LEN + 1];
+    memcpy(pid, st.id, sizeof pid);
+    puddle_stream_free(&st);
+    int have_profile = ctx->assignments && puddle_assignments_get(ctx->assignments, pid, mine) == 0;
+    int rc = puddle_streams_adopt(ctx->streams, pid, real_id, err, sizeof err);
+    if (rc == 0 && have_profile)
+        puddle_assignments_set(ctx->assignments, real_id, mine, err, sizeof err);
+    return rc;
 }
 
 /* ---- owing ---- */
@@ -215,7 +250,13 @@ int puddle_flow_owe(puddle_ctx *ctx, const char *peer, puddle_owed owed)
         body = strdup("{}");
         len = 2;
     } else {
-        body = build_body(ctx, peer, "result", NULL, NULL, owed == PUDDLE_OWED_APPROVED, &len);
+        puddle_stream st;
+        char ticket[33] = "";
+        if (puddle_streams_get(ctx->streams, peer, &st) == 0) {
+            memcpy(ticket, st.ticket, sizeof ticket);
+            puddle_stream_free(&st);
+        }
+        body = build_body(ctx, peer, "result", NULL, NULL, ticket, owed == PUDDLE_OWED_APPROVED, &len);
     }
     int rc = body && puddle_outbox_enqueue(ctx->outbox, peer, kind, path, body, len, err, sizeof err) == 0 ? 0 : -1;
     if (rc != 0)
@@ -296,7 +337,7 @@ void puddle_flow_done(void *user, const puddle_ob_item *item, puddle_ob_outcome 
         return; /* waiting for the owner to trust the new certificate; the stream says so */
     char err[300], why[200];
     outcome_note o = { PUDDLE_OWED_NONE, "", 0, 0 };
-    if (!strcmp(item->kind, "access")) {
+    if (!strcmp(item->kind, "access") || !strcmp(item->kind, PUDDLE_OB_KIND_OPEN_ACCESS)) {
         if (outcome == PUDDLE_OB_DELIVERED)
             return; /* it stays pending_out until they answer */
         snprintf(why, sizeof why, "they could not be asked: %.150s", item->reason);

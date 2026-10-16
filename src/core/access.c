@@ -1,6 +1,7 @@
 #include "access.h"
 
 #include "client.h"
+#include "encoding.h"
 #include "wireprofile.h"
 #include "flow.h"
 #include "profiles_api.h"
@@ -98,6 +99,7 @@ typedef struct {
     puddle_peer_info peer;
     char message[PUDDLE_NOTE_MAX_BYTES + 1];
     char invite[PUDDLE_INVITE_TOKEN_LEN + 1];
+    char ticket[33];
     int has_scope;
 } request;
 
@@ -186,6 +188,14 @@ static int parse_request(const unsigned char *body, size_t len, request *r)
         goto bad;
     if (rc == 0 && (puddle_json_string(v, r->invite, sizeof r->invite) != 0 || !puddle_invite_token_valid(r->invite)))
         r->invite[0] = '\0'; /* a malformed token is just no token: the request still stands */
+    rc = puddle_json_member(b, len, "ticket", &v);
+    if (rc < 0)
+        goto bad;
+    {
+        unsigned char raw[16];
+        if (rc == 0 && (puddle_json_string(v, r->ticket, sizeof r->ticket) != 0 || puddle_hex_decode(r->ticket, raw, 16) != 0))
+            r->ticket[0] = '\0'; /* not a ticket as we make them: they just get no ticket back */
+    }
     rc = puddle_json_member(b, len, "scope", &v);
     if (rc < 0)
         goto bad;
@@ -238,6 +248,7 @@ static int apply_request(void *user, puddle_stream *st, int exists)
     if (!exists)
         st->created_ms = a->now;
     snprintf(st->note, sizeof st->note, "%s", a->r->message);
+    snprintf(st->ticket, sizeof st->ticket, "%s", a->r->ticket); /* handed back when we answer */
     st->addr_seq = 0;
     st->naddr = 0;
     puddle_stream_add_address(st, a->r->peer.address);
@@ -270,6 +281,24 @@ int puddle_access_post(const puddle_call *call, puddle_jw *w)
     if (ctx->access_limit && !puddle_keyed_hit(ctx->access_limit, id, now)) {
         refuse("too many requests from them", id);
         goto done;
+    }
+
+    {
+        char me[PUDDLE_USER_ID_LEN + 1];
+        puddle_identity_id(ctx->identity, me);
+        if (!strcmp(id, me)) {
+            refuse("that is ourselves", id);
+            goto done;
+        }
+    }
+    /* We may have asked this very Puddle, by its address, while it asked us: their request tells us who they are */
+    if (puddle_streams_find_provisional(ctx->streams, r.peer.address, &rec) == 0) {
+        char pid[PUDDLE_USER_ID_LEN + 1];
+        memcpy(pid, rec.id, sizeof pid);
+        puddle_stream_free(&rec);
+        char err[200];
+        if (puddle_streams_adopt(ctx->streams, pid, id, err, sizeof err) == 0)
+            puddle_log(PUDDLE_LOG_INFO, "%.12s… is the Puddle we asked at %s", id, r.peer.address);
     }
 
     have = puddle_streams_get(ctx->streams, id, &rec);

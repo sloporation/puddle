@@ -54,6 +54,7 @@ Pane {
                     model: [qsTr("All"), qsTr("Pending"), qsTr("Blocked")]
                     delegate: AbstractButton {
                         id: tb
+                        objectName: "tab" + index
                         required property int index
                         required property string modelData
                         readonly property bool current: page.tab === index
@@ -118,6 +119,8 @@ Pane {
                 note: model.note || ""
                 error: model.error || ""
                 certChanged: model.certificate_changed === true
+                provisional: model.provisional === true
+                developer: page.backend.developerMode
                 mode: model.state === "active" || model.state === "closed" ? "friend" : "pending"
                 width: ListView.view.width
                 visible: page.visibleFor(model.state)
@@ -131,7 +134,7 @@ Pane {
                 wrapMode: Text.Wrap
                 opacity: 0.6
                 visible: page.tab === 0 ? chats.friendCount === 0 : chats.pendingCount === 0
-                text: page.tab === 0 ? qsTr("No friends yet. Use Add Friend and paste someone's puddle:// link.")
+                text: page.tab === 0 ? qsTr("No friends yet. Use Add Friend and enter someone's address.")
                                      : qsTr("No pending requests.")
             }
         }
@@ -149,6 +152,7 @@ Pane {
                 required property var model
                 chats: page.chats
                 mode: "blocked"
+                developer: page.backend.developerMode
                 userId: model.user
                 name: model.name
                 width: ListView.view.width

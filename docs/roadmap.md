@@ -172,7 +172,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
     keys and refuse new records about them.
   - **Invites** are random 128-bit tokens with a lifetime (up to 30 days) and a use count; a spend is saved
     before it is honoured; at most 64 are live.
-  - **Links:** `puddle://<id>@host:port[?invite=<token>]`, strict (no spaces, paths, fragments, other parameters,
+  - **Links** (4.6 dropped the id: now `[puddle://]host[:port][?invite=<token>]`): strict (no spaces, paths, fragments, other parameters,
     bare IPv6, malformed hosts or ports); the address is stored in one canonical spelling.
   - Not here: the request itself (3.2), rate limits (3.2), the TLS fingerprint of a peer (3.4), pushed chain
     updates after a roll (phase 4).
@@ -430,6 +430,25 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
     queues failed items again and tries waiting ones now (`puddle_outbox_requeue` is new). The chat shows "Sending…", "X can't be
     reached right now. Trying again at 14:05." with a Try now button, or "Not delivered: reason" with Retry. The window test takes
     the friend's Puddle offline, sends, sees the note, brings it back and presses Try now.
+
+- [x] **4.6 Add by address.** The owner decided: nobody should handle a user id. Adding someone is typing their address
+  (`203.0.113.7`, `home.example.org:8443`; the port defaults to **443**), and the id is exchanged over the stream.
+  - **Parser:** `link.c` takes `[puddle://]host[:port][?invite=<token>]` and no id; `puddle_link_format(address, invite)` leaves
+    `:443` off. `puddle_make_link` lost its `id` parameter, so "your address" in the app is just `host[:port]`.
+  - **First request:** the requester files `pending_out` under a made-up id (hash of a random **ticket**; `provisional`) and sends
+    `access` with its id, chain, address, note and the ticket, signed for recipient `*` (`PUDDLE_RECIPIENT_ANY`), which only the
+    new `PUDDLE_AUTH_CHAIN_OPEN` route (`/stream/v1/access`) accepts. The outbox kind `open_access` signs that way.
+  - **The answer** repeats the ticket. `puddle_flow_adopt` / `puddle_streams_adopt` refile the record under the responder's
+    verified id (certificate pin and note carry over), spend the ticket, and carry on as before. A closed stream with that id
+    starts afresh; any other existing record stands; a blocked id drops the request. A second answer with a spent ticket is ignored.
+    A withdrawn request that is answered "yes" anyway tells them the stream is closed.
+  - **Both asked:** a request from the address we have asked tells us who it is and the two are one (yes). A request from ourselves
+    is dropped. A second request to an address that is already asked or a stream is `409`.
+  - **Decision:** first contact trusts whoever answers at the address (nothing in the app asks anyone to compare an id or code).
+    Friend codes and a handshake, an invite link that auto-adds like a Discord invite, and better address handling are for later.
+  - **App:** Add Friend takes an address; "copy my address"; **Developer Mode** (Settings) shows user IDs and codes and "Copy user ID";
+    outgoing requests are named by the address until they answer. Tests: `open_request_test.c` (new), `link_test`, `flow_test`,
+    `e2e_test` and `ui_test` rewritten for addresses.
 
 *Commit point.*
 

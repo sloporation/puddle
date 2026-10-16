@@ -3,6 +3,7 @@
 #include "fsutil.h"
 #include "json.h"
 #include "log.h"
+#include "reqsig.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -429,7 +430,9 @@ static void attempt(puddle_outbox *ob, const puddle_ob_item *it, puddle_net_repl
     if (it->max_reply)
         opts.max_body = it->max_reply;
     for (int i = 0; i < n; i++) {
-        puddle_net_request(&addrs[i], it->method, it->path, it->body_len ? it->body : NULL, it->body_len, ob->hooks.identity, it->peer, &opts, reply);
+        /* a first request to an address says who it is from but not who it is for: nobody has said who lives there yet */
+        const char *recipient = !strcmp(it->kind, PUDDLE_OB_KIND_OPEN_ACCESS) ? PUDDLE_RECIPIENT_ANY : it->peer;
+        puddle_net_request(&addrs[i], it->method, it->path, it->body_len ? it->body : NULL, it->body_len, ob->hooks.identity, recipient, &opts, reply);
         if (reply->result != PUDDLE_NET_OFFLINE)
             return; /* reached something: that is the answer */
         if (i + 1 < n)

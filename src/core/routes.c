@@ -50,17 +50,17 @@ void puddle_roll_slot_free(puddle_roll_slot *s)
 
 /* ---- shared pieces ---- */
 
-int puddle_make_link(const puddle_config *cfg, const char *id, const char *invite, char *out, size_t cap)
+int puddle_make_link(const puddle_config *cfg, const char *invite, char *out, size_t cap)
 {
     char where[PUDDLE_ADDR_MAX];
-    return puddle_my_address(cfg, where, sizeof where) && puddle_link_format(id, where, invite, out, cap) == 0;
+    return puddle_my_address(cfg, where, sizeof where) && puddle_link_format(where, invite, out, cap) == 0;
 }
 
-static void link_member(puddle_jw *w, const puddle_ctx *ctx, const char *id)
+static void link_member(puddle_jw *w, const puddle_ctx *ctx)
 {
     char link[256];
     puddle_jw_key(w, "link");
-    if (ctx->config && puddle_make_link(ctx->config, id, NULL, link, sizeof link))
+    if (ctx->config && puddle_make_link(ctx->config, NULL, link, sizeof link))
         puddle_jw_string(w, link);
     else
         puddle_jw_null(w);
@@ -86,7 +86,7 @@ static void identity_json(puddle_jw *w, const puddle_ctx *ctx)
     puddle_key_id(pub, kid);
     puddle_jw_object(w);
     puddle_jw_str(w, "id", id);
-    link_member(w, ctx, id);
+    link_member(w, ctx);
     puddle_jw_num(w, "seq", (int64_t)seq);
     puddle_jw_str(w, "key_id", kid);
     puddle_jw_end_object(w);
@@ -117,7 +117,7 @@ static int get_me(const puddle_call *c, puddle_jw *w)
     puddle_jw_str(w, "id", id);
     puddle_jw_key(w, "profile");
     profile_json(w, &c->ctx->profiles->items[0], 1);
-    link_member(w, c->ctx, id);
+    link_member(w, c->ctx);
     puddle_jw_end_object(w);
     return 200;
 }
@@ -211,7 +211,7 @@ const puddle_route puddle_routes[] = {
     { "POST", "/api/v1/identity/roll",     PUDDLE_AUTH_OWNER, 512, roll_start,   NULL },
     { "POST", "/api/v1/identity/roll/confirm", PUDDLE_AUTH_OWNER, 64, roll_confirm, NULL },
     { "POST", "/api/v1/identity/roll/cancel",  PUDDLE_AUTH_OWNER, 64, roll_cancel,  NULL },
-    { "POST", "/stream/v1/access",             PUDDLE_AUTH_CHAIN, PUDDLE_ACCESS_BODY_MAX, puddle_access_post, puddle_access_chain_key },
+    { "POST", "/stream/v1/access",             PUDDLE_AUTH_CHAIN_OPEN, PUDDLE_ACCESS_BODY_MAX, puddle_access_post, puddle_access_chain_key },
 };
 const size_t puddle_routes_count = sizeof puddle_routes / sizeof puddle_routes[0];
 

@@ -33,7 +33,7 @@ typedef struct puddle_roll_slot puddle_roll_slot;
 puddle_roll_slot *puddle_roll_slot_new(void);
 void puddle_roll_slot_free(puddle_roll_slot *s); /* abandons anything pending */
 
-typedef enum { PUDDLE_AUTH_OWNER, PUDDLE_AUTH_PEER, PUDDLE_AUTH_CHAIN } puddle_auth_kind;
+typedef enum { PUDDLE_AUTH_OWNER, PUDDLE_AUTH_PEER, PUDDLE_AUTH_CHAIN, PUDDLE_AUTH_CHAIN_OPEN } puddle_auth_kind;
 
 /* What handlers can reach. Streams and the outbox join it in phase 3. */
 typedef struct {
@@ -111,10 +111,11 @@ size_t puddle_router_handle(const puddle_router *r, const puddle_request *req, i
 int64_t puddle_ctx_now_ms(const puddle_ctx *ctx);
 int64_t puddle_call_now_ms(const puddle_call *call);
 
-/* puddle://<id>@<where to reach us>[?invite=<token>] for this Puddle, or 0 if we cannot say where that is:
+/* The address to give someone for this Puddle (host[:port], the default port left off), with `?invite=<token>` when there is one,
+ * or 0 if we cannot say where that is:
  * listening on every interface says nothing about which address the outside world should use, so the owner
  * has to set `advertise:` in the config. */
-int puddle_make_link(const puddle_config *cfg, const char *id, const char *invite, char *out, size_t cap);
+int puddle_make_link(const puddle_config *cfg, const char *invite, char *out, size_t cap);
 
 #define PUDDLE_QUERY_VALUE_MAX 80 /* room for a user id (52 characters) */
 

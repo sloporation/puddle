@@ -166,12 +166,16 @@ size_t puddle_router_handle_big(const puddle_router *r, const puddle_request *re
         char me[PUDDLE_USER_ID_LEN + 1];
         puddle_identity_id(ctx->identity, me);
         chain_look cl = { ctx, rt, body, body_len };
-        puddle_peer_key_fn lookup = rt->auth == PUDDLE_AUTH_CHAIN ? chain_lookup : (ctx->peer_key ? ctx->peer_key : no_peer);
-        void *user = rt->auth == PUDDLE_AUTH_CHAIN ? (void *)&cl : ctx->peer_key_user;
+        int chain = rt->auth == PUDDLE_AUTH_CHAIN || rt->auth == PUDDLE_AUTH_CHAIN_OPEN;
+        puddle_peer_key_fn lookup = chain ? chain_lookup : (ctx->peer_key ? ctx->peer_key : no_peer);
+        void *user = chain ? (void *)&cl : ctx->peer_key_user;
         int64_t now = puddle_ctx_now_ms(ctx);
         puddle_reqsig sig;
         puddle_authn a = puddle_reqsig_authenticate(req->signature, req->method, req->target, body, body_len, me,
                                                     lookup, user, ctx->replay, now, &sig);
+        if (a == PUDDLE_AUTHN_REJECT && rt->auth == PUDDLE_AUTH_CHAIN_OPEN) /* a first request names no recipient */
+            a = puddle_reqsig_authenticate(req->signature, req->method, req->target, body, body_len, PUDDLE_RECIPIENT_ANY,
+                                           lookup, user, ctx->replay, now, &sig);
         if (a == PUDDLE_AUTHN_REJECT)
             return not_found(out, cap, status);
         /* from here the sender is who it says, so it may be told what went wrong */

@@ -101,7 +101,7 @@ int main(void)
     CHECK(r.status == 200);
     CHECK(member(&r, "id", v, sizeof v) == 0 && strcmp(v, uid) == 0);
     char want[200];
-    snprintf(want, sizeof want, "puddle://%s@127.0.0.1:8443", uid);
+    snprintf(want, sizeof want, "127.0.0.1:8443");
     CHECK(member(&r, "link", v, sizeof v) == 0 && strcmp(v, want) == 0);
     CHECK(member(&r, "seq", v, sizeof v) == 0 && strcmp(v, "0") == 0);
     char kid0[300];
@@ -115,12 +115,12 @@ int main(void)
         puddle_router R2 = { puddle_routes, puddle_routes_count, &x };
         snprintf(c2.advertise, sizeof c2.advertise, "home.example.org:9000");
         r = call(&R2, "GET", "/api/v1/identity", NULL, 1);
-        snprintf(want, sizeof want, "puddle://%s@home.example.org:9000", uid);
+        snprintf(want, sizeof want, "home.example.org:9000");
         CHECK(member(&r, "link", v, sizeof v) == 0 && strcmp(v, want) == 0);
         c2.advertise[0] = 0;
         snprintf(c2.address, sizeof c2.address, "::1");
         r = call(&R2, "GET", "/api/v1/identity", NULL, 1);
-        snprintf(want, sizeof want, "puddle://%s@[::1]:8443", uid);
+        snprintf(want, sizeof want, "[::1]:8443");
         CHECK(member(&r, "link", v, sizeof v) == 0 && strcmp(v, want) == 0);
         snprintf(c2.address, sizeof c2.address, "::");
         r = call(&R2, "GET", "/api/v1/identity", NULL, 1);
@@ -130,7 +130,7 @@ int main(void)
         CHECK(member(&r, "link", v, sizeof v) == 0 && strcmp(v, "null") == 0);
         snprintf(c2.advertise, sizeof c2.advertise, "[2001:db8::1]:8443");
         r = call(&R2, "GET", "/api/v1/identity", NULL, 1);
-        CHECK(strstr(body_of(&r), "@[2001:db8::1]:8443\""));
+        CHECK(strstr(body_of(&r), "\"link\":\"[2001:db8::1]:8443\""));
     }
 
     /* ---- GET /api/v1/me ---- */

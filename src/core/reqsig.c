@@ -67,7 +67,7 @@ static int valid_user_id(const char *s)
 int puddle_reqsig_sign(puddle_identity *me, const char *method, const char *target, const void *body,
                        size_t body_len, const char *recipient_id, int64_t at_ms, char *out, size_t cap)
 {
-    if (!valid_method(method) || !valid_target(target) || !valid_user_id(recipient_id))
+    if (!valid_method(method) || !valid_target(target) || !(valid_user_id(recipient_id) || !strcmp(recipient_id, PUDDLE_RECIPIENT_ANY)))
         return -1;
     int64_t ts = at_ms ? at_ms : now_ms();
 

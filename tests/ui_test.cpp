@@ -1,5 +1,6 @@
 // The app's window, driven like a person would: real mouse and key events on the real QML, against a real Puddle (the
 // app's Backend) and a second real Puddle that plays the friend. Offscreen.
+#include <QClipboard>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -118,6 +119,7 @@ int main(int argc, char **argv)
         CHECK(backend.finishSetup());
     }
     CHECK(backend.running() && backend.error().isEmpty());
+    CHECK(backend.myLink() == QString("127.0.0.1:%1").arg(port));
     Chats &A = *backend.chats();
     A.setInterval(100);
     CHECK(until([&] { return A.connected(); }));
@@ -138,6 +140,11 @@ int main(int argc, char **argv)
     win->requestActivate();
     CHECK(until([&] { return win->isActive(); }, 3000));
     settle();
+
+    /* ---- the copy-link button puts our link on the clipboard ---- */
+    QGuiApplication::clipboard()->setText("nothing yet");
+    CHECK(clickName("copyLinkButton"));
+    CHECK(until([&] { return QGuiApplication::clipboard()->text() == backend.myLink(); }, 3000));
 
     /* ---- ask Bob to be a friend, from the window ---- */
     CHECK(clickName("addFriendButton"));
@@ -270,6 +277,34 @@ int main(int argc, char **argv)
     CHECK(until([&] { return find("addFriendButton") && !find("sidebar"); }, 3000));
     win->resize(1000, 640);
     CHECK(until([&] { return find("sidebar") && find("addFriendButton"); }, 3000));
+
+    /* ---- someone asks us: no IDs or codes on screen, until Developer Mode is on ---- */
+    {
+        Node carol;
+        CHECK(carol.up(home.path() + "/friends", "Carol"));
+        QSignalSpy asked(&A, &Chats::newRequest);
+        carol.chats->request(backend.myLink(), "carol here");
+        CHECK(until([&] { return asked.count() == 1 && A.incomingRequests() == 1; }));
+        CHECK(clickName("friendsButton"));
+        CHECK(clickName("tab1"));                                              /* Pending */
+        CHECK(until([&] { return find("acceptButton") != nullptr; }, 5000));
+        CHECK(find("codeLabel") == nullptr);                                   /* nobody compares them */
+        CHECK(!backend.developerMode());
+        CHECK(clickName("settingsButton"));
+        CHECK(until([&] { return find("developerSwitch") != nullptr; }, 3000));
+        CHECK(find("myIdField") == nullptr);
+        CHECK(click(find("developerSwitch")));                                 /* Developer Mode */
+        CHECK(until([&] { return backend.developerMode(); }, 3000));
+        CHECK(until([&] { return find("myIdField") != nullptr; }, 3000));
+        CHECK(find("myIdField")->property("text").toString() == backend.myId());
+        CHECK(clickName("friendsButton"));
+        CHECK(until([&] { return find("codeLabel") != nullptr; }, 5000));
+        CHECK(find("codeLabel")->property("text").toString().contains(carol.uid));
+        backend.setDeveloperMode(false);
+        CHECK(until([&] { return find("codeLabel") == nullptr; }, 3000));
+        CHECK(click(find("acceptButton")));                                    /* and it can be accepted without ever seeing an ID */
+        CHECK(until([&] { return A.incomingRequests() == 0 && A.friendCount() == 2; }));
+    }
 
     return failures ? 1 : 0;
 }

@@ -62,7 +62,13 @@ int main(int argc, char **argv)
     CHECK(req.value("state").toString() == "pending_in" && req.value("note").toString() == "hello, it is me");
     CHECK(req.value("name").toString() == "Alice" || req.value("name").toString() == alice.uid.left(8)); /* the name arrives with the profile */
     CHECK(newRequest.count() == 1 && newRequest.at(0).at(0).toString() == alice.uid);
-    CHECK(row(people_a, "id", bob.uid).value("state").toString() == "pending_out");
+    {
+        QJsonObject out;
+        for (const QJsonObject &o : people_a->items())
+            if (o.value("state").toString() == "pending_out")
+                out = o;
+        CHECK(!out.isEmpty() && out.value("provisional").toBool() && out.value("name").toString() == bob.link && out.value("id").toString() != bob.uid);
+    }
 
     /* a request that cannot work says so */
     QSignalSpy failed(&A, &Chats::failed);

@@ -36,15 +36,15 @@ Popup {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             opacity: 0.7
-            text: qsTr("Paste their puddle:// link. They will see your request and decide whether to accept.")
+            text: qsTr("Enter their address, like 203.0.113.7 or home.example.org:8443. They will see your request and decide whether to accept.")
         }
         TextField {
             id: link
             objectName: "linkField"
             Layout.fillWidth: true
-            placeholderText: "puddle://…"
+            placeholderText: qsTr("Address, e.g. home.example.org")
             selectByMouse: true
-            Accessible.name: qsTr("Their link")
+            Accessible.name: qsTr("Their address")
             onAccepted: pop.send()
         }
         TextField {
@@ -87,7 +87,7 @@ Popup {
 
         MenuSeparator { Layout.fillWidth: true }
 
-        Label { text: qsTr("Your link"); font.bold: true }
+        Label { text: qsTr("Your address"); font.bold: true }
         Label {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
@@ -103,7 +103,7 @@ Popup {
                 readOnly: true
                 text: backend.myLink
                 selectByMouse: true
-                Accessible.name: qsTr("Your link")
+                Accessible.name: qsTr("Your address")
             }
             Button { text: qsTr("Copy"); onClicked: backend.copyText(backend.myLink) }
         }

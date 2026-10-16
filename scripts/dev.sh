@@ -14,15 +14,17 @@ port=$((8600 + $(printf %s "$name" | cksum | cut -d' ' -f1) % 300))
 
 cmake --build build --target Puddle --parallel >/dev/null || cmake --build build --target Puddle --parallel
 
+# quit the old copy first (before a reset removes the file that says which it is)
+if [ -f "$root/pid" ] && kill -0 "$(cat "$root/pid")" 2>/dev/null; then
+  kill "$(cat "$root/pid")"; sleep 1
+fi
+
 [ "$reset" = --reset ] && rm -rf "$root"
 mkdir -p "$root/.config/puddle"
 if [ ! -f "$root/.config/puddle/puddle.yaml" ]; then
   printf 'address: "127.0.0.1"\nport: %s\n' "$port" > "$root/.config/puddle/puddle.yaml"
 fi
 
-if [ -f "$root/pid" ] && kill -0 "$(cat "$root/pid")" 2>/dev/null; then
-  kill "$(cat "$root/pid")"; sleep 1
-fi
 
 bin=build/Puddle.app/Contents/MacOS/Puddle
 [ -x "$bin" ] || bin=build/Puddle

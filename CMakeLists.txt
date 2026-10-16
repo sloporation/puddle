@@ -159,7 +159,7 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link streams ratelimit access owner_streams client outbox inbound flow message messages keysync wireprofile profiles e2e)
+foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link streams ratelimit access owner_streams client outbox inbound open_request flow message messages keysync wireprofile profiles e2e)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)

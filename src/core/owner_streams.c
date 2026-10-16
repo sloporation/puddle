@@ -101,6 +101,8 @@ static void stream_json(puddle_jw *w, const puddle_ctx *ctx, const puddle_stream
         puddle_jw_str(w, "address", st->addresses[0]);
     if (st->tls_fp_seen[0])
         puddle_jw_flag(w, "certificate_changed", 1);
+    if (st->provisional)
+        puddle_jw_flag(w, "provisional", 1);
     if (st->error[0])
         puddle_jw_str(w, "error", st->error);
     if (ctx->assignments && puddle_assignments_get(ctx->assignments, st->id, mine) == 0)
@@ -249,9 +251,25 @@ static int decline_stream(const puddle_call *c, puddle_jw *w)
 }
 
 /* a request waiting on you is answered with decline, so it is not one of these */
+/* withdrawing a request to an address: nobody knows us there yet as far as we can tell, so there is nothing to say to them; the record
+ * stays (closed) so that an answer that still comes can be recognised and closed on their side too */
+static int close_quietly(void *user, puddle_stream *st, int exists)
+{
+    (void)user;
+    if (!exists || !st->provisional || st->state != PUDDLE_STREAM_PENDING_OUT)
+        return 1;
+    st->state = PUDDLE_STREAM_CLOSED;
+    return 0;
+}
+
 static int delete_stream(const puddle_call *c, puddle_jw *w)
 {
     char id[PUDDLE_USER_ID_LEN + 1];
+    if (member_id(c, "stream", id) == 0) {
+        char err[200];
+        if (puddle_streams_update(c->ctx->streams, id, close_quietly, NULL, err, sizeof err) == 0)
+            return 204;
+    }
     int status = change(c, w, BIT(PUDDLE_STREAM_ACTIVE) | BIT(PUDDLE_STREAM_PENDING_OUT), PUDDLE_STREAM_CLOSED,
                         PUDDLE_OWED_CLOSED, "not_open", id);
     if (!status)
@@ -443,7 +461,7 @@ static void invite_json(puddle_jw *w, const puddle_ctx *ctx, const puddle_invite
     puddle_identity_id(ctx->identity, me);
     puddle_jw_object(w);
     puddle_jw_key(w, "link");
-    if (puddle_make_link(ctx->config, me, inv->token, link, sizeof link))
+    if (puddle_make_link(ctx->config, inv->token, link, sizeof link))
         puddle_jw_string(w, link);
     else
         puddle_jw_null(w);
@@ -461,7 +479,7 @@ static int create_invite(const puddle_call *c, puddle_jw *w)
         uses > 1000 || expires_in < 60 || expires_in > 30 * 24 * 3600)
         return puddle_fail(w, 400, "bad_request");
     puddle_identity_id(c->ctx->identity, me);
-    if (!puddle_make_link(c->ctx->config, me, "abcdefghijklmnopqrstuvwxy2", link, sizeof link)) {
+    if (!puddle_make_link(c->ctx->config, "abcdefghijklmnopqrstuvwxy2", link, sizeof link)) {
         puddle_jw_object(w);
         puddle_jw_str(w, "error", "no_address");
         puddle_jw_str(w, "message", "this Puddle doesn't know its public address; set `advertise: host:port` in puddle.yaml");

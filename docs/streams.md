@@ -9,7 +9,7 @@ Built so far: the identity, its recovery phrase and rolling (`src/core/identity.
 signing and checking (`src/core/reqsig.c`: Alice's side signs, Bob's side runs the checks below in
 order, with a bounded nonce memory), and the route table that applies them (`src/core/router.c`), the stream store (`src/core/streams.c`: peer
 records, blocks, invite tokens, the access setting, and the key lookup the signature check uses) and the link parser
-(`src/core/link.c`). The requests and endpoints that use them are still to come.
+(`src/core/link.c`). The requests and endpoints that use them are described below.
 
 ## What each side keeps
 
@@ -42,11 +42,15 @@ There are **no public endpoints**. A Puddle never tells a stranger anything: not
 name, its policy, or whether it is even a Puddle. The one request it must accept from someone it
 doesn't know is a request for a stream, and its answer to that is always the same.
 
-1. The owner gets a **link**: `puddle://<user id>@<address>`, optionally `?invite=<token>`. The id is
-   a hash of the other Puddle's first keys, and is what their answer will be checked against.
-2. A's Puddle sends `POST /stream/v1/access` straight to that address: its own key chain, address, a
-   profile (the one the owner chose), a short note (up to 500 characters), and the invite token if
-   there is one, signed with its key. It records `pending_out`. Nothing is fetched first.
+1. The owner gets an **address**: `203.0.113.7`, `home.example.org:8443` or `[2001:db8::1]` (the port defaults to
+   443), optionally written `puddle://…` and optionally with `?invite=<token>`. There is no user id in it. Nobody
+   types or compares one: who lives at the address is learned from their answer (below).
+2. A's Puddle makes a random **ticket**, files the request as `pending_out` under a made-up id (a hash of the
+   ticket; the record is marked `provisional`), and sends `POST /stream/v1/access` straight to that address:
+   its own key chain, id, address, a profile (the one the owner chose), a short note (up to 500 characters), the
+   ticket, and the invite token if there is one, signed with its key. The request is signed *for no recipient*
+   (`*` where the recipient's id goes), because nobody has said who lives there; only this route accepts such a
+   request, so everywhere else a signature for the wrong recipient is still a `404`. Nothing is fetched first.
 3. B's Puddle first checks the request is really from who it says: well formed, the chain is the requester's
    and the signature is its key's. A request that fails any of that is a `404`, the same as a path that does not
    exist, so a stranger can't use this route to find out whether it is talking to a Puddle at all. One that
@@ -59,12 +63,17 @@ doesn't know is a request for a stream, and its answer to that is always the sam
 4. When approved (immediately, or when the owner accepts with `POST /api/v1/stream/accept`), B becomes
    `active` and its outbox calls A's `POST /stream/v1/access/result` with its own chain and profile, retrying
    on the schedule in `roadmap.md` (3.4) if A is away; what B still owes is kept on the stream (`owed`), so a
-   restart loses nothing. A accepts the answer only if it asked exactly that id, the chain belongs to that
-   id and the result is signed by a key in it; then it becomes `active`. This is the first time A sees B's
-   keys. Like the request, the call is answered `202` once it authenticates, whatever A makes of it: a
-   stranger can sign with a key of their own, so the answer says nothing.
-5. Declining sends `approved: false` the same way, with B's chain (without it A could not tell it from a
-   forgery) and nothing about why.
+   restart loses nothing. B puts the requester's ticket in the answer. A accepts it only if the ticket is one
+   it made and has not used, the chain belongs to the id the answer claims and the result is signed by a key in
+   it; then the record is refiled under that id (state, note, addresses and the certificate it saw carry over),
+   the ticket is spent, and it becomes `active`. This is the first time A learns who B is and sees B's keys. A
+   second answer with the same ticket, from anyone, is ignored. If A already has a closed stream with that id the
+   request starts it afresh, if A has blocked that id the request is dropped, and any other existing record stands.
+   Like the request, the call is answered `202` once it authenticates, whatever A makes of it.
+5. Declining sends `approved: false` the same way, with B's chain and the ticket, and nothing about why.
+   If A withdrew the request meanwhile (the record stays, closed) and B says yes anyway, A tells B the stream is closed.
+7. If B has itself asked A's address meanwhile, A's request tells B who is there: B refiles its request under A's
+   id and treats the two as one (both asked, so yes).
 6. A requester whose Puddle missed all this can ask `POST /stream/v1/access/status`, chain-proven like the
    request (a POST, because B may hold nothing about A: a request it ignored leaves no trace). B says
    `approved` only to a requester it has an active stream with, `declined` to one whose stream it closed, and
@@ -77,22 +86,18 @@ are rate-limited too.
 
 ## Proving who you are
 
-A stream request proves one thing: whoever sent it holds the key whose hash is the id they claim.
-It does not prove that id belongs to the person Bob thinks it does. So:
+A request proves one thing: whoever sent it holds the key whose hash is the id they claim. It does not prove that
+the Puddle at an address is the person you meant. That is the owner's choice, made on purpose:
 
-- **Names and notes are self-declared.** Anyone can type "Alice" or "hey it's Jayden from work".
-  What can't be faked is her id, because she is the only one who can sign with her key.
-- **If the request follows a link** (Alice sent Bob her link, or Bob followed it), the id in the link
-  is checked against the chain that comes back, automatically. A different id fails.
-- **If Alice asks cold**, Bob's app shows her id as grouped characters with a short check code, marked
-  as someone new. If it matters he confirms it some other way: a call, or another chat app. This is
-  the same job as comparing safety numbers elsewhere.
-- **Every later request proves it again.** Each one is signed with Alice's current key and checked
-  against the chain Bob stored when he accepted. Knowing her address, or having seen old traffic,
-  is not enough to be her.
-- **Someone in the middle of first contact** can swap the chain in a cold request. Bob would then see
-  the interceptor's id, not Alice's, which is why the id comparison above matters for cold requests.
-  A link pins the id, so it cannot be done to someone who followed a link.
+- **First contact trusts whoever answers at the address.** Someone able to intercept the connection could answer
+  as the "friend". Giving an address to a friend is, like giving a phone number, no proof of who picks up. Friend
+  codes (a code you must be given in advance) and a handshake are planned for later. Nothing in the app asks the
+  owner to compare ids or codes; Developer Mode shows them for anyone who wants to.
+- **Names and notes are self-declared.** Anyone can type "Alice". What can't be faked later is her key.
+- **Every later request proves it again.** Each one is signed with the sender's current key and checked against
+  the chain stored at accept. Knowing an address, or having seen old traffic, is not enough to be them.
+- **An address change is proven the same way** (see "Telling friends about a new address"): a signed record from a
+  key we already hold, so a friend who moves is still the same friend, wherever they write from.
 
 ## Closing, blocking
 
@@ -134,7 +139,9 @@ Every request carries
 The recipient checks, in this order, and **answers `404` to any failure up to and including the
 signature**, the same as for a path that doesn't exist, so a stranger can't tell what is there:
 
-1. the recipient id is its own (so a request can't be replayed against a different Puddle)
+1. the recipient id is its own (so a request can't be replayed against a different Puddle). Only `POST /stream/v1/access`
+   also accepts `*`, for a first request to an address, which gives up that protection for that one message: a replay can
+   only make a request from the sender appear at another Puddle
 2. the sender is one it knows, and `kid` is that sender's *current* key (retired keys can't start new
    requests). The exceptions are `POST /stream/v1/access`, checked against the chain in its body, and
    `POST /stream/v1/identity`, checked by chain continuity (below)

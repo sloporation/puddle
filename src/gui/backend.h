@@ -26,6 +26,8 @@ class Backend : public QObject {
     Q_PROPERTY(QObject *chats READ chats CONSTANT)             // people, conversations, messages (see Chats)
     Q_PROPERTY(QString myLink READ myLink NOTIFY startedChanged)  // puddle:// link others use to ask us; "" if unknown
     Q_PROPERTY(QString myId READ myId NOTIFY startedChanged)
+    // Shows what is normally hidden (user IDs, codes), as Discord's Developer Mode does. Off unless the owner turns it on.
+    Q_PROPERTY(bool developerMode READ developerMode WRITE setDeveloperMode NOTIFY developerModeChanged)
     Q_PROPERTY(bool needsSetup READ needsSetup NOTIFY needsSetupChanged)
     // An earlier setup showed a phrase but was never confirmed; it will be started again.
     Q_PROPERTY(bool setupRedo READ setupRedo NOTIFY needsSetupChanged)
@@ -43,6 +45,8 @@ public:
     Chats *chats() { return &chats_; }
     QString myLink() const { return myLink_; }
     QString myId() const { return myId_; }
+    bool developerMode() const { return developerMode_; }
+    void setDeveloperMode(bool on);
     bool needsSetup() const { return needsSetup_; }
     bool setupRedo() const { return setupRedo_; }
     bool quitting() const { return quitting_; }
@@ -69,6 +73,7 @@ public:
 
 signals:
     void quittingChanged();
+    void developerModeChanged();
     void startedChanged();
     void errorChanged();
     void needsSetupChanged();
@@ -85,6 +90,7 @@ private:
     QString listenUrl_, myLink_, myId_;
     QString error_;
     bool quitting_ = false;
+    bool developerMode_ = false;
     bool needsSetup_ = false;
     bool setupRedo_ = false;
     bool haveConfig_ = false;

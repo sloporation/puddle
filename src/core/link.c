@@ -176,39 +176,28 @@ int puddle_link_parse(const char *text, puddle_link *out, char *err, size_t errl
 {
     static const char SCHEME[] = "puddle://";
     if (!text || strlen(text) > 400) {
-        seterr(err, errlen, "that is not a Puddle link");
+        seterr(err, errlen, "that is not an address");
         return -1;
     }
     for (const char *c = text; *c; c++)
         if ((unsigned char)*c <= ' ' || (unsigned char)*c >= 0x7f) {
-            seterr(err, errlen, "a link has no spaces or special characters");
+            seterr(err, errlen, "an address has no spaces or special characters");
             return -1;
         }
-    if (strncmp(text, SCHEME, sizeof SCHEME - 1) != 0) {
-        seterr(err, errlen, "a Puddle link starts with puddle://");
+    const char *a = text;
+    if (strncmp(a, SCHEME, sizeof SCHEME - 1) == 0)
+        a += sizeof SCHEME - 1;
+    else if (strstr(a, "://")) {
+        seterr(err, errlen, "that is not a Puddle address");
         return -1;
     }
-    const char *p = text + sizeof SCHEME - 1;
-    const char *at = strchr(p, '@');
-    if (!at || at - p != PUDDLE_USER_ID_LEN) {
-        seterr(err, errlen, "the link should look like puddle://<user id>@<address>");
-        return -1;
-    }
-    char id[PUDDLE_USER_ID_LEN + 1];
-    memcpy(id, p, PUDDLE_USER_ID_LEN);
-    id[PUDDLE_USER_ID_LEN] = '\0';
-    if (!puddle_id_valid(id)) {
-        seterr(err, errlen, "that user id is not valid");
-        return -1;
-    }
-    const char *a = at + 1;
     const char *q = strchr(a, '?');
     char addr[PUDDLE_ADDR_MAX + 8];
     size_t al = q ? (size_t)(q - a) : strlen(a);
     if (al > 0 && a[al - 1] == '/' && !q)
         al--; /* a trailing slash is harmless */
     if (al == 0 || al >= PUDDLE_ADDR_MAX || memchr(a, '@', al) || memchr(a, '/', al) || memchr(a, '#', al)) {
-        seterr(err, errlen, "that address is not valid");
+        seterr(err, errlen, "that address is not valid; it should look like host or host:port");
         return -1;
     }
     memcpy(addr, a, al);
@@ -217,14 +206,14 @@ int puddle_link_parse(const char *text, puddle_link *out, char *err, size_t errl
     puddle_link l;
     memset(&l, 0, sizeof l);
     if (puddle_address_parse(addr, &l.address) != 0) {
-        seterr(err, errlen, "that address is not valid; it should be host:port");
+        seterr(err, errlen, "that address is not valid; it should look like host or host:port");
         return -1;
     }
     if (q) {
         static const char KEY[] = "invite=";
         const char *v = q + 1;
         if (strncmp(v, KEY, sizeof KEY - 1) != 0) {
-            seterr(err, errlen, "the only thing a link can carry besides the address is ?invite=");
+            seterr(err, errlen, "the only thing an address can carry is ?invite=");
             return -1;
         }
         v += sizeof KEY - 1;
@@ -242,14 +231,20 @@ int puddle_link_parse(const char *text, puddle_link *out, char *err, size_t errl
             return -1;
         }
     }
-    memcpy(l.id, id, sizeof l.id);
     *out = l;
     return 0;
 }
 
-int puddle_link_format(const char *id, const char *address, const char *invite, char *out, size_t cap)
+int puddle_link_format(const char *address, const char *invite, char *out, size_t cap)
 {
-    int n = (invite && *invite) ? snprintf(out, cap, "puddle://%s@%s?invite=%s", id, address, invite)
-                                : snprintf(out, cap, "puddle://%s@%s", id, address);
-    return n > 0 && (size_t)n < cap ? 0 : -1;
+    char shown[PUDDLE_ADDR_MAX];
+    snprintf(shown, sizeof shown, "%s", address);
+    size_t n = strlen(shown);
+    char def[8];
+    snprintf(def, sizeof def, ":%u", PUDDLE_DEFAULT_PORT);
+    size_t dl = strlen(def);
+    if (n > dl && !strcmp(shown + n - dl, def))
+        shown[n - dl] = '\0'; /* the port everyone assumes is not written */
+    int w = (invite && *invite) ? snprintf(out, cap, "%s?invite=%s", shown, invite) : snprintf(out, cap, "%s", shown);
+    return w > 0 && (size_t)w < cap ? 0 : -1;
 }

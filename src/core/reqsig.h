@@ -28,6 +28,10 @@ typedef struct {
     unsigned char sig[64];
 } puddle_reqsig;
 
+/* The recipient to sign for when the sender does not know who lives at an address yet (a first request, see streams.md). Only a
+ * route that says it takes such requests accepts one; everywhere else it is the usual 404. */
+#define PUDDLE_RECIPIENT_ANY "*"
+
 /* Alice's side: build the header value for a request to `recipient_id`. `now_ms` 0 = now.
  * 0 or -1 (bad input, or `cap` too small; 400 bytes is plenty). */
 int puddle_reqsig_sign(puddle_identity *me, const char *method, const char *target, const void *body,

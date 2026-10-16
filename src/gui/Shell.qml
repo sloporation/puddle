@@ -223,7 +223,7 @@ Item {
                     }
                 }
 
-                // you: who you appear as, your link, the activity log
+                // you: who you appear as, your address, settings and the activity log
                 Rectangle {
                     Layout.fillWidth: true
                     implicitHeight: 56
@@ -245,16 +245,18 @@ Item {
                             }
                         }
                         ToolButton {
+                            objectName: "copyLinkButton"
                             text: "🔗"
-                            Accessible.name: qsTr("Copy my link")
-                            ToolTip.text: qsTr("Copy my link"); ToolTip.visible: hovered
+                            Accessible.name: qsTr("Copy my address")
+                            ToolTip.text: qsTr("Copy my address"); ToolTip.visible: hovered
                             enabled: backend.myLink !== ""
-                            onClicked: { backend.copyText(backend.myLink); toast.show(qsTr("Link copied")) }
+                            onClicked: { backend.copyText(backend.myLink); toast.show(qsTr("Address copied")) }
                         }
                         ToolButton {
+                            objectName: "settingsButton"
                             text: "⚙"
-                            Accessible.name: qsTr("Activity log")
-                            ToolTip.text: qsTr("Activity log"); ToolTip.visible: hovered
+                            Accessible.name: qsTr("Settings")
+                            ToolTip.text: qsTr("Settings"); ToolTip.visible: hovered
                             onClicked: shell.openLog()
                         }
                     }

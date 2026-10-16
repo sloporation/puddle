@@ -371,7 +371,7 @@ int main(void)
     CHECK(member(r, "link", link, sizeof link) == 0);
     {
         puddle_link l;
-        CHECK(puddle_link_parse(link, &l, err, sizeof err) == 0 && !strcmp(l.id, my_id) && !strcmp(l.invite, token) &&
+        CHECK(puddle_link_parse(link, &l, err, sizeof err) == 0 && !strcmp(l.invite, token) &&
               !strcmp(l.address.address, "203.0.113.7:8443"));
     }
     CHECK(member(r, "uses", v, sizeof v) == 0 && !strcmp(v, "1"));

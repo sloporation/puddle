@@ -16,7 +16,7 @@ info:
     decides.
 
     Conventions:
-    - JSON over HTTPS, versioned under `/stream/v1`. Peers are found by the address in their link.
+    - JSON over HTTPS, versioned under `/stream/v1`. Peers are found by an address, typed once to ask for a stream; ids are learned from the answer.
     - Bodies are limited per route (4 MiB at most), decided before they are read. A request over its limit is
       answered `404`, like anything else a stranger sends. Chunked bodies are not supported.
     - Only GET and POST are used. GET reads and never changes anything; POST does everything else.
@@ -119,6 +119,12 @@ paths:
         length-limited); pictures and colors come later, over the stream. At most 96 KiB. The outcome arrives later at the requester's `access/result`, or by polling
         `access/status`. Set `scope` to ask for a group-only connection: the target auto-approves if
         `scope.proof` is a membership event it already holds for that group.
+
+        **The request may be signed for no recipient**: where the signature names the recipient's user id it may name `*`,
+        because the requester often has only an address and does not know who lives there. This route is the only one that
+        accepts that; everywhere else a signature for anyone but the recipient is a `404`. The cost is that a replay of the
+        request inside the five-minute window can make it appear at another Puddle. The target keeps the `ticket` with the
+        request and returns it in its answer.
       requestBody:
         required: true
         content:
@@ -135,9 +141,10 @@ paths:
       description: |
         Called by the target on the requester's Puddle once the owner accepts or declines (or at once, when an
         invite or an open policy let them in). Like the request, it is proven by the chain in its body: the
-        requester has no keys of the target's yet, only the id from the link it followed, so it accepts an
-        answer only from a Puddle whose chain belongs to exactly that id, signed by that chain's key, for a request
-        it has sent and not yet had answered. Anything else is dropped. **Always `202` once it authenticates**
+        requester has no keys of the target's yet, and often does not know its id (it asked an address), so it accepts an
+        answer only if the `ticket` in it is one the requester made and has not yet had answered, and the chain belongs
+        to the id the answer claims and signs it. That is when the requester learns who lives at the address; the
+        ticket is then spent. Anything else is dropped. **Always `202` once it authenticates**
         (a stranger can authenticate with any key of their own, so the answer must say nothing); an answer that is
         accepted shows only in the requester's own state. A decline carries the responder's chain too, as the
         requester could not otherwise tell it from a forgery.
@@ -443,6 +450,10 @@ components:
         invite:
           type: string
           description: Token from an invite link; a valid one is approved at once
+        ticket:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+          description: Random, made by the requester for this request; the answer repeats it so the requester knows which request it answers
         scope: { $ref: "#/components/schemas/Scope" }
 
     AccessState:
@@ -460,6 +471,10 @@ components:
       properties:
         responder: { $ref: "#/components/schemas/Peer" }
         approved: { type: boolean }
+        ticket:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+          description: The ticket from the request this answers, when it had one. It is what lets a requester who asked an address learn the responder's id.
         scope: { $ref: "#/components/schemas/Scope" }
 
     SignedEvent:
