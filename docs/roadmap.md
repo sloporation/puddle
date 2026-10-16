@@ -472,8 +472,10 @@ gets the other's messages in a group, and you can still be in it.
   over a group connection leaves the group going. When the last shared group is left, a connection that was only for groups is closed.
 - [x] **5.4 Owner API.** `GET /api/v1/gm`, `gm/create|invite|accept|decline|leave|rename|send|edit|delete|retry`, `GET gm/messages` (with `notices`
   for who made it, joined, left, renamed). `conversations` lists groups beside DMs (`kind`), `dm/read` takes `group`.
-- [x] **5.5 The app.** Groups in the DM list, "+" for a new group (name and friends to ask), group chat with the notices between the messages and a
-  members box (rename, ask a friend, leave), invitations in Pending with a plain statement that joining shows your address.
+- [x] **5.5 The app.** Groups in the DM list as well as on their own **Groups** page under Friends (invitations, your groups, "Start new group"; a
+  later "new message" window may start a DM or a group from one place). Group chat with the notices between the messages and a members box
+  (rename, ask a friend, leave). An invitation says who invited you and nothing about how many are in the group: that would have to be asked
+  again every time it was looked at. Joining shows a plain statement that your address will be visible.
 - [x] **5.6 Tests.** `group_test`, `groupapi_test` (the receiving side and the scoped connections), `groupowner_test` (the owner's routes),
   `group_e2e_test` (three real Puddles over TLS where two are strangers, ending with a friend request over the group connection and leaving),
   `chats_test` and `ui_test` (the window: new group, accept with the address notice, decline, talk, members, rename, leave).

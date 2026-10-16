@@ -182,7 +182,7 @@ int main(int argc, char **argv)
         {
             auto *inv = static_cast<JsonListModel *>(B.groupInvites());
             CHECK(inv->rowCount() == 1 && inv->at(0).value("name").toString() == "Weekend" && inv->at(0).value("invitedByName").toString() == "Alice" &&
-                  inv->at(0).value("count").toInt() == 1);
+                  !inv->at(0).contains("count"));           /* how many are in it is not said: the one invited would have to ask again every time they looked */
         }
         CHECK(conv_b->rowCount() == 1);                                                           /* an invitation is not a conversation yet */
 

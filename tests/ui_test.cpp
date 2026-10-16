@@ -1,6 +1,7 @@
 // The app's window, driven like a person would: real mouse and key events on the real QML, against a real Puddle (the
 // app's Backend) and a second real Puddle that plays the friend. Offscreen.
 #include <QClipboard>
+#include <QRegularExpression>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -336,7 +337,9 @@ int main(int argc, char **argv)
         auto group_rows = [&](JsonListModel *m) { int n = 0; for (const QJsonObject &o : m->items()) n += o.value("kind").toString() == "group"; return n; };
 
         /* ---- make a group from the window: a name, and which friends ---- */
-        CHECK(clickName("friendsButton") || true);
+        CHECK(find("newGroupButton") == nullptr);                                                   /* no "+" beside Direct Messages */
+        CHECK(clickName("groupsButton"));                                                           /* Groups has its own page, like Friends */
+        CHECK(until([&] { return find("groupsPage") != nullptr; }, 3000));
         CHECK(clickName("newGroupButton"));
         CHECK(until([&] { return find("groupNameField") != nullptr; }, 3000));
         CHECK(click(find("groupNameField")));
@@ -409,9 +412,21 @@ int main(int argc, char **argv)
         QSignalSpy invited(&A, &Chats::newGroupInvite);
         B.createGroup("Bob's trip", { backend.myId() });
         CHECK(until([&] { return A.incomingGroupInvites() == 1 && invited.count() == 1; }));
-        CHECK(clickName("friendsButton"));
-        CHECK(clickName("tab1"));
+        CHECK(find("newGroupButton") == nullptr);                                                   /* no "+" beside Direct Messages */
+        CHECK(clickName("groupsButton"));                                                           /* invitations are on the Groups page, not among friend requests */
         CHECK(until([&] { return find("acceptGroupButton") != nullptr; }, 5000));
+        {
+            bool shown = false, counted = false;
+            walk(win->contentItem(), [&](QQuickItem *i) {
+                const QString t = i->isVisible() ? i->property("text").toString() : QString();
+                if (t.contains("invited you to a group")) {
+                    shown = true;
+                    counted = counted || t.contains(QRegularExpression("\\d")) || t.contains("people") || t.contains("member");   /* it does not say how many are in it */
+                }
+                return false;
+            });
+            CHECK(shown && !counted);
+        }
         CHECK(click(find("acceptGroupButton")));
         CHECK(until([&] { return button("OK") != nullptr; }, 3000));                               /* "Everyone in this group will be able to see your address" */
         {

@@ -107,7 +107,7 @@ if(PUDDLE_BUILD_GUI)
       URI Puddle
       VERSION 1.0
       QML_FILES src/gui/Main.qml src/gui/Setup.qml src/gui/Shell.qml src/gui/Avatar.qml src/gui/PersonRow.qml
-        src/gui/ChatPage.qml src/gui/NewGroupPopup.qml src/gui/GroupInviteRow.qml src/gui/GroupPopup.qml src/gui/FriendsPage.qml src/gui/AddFriendPopup.qml src/gui/LogPage.qml
+        src/gui/ChatPage.qml src/gui/GroupsPage.qml src/gui/NewGroupPopup.qml src/gui/GroupInviteRow.qml src/gui/GroupPopup.qml src/gui/FriendsPage.qml src/gui/AddFriendPopup.qml src/gui/LogPage.qml
       RESOURCES src/gui/puddle.png)
     target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network)
     if(APPLE)

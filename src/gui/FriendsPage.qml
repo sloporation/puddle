@@ -15,7 +15,7 @@ Pane {
 
     padding: 0
 
-    readonly property int pending: chats.incomingRequests + chats.incomingGroupInvites
+    readonly property int pending: chats.incomingRequests
     property int tab: 0 // 0 all, 1 pending, 2 blocked
 
     // the people with a stream that is not asked for or ended
@@ -91,7 +91,7 @@ Pane {
             font.bold: true
             opacity: 0.65
             text: page.tab === 0 ? qsTr("All friends — %1").arg(chats.friendCount)
-                  : page.tab === 1 ? qsTr("Pending — %1").arg(chats.pendingCount + chats.incomingGroupInvites)
+                  : page.tab === 1 ? qsTr("Pending — %1").arg(chats.pendingCount)
                   : qsTr("Blocked — %1").arg(chats.blocked.count)
         }
 
@@ -107,25 +107,6 @@ Pane {
             model: chats.people
             spacing: 0
             ScrollBar.vertical: ScrollBar {}
-            // invitations to groups come first in Pending, next to the friend requests
-            header: Column {
-                width: people.width
-                visible: page.tab === 1
-                height: visible ? implicitHeight : 0
-                Repeater {
-                    model: page.tab === 1 ? chats.groupInvites : null
-                    delegate: GroupInviteRow {
-                        required property var model
-                        width: people.width
-                        chats: page.chats
-                        groupId: model.id
-                        name: model.name
-                        invitedBy: model.invitedByName
-                        count: model.count
-                        onAccept: { joinConfirm.target = model.id; joinConfirm.groupName = model.name; joinConfirm.open() }
-                    }
-                }
-            }
             delegate: PersonRow {
                 id: person
                 required property var model
@@ -152,7 +133,7 @@ Pane {
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
                 opacity: 0.6
-                visible: page.tab === 0 ? chats.friendCount === 0 : chats.pendingCount + chats.incomingGroupInvites === 0
+                visible: page.tab === 0 ? chats.friendCount === 0 : chats.pendingCount === 0
                 text: page.tab === 0 ? qsTr("No friends yet. Use Add Friend and enter someone's address.")
                                      : qsTr("No pending requests.")
             }
@@ -183,24 +164,5 @@ Pane {
                 text: qsTr("Nobody is blocked.")
             }
         }
-    }
-
-    // joining shows your address to everyone in the group: say so first
-    Dialog {
-        id: joinConfirm
-        objectName: "joinConfirm"
-        property string target: ""
-        property string groupName: ""
-        anchors.centerIn: Overlay.overlay
-        width: 380
-        modal: true
-        title: qsTr("Join “%1”?").arg(groupName)
-        standardButtons: Dialog.Cancel | Dialog.Ok
-        Label {
-            width: parent.width
-            wrapMode: Text.Wrap
-            text: qsTr("Everyone in this group will be able to see your address and connect to your Puddle for it, including people who are not your friends.")
-        }
-        onAccepted: page.chats.acceptGroup(target)
     }
 }

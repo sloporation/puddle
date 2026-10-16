@@ -29,7 +29,7 @@ Chats::Chats(QObject *parent)
                   "dayStart", "replyName", "replyText", "replyMissing", "deliveryState", "deliveryReason", "deliveryNext", "kind", "noticeText" }),
       blocked_({ "id", "user", "name", "created_at" }, nullptr, "user"),
       profiles_({ "id", "display_name", "avatar", "default" }),
-      invites_({ "id", "name", "invitedBy", "invitedByName", "count" }),
+      invites_({ "id", "name", "invitedBy", "invitedByName" }),
       members_({ "id", "name", "avatar", "color", "state", "isMe", "friend" })
 {
     cacheDir_ = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/avatars";
@@ -574,10 +574,6 @@ void Chats::refreshGroups()
                 row.insert("name", g.value("name"));
                 row.insert("invitedBy", by);
                 row.insert("invitedByName", nameOf(by));
-                int n = 0;
-                for (const QJsonValue &m : g.value("members").toArray())
-                    n += m.toObject().value("state").toString() == QLatin1String("member");
-                row.insert("count", n);
                 invites.append(row);
                 if (groupsLoaded_ && !invitedTo_.contains(id))
                     emit newGroupInvite(id);

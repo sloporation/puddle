@@ -17,6 +17,7 @@ Item {
     readonly property color sideColor: Qt.darker(palette.window, 1.04)
 
     function openFriends() { chats.close(); page = "friends"; showContent = true }
+    function openGroups() { chats.close(); page = "groups"; showContent = true }
     function openChat(id, kind) { chats.open(id, kind || "dm"); page = "chat"; showContent = true }
     function openLog() { chats.close(); page = "log"; showContent = true }
     function addFriend() { addPopup.open() }
@@ -145,35 +146,47 @@ Item {
                         Label { text: "👥"; font.pixelSize: 18 }
                         Label { text: qsTr("Friends"); Layout.fillWidth: true; font.bold: true }
                         Rectangle {
-                            visible: shell.chats.incomingRequests + shell.chats.incomingGroupInvites > 0
+                            visible: shell.chats.incomingRequests > 0
                             width: 20; height: 20; radius: 10; color: "#d9453d"
-                            Label { anchors.centerIn: parent; text: shell.chats.incomingRequests + shell.chats.incomingGroupInvites; color: "white"; font.pixelSize: 11; font.bold: true }
+                            Label { anchors.centerIn: parent; text: shell.chats.incomingRequests; color: "white"; font.pixelSize: 11; font.bold: true }
                         }
                     }
                     onClicked: shell.openFriends()
                 }
 
-                RowLayout {
+                ItemDelegate {
+                    id: groupsButton
+                    objectName: "groupsButton"
                     Layout.fillWidth: true
-                    Layout.leftMargin: 16
+                    Layout.leftMargin: 8
                     Layout.rightMargin: 8
-                    Layout.topMargin: 12
-                    Label {
-                        text: qsTr("DIRECT MESSAGES")
-                        font.pixelSize: 11
-                        font.bold: true
-                        opacity: 0.6
-                        Layout.fillWidth: true
+                    highlighted: shell.page === "groups" && (shell.wide || shell.showContent)
+                    Accessible.name: qsTr("Groups")
+                    background: Rectangle {
+                        radius: 6
+                        color: groupsButton.highlighted ? Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.14)
+                               : groupsButton.hovered ? Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.07) : "transparent"
                     }
-                    ToolButton {
-                        objectName: "newGroupButton"
-                        text: "+"
-                        font.pixelSize: 18
-                        padding: 2
-                        Accessible.name: qsTr("New group")
-                        ToolTip.text: qsTr("New group"); ToolTip.visible: hovered
-                        onClicked: newGroup.open()
+                    contentItem: RowLayout {
+                        spacing: 12
+                        Label { text: "💬"; font.pixelSize: 18 }
+                        Label { text: qsTr("Groups"); Layout.fillWidth: true; font.bold: true }
+                        Rectangle {
+                            visible: shell.chats.incomingGroupInvites > 0
+                            width: 20; height: 20; radius: 10; color: "#d9453d"
+                            Label { anchors.centerIn: parent; text: shell.chats.incomingGroupInvites; color: "white"; font.pixelSize: 11; font.bold: true }
+                        }
                     }
+                    onClicked: shell.openGroups()
+                }
+
+                Label {
+                    Layout.margins: 16
+                    Layout.bottomMargin: 4
+                    text: qsTr("DIRECT MESSAGES")
+                    font.pixelSize: 11
+                    font.bold: true
+                    opacity: 0.6
                 }
 
                 ListView {
@@ -296,6 +309,16 @@ Item {
                 narrow: !shell.wide
                 onAddFriend: shell.addFriend()
                 onOpenChat: id => shell.openChat(id)
+                onBack: shell.goBack()
+            }
+            GroupsPage {
+                objectName: "groupsPage"
+                anchors.fill: parent
+                visible: shell.page === "groups"
+                chats: shell.chats
+                narrow: !shell.wide
+                onNewGroup: newGroup.open()
+                onOpenGroup: id => shell.openChat(id, "group")
                 onBack: shell.goBack()
             }
             LogPage {

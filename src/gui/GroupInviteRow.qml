@@ -10,7 +10,6 @@ Rectangle {
     property string groupId: ""
     property string name: ""
     property string invitedBy: ""
-    property int count: 0
     signal accept()
 
     implicitHeight: Math.max(col.implicitHeight, 40) + 20
@@ -36,7 +35,7 @@ Rectangle {
                 opacity: 0.65
                 font.pixelSize: 12
                 wrapMode: Text.Wrap
-                text: qsTr("%1 invited you to a group of %2").arg(row.invitedBy).arg(row.count === 1 ? qsTr("1 person") : qsTr("%1 people").arg(row.count))
+                text: qsTr("%1 invited you to a group").arg(row.invitedBy)
             }
         }
         RoundButton {
