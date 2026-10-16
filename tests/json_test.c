@@ -73,6 +73,55 @@ int main(void)
     CHECK(member("{\"n\":1e3}", "n", &v) == 0 && puddle_json_int64(v, &n) == -1);
     CHECK(member("{\"n\":\"7\"}", "n", &v) == 0 && puddle_json_int64(v, &n) == -1);
 
+    /* ---- walking an array ---- */
+    {
+        puddle_span arr, it;
+        size_t cur;
+        int n;
+        const char *cases[][2] = {
+            { "[]", "0" }, { " [ ] ", "0" }, { "[1]", "1" }, { "[1,2,3]", "3" }, { " [ 1 , \"a,b]\" , {\"x\":[1,2]} , [ ] , null ] ", "5" },
+            { "[\"]\",\"[\"]", "2" },
+        };
+        for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+            arr.p = cases[i][0];
+            arr.len = strlen(arr.p);
+            cur = 0;
+            n = 0;
+            while (puddle_json_array_next(arr, &cur, &it) == 1) n++;
+            CHECK(n == atoi(cases[i][1]));
+            CHECK(puddle_json_array_next(arr, &cur, &it) == 0);                    /* and it stays ended */
+        }
+        arr.p = " [ 1 , \"a,b]\" , {\"x\":[1,2]} ] ";
+        arr.len = strlen(arr.p);
+        cur = 0;
+        CHECK(puddle_json_array_next(arr, &cur, &it) == 1 && it.len == 1 && it.p[0] == '1');
+        CHECK(puddle_json_array_next(arr, &cur, &it) == 1 && it.len == 6 && !memcmp(it.p, "\"a,b]\"", 6));
+        CHECK(puddle_json_array_next(arr, &cur, &it) == 1 && it.len == 11 && !memcmp(it.p, "{\"x\":[1,2]}", 11));
+        CHECK(puddle_json_array_next(arr, &cur, &it) == 0);
+        const char *bad[] = { "", "{}", "1", "[", "[1", "[1,", "[1,]", "[,1]", "[1 2]", "[1,,2]", "[\"a]", "[{]", "[1}", "]", "[01]" };
+        for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+            arr.p = bad[i];
+            arr.len = strlen(arr.p);
+            cur = 0;
+            int r, steps = 0, ended_ok = 1;
+            while ((r = puddle_json_array_next(arr, &cur, &it)) == 1 && steps++ < 10) ;
+            if (r != -1) ended_ok = 0;
+            if (!ended_ok) { fprintf(stderr, "FAIL array %s was accepted\n", bad[i]); failures++; }
+        }
+        /* an array inside an object, found the usual way */
+        const char *obj = "{\"events\":[{\"a\":1},{\"a\":2}],\"n\":3}";
+        CHECK(puddle_json_member(obj, strlen(obj), "events", &arr) == 0);
+        cur = 0;
+        n = 0;
+        while (puddle_json_array_next(arr, &cur, &it) == 1) {
+            puddle_span a;
+            int64_t v;
+            CHECK(puddle_json_member(it.p, it.len, "a", &a) == 0 && puddle_json_int64(a, &v) == 0 && v == n + 1);
+            n++;
+        }
+        CHECK(n == 2);
+    }
+
     /* ---- writer ---- */
     char out[256];
     puddle_jw w;

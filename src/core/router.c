@@ -6,12 +6,16 @@
 
 #define BODY_BUF 28000 /* what a handler may write; the rest of the 32 KB response is headers */
 
-static int64_t clock_ms(void)
+int64_t puddle_ctx_now_ms(const puddle_ctx *ctx)
 {
+    if (ctx->now_ms)
+        return ctx->now_ms();
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
+
+int64_t puddle_call_now_ms(const puddle_call *call) { return puddle_ctx_now_ms(call->ctx); }
 
 static const puddle_route *find(const puddle_router *r, const char *method, const char *path)
 {
@@ -27,6 +31,43 @@ size_t puddle_router_body_limit(const puddle_router *r, const puddle_request *re
     if (!rt || (rt->auth == PUDDLE_AUTH_OWNER && !owner_ok))
         return 0;
     return rt->body_max;
+}
+
+int puddle_query_parse(const char *target, const char *const *keys, size_t nkeys, char (*values)[PUDDLE_QUERY_VALUE_MAX])
+{
+    for (size_t i = 0; i < nkeys; i++)
+        values[i][0] = '\0';
+    const char *q = strchr(target, '?');
+    if (!q)
+        return 0;
+    q++;
+    while (*q) {
+        const char *eq = strchr(q, '=');
+        const char *end = strchr(q, '&');
+        if (!end)
+            end = q + strlen(q);
+        if (!eq || eq > end || end == q)
+            return -1;
+        size_t kl = (size_t)(eq - q), vl = (size_t)(end - eq - 1);
+        if (vl == 0 || vl >= PUDDLE_QUERY_VALUE_MAX)
+            return -1;
+        size_t k = 0;
+        while (k < nkeys && !(strlen(keys[k]) == kl && !strncmp(keys[k], q, kl)))
+            k++;
+        if (k == nkeys || values[k][0])
+            return -1; /* unknown or repeated */
+        for (size_t i = 0; i < vl; i++) {
+            char c = eq[1 + i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'))
+                return -1;
+        }
+        memcpy(values[k], eq + 1, vl);
+        values[k][vl] = '\0';
+        q = *end ? end + 1 : end;
+        if (*end && !*q)
+            return -1; /* a trailing & */
+    }
+    return 0;
 }
 
 int puddle_fail(puddle_jw *w, int status, const char *code)
@@ -103,7 +144,7 @@ size_t puddle_router_handle(const puddle_router *r, const puddle_request *req, i
         chain_look cl = { ctx, rt, body, body_len };
         puddle_peer_key_fn lookup = rt->auth == PUDDLE_AUTH_CHAIN ? chain_lookup : (ctx->peer_key ? ctx->peer_key : no_peer);
         void *user = rt->auth == PUDDLE_AUTH_CHAIN ? (void *)&cl : ctx->peer_key_user;
-        int64_t now = ctx->now_ms ? ctx->now_ms() : clock_ms();
+        int64_t now = puddle_ctx_now_ms(ctx);
         puddle_reqsig sig;
         puddle_authn a = puddle_reqsig_authenticate(req->signature, req->method, req->target, body, body_len, me,
                                                     lookup, user, ctx->replay, now, &sig);

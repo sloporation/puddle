@@ -154,12 +154,69 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
 
 ## Phase 3: Streams
 
-- [ ] **3.1 Stream store.** One file per peer (chain, address, state, note, profile shown), plus blocks,
+- [x] **3.1 Stream store.** One file per peer (chain, address, state, note, profile shown), plus blocks,
   invite tokens and the access policy. The key lookup the signature check needs. A `puddle://` link parser.
-- [ ] **3.2 Inbound request.** `POST /stream/v1/access`: verify the chain in the body, check blocks,
+  Built in `src/core/streams.c/h` and `link.c/h`; layout in `docs/storage.md`.
+  - **A stored chain is a proven chain.** `puddle_streams_put` verifies the chain against the id the record is
+    filed under, so nothing in the store is a key that hasn't been shown to belong to its id; files are
+    verified again on load, and a damaged or edited one costs that one peer (skipped with a warning), not the
+    Puddle. Ids are checked (`puddle_id_valid`: 52 base32 characters, last one `a` or `q`, so each id has exactly
+    one spelling) before they go anywhere near a path.
+  - **The key lookup** (`puddle_streams_peer_key`, wired into the router as `ctx->peer_key`) answers for any
+    peer we hold a chain for, only for the key currently in that chain, and never for a blocked id. Which
+    states may do what stays with the endpoints, which is where `403 no_stream` lives. The PEER routes are
+    live now, though none exist yet.
+  - **Blocks** are local, persisted before anything else happens, close any stream with that id, refuse their
+    keys and refuse new records about them.
+  - **Invites** are random 128-bit tokens with a lifetime (up to 30 days) and a use count; a spend is saved
+    before it is honoured; at most 64 are live.
+  - **Links:** `puddle://<id>@host:port[?invite=<token>]`, strict (no spaces, paths, fragments, other parameters,
+    bare IPv6, malformed hosts or ports); the address is stored in one canonical spelling.
+  - Not here: the request itself (3.2), rate limits (3.2), the TLS fingerprint of a peer (3.4), pushed chain
+    updates after a roll (phase 4).
+- [x] **3.2 Inbound request.** `POST /stream/v1/access`: verify the chain in the body, check blocks,
   policy, invite token and rate limit, record `pending_in`, always answer `202` with no body.
-- [ ] **3.3 Owner stream endpoints.** List, accept, decline, delete, block, unblock, invite, policy.
-- [ ] **3.4 Outbound client.** A signing HTTPS client and a persistent outbox.
+  Built in `src/core/access.c` (the request) and `ratelimit.c`; the route is a CHAIN route.
+  - **Order:** the router asks `puddle_access_chain_key` for the requester's key, found in the chain in the
+    body (after a global limit on this unauthenticated work, 50 a second with a burst of 100); the
+    signature is then checked and replays are caught as for any signed request; only then does the handler
+    decide. So the `202` means "properly signed by this id", and everything else is the usual `404`.
+    *This differs from the earlier wording ("202 whatever happens"): answering 202 to garbage would tell a
+    stranger there is a Puddle here.* The decision itself is never visible: pending, approved, blocked,
+    closed, rate-limited and full all produce the same bytes.
+  - **Decision:** blocked, closed (unless we asked them first) and over-limit requests are dropped, as are
+    group-only (`scope`) requests until groups exist. Someone we asked ourselves (`pending_out`) is approved
+    at once (both want it). Otherwise approved at once if the policy is `open` or the invite token is good
+    (spent only if it's what lets them in); otherwise `pending_in`. A closed stream may be asked for again;
+    an active one is left alone; a request while waiting refreshes the note and address.
+  - **What is kept** is rebuilt, not copied: the note (500 characters), and a profile of `display_name`,
+    `blurb`, `about` and `pronouns` only, cleaned of control characters and of the direction overrides that
+    let a name read backwards, with bad UTF-8 replaced. The address must parse as `host:port`.
+  - **Limits:** five requests an hour per requester, 200 waiting for the owner, 5000 on record, 96 KiB per
+    request (a chain in it up to 64 KiB, about 80 key changes).
+  - An approval made here (open policy, invite, or mutual) is told to the requester with `access/result`: the
+    record carries `owed` until the outbox delivers it (3.3, 3.5).
+  - **Owed to 3.4:** the address in a request came from a stranger. When we connect to it, we must not
+    treat it as trusted (no connecting to anything but a normal peer address, a short timeout).
+- [x] **3.3 Owner stream endpoints.** List, accept, decline, delete, block, unblock, invite, policy.
+  Built in `src/core/owner_streams.c` (all owner-token routes; nothing here talks to another Puddle).
+  - `GET /api/v1/stream` (paged, filter by `state`; most recently changed first; a page stops early when
+    its entries are large, and `next` says where to carry on), `accept`, `decline`, `delete`;
+    `GET/POST /api/v1/stream/policy`; `POST /api/v1/stream/invite` (and, beyond the spec as first written,
+    `GET` to list and `POST .../invite/revoke`, since a link that has leaked must be cancellable);
+    `GET /api/v1/user/block`, `POST .../block`, `POST .../unblock`.
+  - **What each may be applied to:** accept and decline only a `pending_in`; delete only an `active` stream
+    or a `pending_out` one (withdrawing a request); anything else is `409`. Blocking yourself is `400`.
+    Blocking an already-blocked id keeps the first time. A block drops the optional note the spec once had.
+  - **Owed to the other side.** A decision has to reach the peer even if they are offline or we restart, so
+    the stream record now carries `owed` (`approved`, `declined` or `closed`), set by accept, decline, delete
+    and by approvals made on arrival (open policy, invite, mutual), and cleared by the outbox once delivered
+    (3.4, 3.5). A block is silent and clears it.
+  - An invite needs somewhere to point: with no `advertise:` address and a wildcard listen address,
+    creating one is `409 no_address` with a message saying what to set.
+  - `204` responses now carry no `Content-Length` or `Content-Type`, as HTTP requires.
+  - Not here: `stream/request` (3.5), `stream/profile` (assigning a profile to a stream, phase 4).
+- [x] **3.4 Outbound client.** A signing HTTPS client and a persistent outbox.
   - **TLS:** the connection uses each Puddle's own self-generated certificate and accepts any, with no
     CA and no hostname check; signatures do the authenticating. The certificate's fingerprint is recorded
     on first contact. It does not depend on the address, so an address change doesn't alter it; it
@@ -173,11 +230,73 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   - **Any other failure** (TLS error, an HTTP error, `404`, a rejected signature) **fails once and is not
     retried.** The outbox keeps the reason so the app can later tell the owner "this failed because
     ..., try again or give up".
-- [ ] **3.5 Requesting and answering.** Owner `POST /api/v1/stream/request` sends the signed request;
+  Built in `src/core/client.c` (one signed HTTPS request) and `outbox.c` (the queue, on disk).
+  - **Client:** TLS accepts any certificate and takes its SHA-256 fingerprint; `fingerprint_ok` is asked once
+    the certificate is known and before anything is sent. Results are `OK` (any HTTP answer), `OFFLINE`
+    (refused, timed out, unreachable, unknown host), `FAILED` (anything else: TLS, HTTP framing, an oversize
+    or stalled answer) and `CERT_CHANGED`. Timeouts: 8 s to connect, 10 s per read or write, 30 s in all;
+    answers over 64 KiB are refused.
+  - **Addresses from strangers** are screened before dialling, as noted under 3.2: unspecified, multicast,
+    broadcast, reserved and link-local (which includes the cloud metadata address) are never connected to,
+    including IPv4-mapped IPv6 and every address a name resolves to. Loopback and private ranges are allowed:
+    friends on one network are normal.
+  - **Outbox:** one file per item in `state/outbox/`. Offline peers are retried on the schedule above, by sending
+    their oldest item (that is the check; no separate probe); when one gets through the rest follow in order
+    at once. Only the oldest item is tried each round, so a dead peer costs one attempt, not one per item. The
+    day-long window starts at the first failure of a stretch and resets once the peer answers. Anything else
+    fails once and is kept, marked failed, with its reason; items behind a failure still go. At most 1000 wait
+    and 200 failures are kept (oldest forgotten first). Items go out in order per peer; one peer being away never
+    delays another.
+  - **Certificates:** the fingerprint of a peer is recorded in its stream record on first contact. A different
+    one holds all that peer's items, marks the stream `certificate_changed`, and waits for
+    `POST /api/v1/stream/trust`, which adopts the new one and releases the held items.
+  - The server runs the outbox on its own thread. What happens when an item ends (an answer reaching a
+    requester, `owed` cleared) is 3.5; for now the end is logged.
+  - Not here: an address record announcing a new fingerprint (phase 4), and an endpoint to list the outbox's
+    failures for the app (comes with the app's use of it). (Peers are delivered to in parallel; see 3.5.)
+
+- [x] **3.5 Requesting and answering.** Owner `POST /api/v1/stream/request` sends the signed request;
   inbound `access/result`, `access/status` and `close`.
-- [ ] **3.6 Two Puddles, end to end.** An automated test with two Puddles: request, accept, active, close;
+  Built in `src/core/flow.c` (what we start and how it turned out) and `inbound.c` (what arrives).
+  - **`POST /api/v1/stream/request`:** takes a `puddle://` link (an invite in it is sent along), a note and which
+    profile to show. It refuses (`400`/`409`, with a code) yourself, a bad link, a note over 500 characters, an
+    unknown profile, someone blocked, a stream already open or requested, or one they asked for (accept
+    instead), and needs this Puddle's own public address (`advertise:`) because the answer has to come back to
+    it. Otherwise it records `pending_out` and queues the signed request. If it cannot be queued the stream is
+    closed with the reason, not left looking as if it were on its way.
+  - **Answers that come back** (`access/result`, chain-proven): accepted only from an id we have a `pending_out`
+    request to, whose chain belongs to that id, and with a plain `true` or `false`; then the stream becomes
+    `active` (their chain, profile and address kept, the link's address first) or `closed`. Anything else, from
+    anyone, changes nothing, and **an authenticated answer is always `202`**: a stranger can authenticate with a
+    key of their own, so the reply must say nothing. A decline carries the responder's chain too (otherwise a
+    forgery could not be told from it).
+  - **`access/status`** is a `POST` with the chain in the body, not the `GET` first drafted, because the target
+    may hold nothing about the requester (a request it ignored leaves no trace) and so could not otherwise tell
+    who is asking. `approved` only to someone with an active stream, `declined` to someone whose stream we
+    closed, `pending` to everyone else, blocked or ignored or unknown alike. Nothing in this Puddle calls it yet:
+    the outbox's retries mean an answer is rarely missed, so a poller waits for a reason to exist.
+  - **`close`** is signed with a key we hold, so the sender is known and can be told `403 no_stream` when there
+    is nothing to close; from an active stream, a request they sent, or one we sent (a refusal), it closes.
+  - **Telling the other side** is the `owed` mechanism from 3.3: accept, decline, delete and arrival-time
+    approvals each queue the matching message, and the outbox's `done` hook clears what was owed once it lands
+    (or records, in the stream's `error`, that it could not be told, and gives up: fail once). At start, anything
+    still owed that the queue does not hold is queued again.
+  - **Concurrency:** the outbox now delivers to different peers side by side (up to 8 threads, one per peer, so
+    a peer's items stay in order), because one slow or dead peer must not delay the rest. The store gained
+    `puddle_streams_update`, which reads, changes and writes a record as one step, since several threads now
+    change records; the owner's accept/decline/delete and the arrival of a request use it.
+- [x] **3.6 Two Puddles, end to end.** An automated test with two Puddles: request, accept, active, close;
   blocked and `closed` look like pending; an invite link auto-approves; a stranger gets `404`.
-  This is also where the owner-recovery fetch from a friend gets tested.
+  `tests/e2e_test.c` starts five real Puddles (own data directory, own certificate, real TLS on loopback) and
+  drives them through the owner API with real owner tokens: request, accept, active on both sides with chains,
+  fingerprints and profiles recorded; decline and asking again; an invite let in with nobody clicking; a blocked
+  requester and a Puddle closed to requests both see their request stay "pending" while the target holds nothing
+  of them; delete, and being asked again; a restart while an answer is owed (not doubled, and re-queued from the
+  record if the queue file is lost); a regenerated certificate holding sending until the owner trusts it; a
+  refused request failing with its reason; answers nobody asked for changing nothing; and every `/stream/v1`
+  route answering a stranger `404`. `inbound_test.c` and `flow_test.c` cover the details.
+  *Not covered: the owner-recovery fetch from a friend (`GET /stream/v1/identity`), which is not built; it is
+  its own step in phase 4.*
 
 *Commit point. This is the first time it visibly works.*
 
@@ -185,7 +304,56 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
 
 - [ ] **4.1 Direct messages.** `POST /stream/v1/events` delivery with dedupe and sender checks, and the
   owner `dm/send|edit|delete` and message listing, on top of the chat store.
-- [ ] **4.2 Key roll and address pushes.** `POST /stream/v1/identity` and `/address`; peers verify and update.
+  - [x] **4.1a Send and receive text.** Built in `src/core/message.c` (the event: chat id, signing, checks) and
+    `messages.c` (routes).
+    - **The event** is `{"type":"message","chat","sender","ts","body"[,"ref"]}`, stored and sent exactly as signed;
+      its id is the SHA-256 of those bytes. The DM chat id is the one in `docs/storage.md`, and a DM has no
+      `chat.create`. The signature is Ed25519 over `puddle-event-v1\n` + the bytes (so it can never be mistaken
+      for a request or chain signature) and travels as `<key id>:<base64>` *outside* the bytes, which lets a Puddle
+      that rolls keys sign the same event again without changing its id.
+    - **A correction to the proposal:** I said a receiver would accept an event signed by an earlier key in the
+      chain. It does not: a delivery must be signed by the sender's **current** key, because accepting retired
+      ones would let someone holding a stolen phone's old keys keep writing as the owner after the owner rolls,
+      which is exactly what rolling is for. Verifying old history with old keys is a different job (catching up on
+      a chat), for later. What this leaves to 4.2: a message queued before a roll is signed with the old key,
+      so after the roll the sender must sign queued ones again (possible now, since the key id is outside the
+      bytes), and a receiver must learn the new key first (the push in 4.2); until then its deliveries are `404`.
+    - **Receiving** (`POST /stream/v1/events`, peer-signed): needs an open stream (`403 no_stream`) and the
+      DM chat between exactly the two of us (`400`); at most 100 events and 256 KiB, refused whole beyond that.
+      Each event is then judged alone and answered `accepted`, `duplicate` or `rejected` with a reason
+      (`bad_id`, `bad_signature`, `unknown_key`, `wrong_sender`, `wrong_chat`, `bad_time`, `bad_body`, ...).
+    - **Sending** (`POST /api/v1/dm/send`): needs an open, unblocked stream; checks the body; stamps a `ts`
+      that never repeats; signs; saves; queues for delivery (retried while they are away). If it is saved but
+      cannot be queued, the answer is `500 not_queued` rather than a pretence.
+    - **Reading** (`GET /api/v1/dm/messages?user=`, paged from the newest, a page holding what fits). The spec's
+      `/dm/{user}/messages` became a query parameter, since routes here are exact paths.
+    - **Trouble reaches the owner:** a delivery the other side refuses, or cannot be made, is noted as the
+      stream's `error`.
+    - Not here (4.1b and later): edits and deletes; a per-message sent/failed state; live updates; read markers;
+      a per-sender rate limit (deliveries only come from people the owner has accepted); catching up on missed
+      messages.
+- [x] **4.2 Key roll and address pushes.** `POST /stream/v1/identity` and `/address`; peers verify and update.
+  Built in `src/core/keysync.c`.
+  - **Keys:** after a roll (the API's `roll/confirm`, or at start if `puddled --roll` was used while stopped), every peer
+    that holds our chain and has not been told (`chain_sent` on its record) gets it, queued **ahead** of everything else
+    for that peer. The receiver takes it only as a continuation of the chain it holds (the stored text plus whole
+    new records, each verifying); anything else, from anyone, is ignored. It is authenticated by the new chain in the body,
+    which any stranger could do with their own, so it is always `202`.
+  - **What was already waiting** is brought up to date, since it was made for the old keys: events are signed again by the
+    new key (same bytes, same id), and a request or answer that carried the old chain gets the new. Without this a message
+    queued before a roll would be refused after it, or a request answered `404`.
+  - **Address and certificate:** at start the Puddle compares the address it advertises and its certificate's fingerprint
+    with what it last announced (`state/address.json`); a difference makes the next signed address record (`seq`+1), pushed
+    to every active stream. The record carries the new `tls_fp`, which the receiver accepts silently (signed by a key it
+    trusts) and which releases anything held for that certificate. A certificate that changes *without* an announcement
+    still holds sending until the owner trusts it (3.4): this is what tells the two apart.
+  - **Who holds what** is on the stream record (`chain_sent`, `addr_sent`) and is set when an item is delivered, including
+    the requests and answers that carry our chain and address, so nothing is sent twice and nothing is forgotten across a
+    restart or an absence.
+  - Addresses we would never connect to are refused wherever they arrive (a request, an address record).
+  - New in the outbox: waiting items can be rewritten, "retry now" for a peer, and news of a key change goes first.
+  - Not here: retrying a message refused as `unknown_key` for a roll we were not told of (the push goes first, so this only
+    happens if it was lost); the owner-recovery fetch of a chain from a friend (`GET /stream/v1/identity`).
 - [ ] **4.3 Profiles over a stream.** Assignment and reload endpoints, `profile` push, `media` fetch.
 - [ ] **4.4 The app shows it.** Pending requests, accept/decline, and a message view in the Qt app.
 

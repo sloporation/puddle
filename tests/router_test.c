@@ -268,6 +268,50 @@ int main(void)
         puddle_replay_free(small.replay);
     }
 
+    /* ---- peer routes with the real stream store behind them ---- */
+    {
+        char dd[700], e[300];
+        snprintf(dd, sizeof dd, "%s/bob-data", root);
+        puddle_streams *ss = puddle_streams_open(dd, e, sizeof e);
+        CHECK(ss != NULL);
+        puddle_ctx real = ctx;
+        real.peer_key = puddle_streams_peer_key;
+        real.peer_key_user = ss;
+        puddle_router R5 = { routes, sizeof routes / sizeof routes[0], &real };
+        int64_t t = T0 + 500;
+
+        sign(alice, "GET", "/p", NULL, bob_id, t++, sig, sizeof sig);
+        CHECK(call(&R5, "GET", "/p", sig, NULL, 0).status == 404); /* a stranger: no stream, no answer */
+
+        puddle_stream rec;
+        CHECK(puddle_stream_init(&rec, alice_id, PUDDLE_STREAM_PENDING_OUT, T0) == 0);
+        CHECK(puddle_streams_put(ss, &rec, e, sizeof e) == 0);
+        sign(alice, "GET", "/p", NULL, bob_id, t++, sig, sizeof sig);
+        CHECK(call(&R5, "GET", "/p", sig, NULL, 0).status == 404); /* we asked, but hold no keys of hers yet */
+
+        size_t cl;
+        char *chain = puddle_identity_chain(alice, &cl);
+        CHECK(puddle_stream_set_chain(&rec, chain, cl) == 0);
+        free(chain);
+        rec.state = PUDDLE_STREAM_ACTIVE;
+        CHECK(puddle_streams_put(ss, &rec, e, sizeof e) == 0);
+        sign(alice, "GET", "/p", NULL, bob_id, t++, sig, sizeof sig);
+        r = call(&R5, "GET", "/p", sig, NULL, 0);
+        CHECK(r.status == 200 && strstr(body_of(&r), alice_id));   /* a known peer, with her current key */
+
+        sign(carol, "GET", "/p", NULL, bob_id, t++, sig, sizeof sig);
+        CHECK(call(&R5, "GET", "/p", sig, NULL, 0).status == 404); /* a different person */
+
+        CHECK(puddle_streams_block(ss, alice_id, t, e, sizeof e) == 0);
+        sign(alice, "GET", "/p", NULL, bob_id, t++, sig, sizeof sig);
+        CHECK(call(&R5, "GET", "/p", sig, NULL, 0).status == 404); /* blocked: as if she were not there */
+        CHECK(puddle_streams_unblock(ss, alice_id, e, sizeof e) == 0);
+        sign(alice, "GET", "/p", NULL, bob_id, t++, sig, sizeof sig);
+        CHECK(call(&R5, "GET", "/p", sig, NULL, 0).status == 200);
+        puddle_stream_free(&rec);
+        puddle_streams_close(ss);
+    }
+
     /* ---- answers: empty body, and a handler that overflows ---- */
     r = call(&R, "GET", "/empty", NULL, NULL, 1);
     CHECK(r.status == 202 && strstr(r.out, "202 Accepted") && strstr(r.out, "Content-Length: 0\r\n") && *body_of(&r) == '\0');
@@ -289,6 +333,32 @@ int main(void)
     CHECK(r.status == 405); /* the APIs are GET and POST only */
     r = call(&real, "POST", "/health", NULL, NULL, 0);
     CHECK(r.status == 404);
+
+    /* ---- query strings ---- */
+    {
+        const char *keys[] = { "limit", "state" };
+        char v[2][PUDDLE_QUERY_VALUE_MAX];
+        CHECK(puddle_query_parse("/x", keys, 2, v) == 0 && !v[0][0] && !v[1][0]);
+        CHECK(puddle_query_parse("/x?limit=5&state=active", keys, 2, v) == 0 && !strcmp(v[0], "5") && !strcmp(v[1], "active"));
+        CHECK(puddle_query_parse("/x?state=pending_in", keys, 2, v) == 0 && !strcmp(v[1], "pending_in") && !v[0][0]);
+        CHECK(puddle_query_parse("/x?state=a-B_9", keys, 2, v) == 0);
+        CHECK(puddle_query_parse("/x?state=0123456789012345678901234567890", keys, 2, v) == 0 && strlen(v[1]) == 31);
+        char q79[300], q80[300];
+        snprintf(q79, sizeof q79, "/x?state=%.79s", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        snprintf(q80, sizeof q80, "/x?state=%.80s", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        CHECK(puddle_query_parse(q79, keys, 2, v) == 0 && strlen(v[1]) == 79 && puddle_query_parse(q80, keys, 2, v) == -1);
+        const char *bad[] = { "/x?state=a%20b", "/x?state=a b", "/x?state=a.b", "/x?state=a/b",
+                              "/x?other=1", "/x?limit=1&limit=2", "/x?limit=", "/x?limit", "/x?=1", "/x?&", "/x?limit=1&", "/x?&limit=1",
+                              "/x?limit=1&&state=a", "/x?limit==1", "/x?LIMIT=1", "/x?limit=1;state=a", "/x?state=\xC3\xA9", "/x?limit=1#f" };
+        for (size_t i = 0; i < sizeof bad / sizeof *bad; i++)
+            if (puddle_query_parse(bad[i], keys, 2, v) == 0) { fprintf(stderr, "FAIL accepted query: %s\n", bad[i]); failures++; }
+        char big[200];
+        memset(big, 'a', 150);
+        strcpy(big + 150, "");
+        char t[400];
+        snprintf(t, sizeof t, "/x?state=%s", big);
+        CHECK(puddle_query_parse(t, keys, 2, v) == -1);                    /* longer than the room: refused, not truncated */
+    }
 
     puddle_replay_free(ctx.replay);
     puddle_identity_close(alice); puddle_identity_close(bob); puddle_identity_close(carol);

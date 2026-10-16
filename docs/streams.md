@@ -7,7 +7,9 @@ Puddles call on each other).
 
 Built so far: the identity, its recovery phrase and rolling (`src/core/identity.c`), and request
 signing and checking (`src/core/reqsig.c`: Alice's side signs, Bob's side runs the checks below in
-order, with a bounded nonce memory), and the route table that applies them (`src/core/router.c`). Everything else here is design.
+order, with a bounded nonce memory), and the route table that applies them (`src/core/router.c`), the stream store (`src/core/streams.c`: peer
+records, blocks, invite tokens, the access setting, and the key lookup the signature check uses) and the link parser
+(`src/core/link.c`). The requests and endpoints that use them are still to come.
 
 ## What each side keeps
 
@@ -45,21 +47,29 @@ doesn't know is a request for a stream, and its answer to that is always the sam
 2. A's Puddle sends `POST /stream/v1/access` straight to that address: its own key chain, address, a
    profile (the one the owner chose), a short note (up to 500 characters), and the invite token if
    there is one, signed with its key. It records `pending_out`. Nothing is fetched first.
-3. B's Puddle answers `202` with no body **whatever it decides**. Then, privately, it drops the request
-   silently if the sender is blocked, if its policy is `closed`, if the sender is over its rate limit,
-   or if the chain or signature does not verify. Otherwise:
+3. B's Puddle first checks the request is really from who it says: well formed, the chain is the requester's
+   and the signature is its key's. A request that fails any of that is a `404`, the same as a path that does not
+   exist, so a stranger can't use this route to find out whether it is talking to a Puddle at all. One that
+   passes is answered `202` with no body **whatever B decides**. Then, privately, it drops the request
+   silently if the sender is blocked, if its policy is `closed`, if the sender is over its rate limit
+   (five requests an hour), or if B is full (200 waiting, 5000 on record). Otherwise:
    - **valid invite token:** approve at once (tokens expire and have a use count)
    - **policy `open`:** approve at once
    - **policy `manual`** (the default): record `pending_in` and tell the owner
 4. When approved (immediately, or when the owner accepts with `POST /api/v1/stream/accept`), B becomes
-   `active` and calls A's `POST /stream/v1/access/result` with its own chain and profile, retrying
-   with a growing delay if A is unreachable. A checks that the chain belongs to the id in the link
-   and that the result is signed by a key in it, then becomes `active`. This is the first time A sees
-   B's keys, and it sees them only because B chose to approve.
-5. Declining sends `approved: false` and nothing about why.
-6. A can ask `GET /stream/v1/access/status`. B answers only a requester it has a record of; one that
-   is blocked or refused by policy is told `pending`, forever, and anything unknown gets `404`. So no
-   answer ever reveals a block, a closed door, or who B is.
+   `active` and its outbox calls A's `POST /stream/v1/access/result` with its own chain and profile, retrying
+   on the schedule in `roadmap.md` (3.4) if A is away; what B still owes is kept on the stream (`owed`), so a
+   restart loses nothing. A accepts the answer only if it asked exactly that id, the chain belongs to that
+   id and the result is signed by a key in it; then it becomes `active`. This is the first time A sees B's
+   keys. Like the request, the call is answered `202` once it authenticates, whatever A makes of it: a
+   stranger can sign with a key of their own, so the answer says nothing.
+5. Declining sends `approved: false` the same way, with B's chain (without it A could not tell it from a
+   forgery) and nothing about why.
+6. A requester whose Puddle missed all this can ask `POST /stream/v1/access/status`, chain-proven like the
+   request (a POST, because B may hold nothing about A: a request it ignored leaves no trace). B says
+   `approved` only to a requester it has an active stream with, `declined` to one whose stream it closed, and
+   `pending` to everyone else: blocked, ignored, never heard of. So no answer ever reveals a block, a closed
+   door, or that the request was seen. (Nothing yet calls this; the retrying outbox makes it rarely needed.)
 
 `closed` therefore means "ignore strangers", not "refuse": the sender just waits. A request reflected
 off a forged return address can make B send a small signed result to someone who didn't ask; results
@@ -93,11 +103,17 @@ It does not prove that id belongs to the person Bob thinks it does. So:
 
 ## Telling friends about a new address
 
-A Puddle's address (IP) can change. It publishes an **address record**
-`{"type":"address","id":..,"addresses":[..],"seq":N,"ts":..}`, signed by its current key, to every
-active stream with `POST /stream/v1/address`. The highest `seq` wins. Peers try all known addresses,
-newest first. If both sides move while offline they cannot find each other; that is the accepted
-limit for now (no middleman servers).
+A Puddle's address can change, and so can its certificate. It publishes an **address record**
+`{"type":"address","id":..,"addresses":[..],"tls_fp":..,"seq":N,"ts":..}`, signed by its current key, to every
+active stream with `POST /stream/v1/address`. The highest `seq` wins. It notices a change at start (the address in its
+config, the certificate's fingerprint, compared with what it last announced, kept in `state/address.json`), and what
+each peer is known to hold is kept on its stream record (`addr_sent`), so one who was away is told when it returns.
+Peers try all known addresses, newest first. A `tls_fp` in a record is accepted without asking, because it is signed by
+a key the peer already trusts, which is how a Puddle that regenerates its certificate stays on speaking terms. If both
+sides move while offline they cannot find each other; that is the accepted limit for now (no middleman servers).
+
+A Puddle is told only what the sender can prove: `address` is checked against the key we hold for them, and a
+numeric address we would never connect to is refused.
 
 ## Request signatures
 
@@ -156,10 +172,14 @@ re-derives the roll key; the Puddle makes a **new phrase** (written down again) 
 keys from it. The new record is signed by the roll key, the new signing key and the old signing key,
 and commits to the new phrase's roll key. Then:
 
-1. the Puddle sends the chain to every active stream with `POST /stream/v1/identity`
-2. peers verify it extends the chain they hold and note the new keys; one that doesn't verify is
-   ignored and the owner is told. A peer that was offline misses the push, so the sender keeps
-   retrying it until that stream acknowledges.
+1. the Puddle sends the chain to every peer that holds it (an active stream, or a request of ours still waiting)
+   with `POST /stream/v1/identity`, queued **ahead** of anything else for that peer. Whatever was already queued
+   is brought up to date: events signed with the old key are signed again, and a request or answer that carried the old
+   chain is rewritten to carry the new one.
+2. peers verify it continues the chain they hold and note the new keys; one that doesn't is ignored. A peer that was
+   offline misses the push, so the sender keeps trying until it lands (the outbox's schedule), and remembers per peer
+   which chain it is known to hold (`chain_sent`), so a restart, or a roll done with `puddled --roll` while the Puddle
+   was stopped, is caught up at the next start.
 
 The id does not change, so no one has to re-add anyone. Why it resists a stolen phone: a phone is given
 the *daily* keys only, and rolling needs the roll key, which exists only while the current phrase is

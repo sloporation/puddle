@@ -24,6 +24,12 @@ int puddle_json_valid_object(const char *json, size_t len);
  *  -1  malformed JSON, or the key appears more than once (ambiguous, so rejected) */
 int puddle_json_member(const char *json, size_t len, const char *key, puddle_span *val);
 
+/* Walk the elements of a JSON array. `array` is the array's own text (as puddle_json_member returns it), `*cursor`
+ * starts at 0. Each call gives the next element, as its exact text, in *item. 1 an element, 0 the end, -1 malformed
+ * (or not an array). Elements are not checked beyond being well-formed values: look inside with puddle_json_member
+ * (objects) or puddle_json_string and puddle_json_int64. */
+int puddle_json_array_next(puddle_span array, size_t *cursor, puddle_span *item);
+
 /* Value helpers. 0 on success, -1 if the value is the wrong kind, out of range, or too long. */
 int puddle_json_int64(puddle_span v, int64_t *out);
 int puddle_json_string(puddle_span v, char *out, size_t cap); /* unescaped UTF-8, NUL-terminated */

@@ -21,6 +21,8 @@ struct puddle_store *puddle_server_store(puddle_server *s);
 const puddle_profiles *puddle_server_profiles(puddle_server *s);
 puddle_identity *puddle_server_identity(puddle_server *s);
 puddle_assignments *puddle_server_assignments(puddle_server *s);
+struct puddle_streams *puddle_server_streams(puddle_server *s);
+struct puddle_outbox *puddle_server_outbox(puddle_server *s);
 
 /* Accept loop; blocks until puddle_server_stop(), then drains in-flight
  * connections. Returns 0 on clean stop. */

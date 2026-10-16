@@ -3,12 +3,16 @@
 #include "auth.h"
 #include "http.h"
 #include "identity.h"
+#include "flow.h"
+#include "keysync.h"
 #include "log.h"
+#include "outbox.h"
 #include "profile.h"
 #include "reqsig.h"
 #include "router.h"
 #include "serve.h"
 #include "store.h"
+#include "streams.h"
 #include "tls.h"
 
 #include <errno.h>
@@ -39,6 +43,10 @@ struct puddle_server {
     puddle_identity *identity;
     puddle_profiles profiles;
     puddle_assignments *assignments;
+    puddle_streams *streams;
+    puddle_outbox *outbox;
+    puddle_bucket *anon_bucket;
+    puddle_keyed *access_limit;
     puddle_replay *replay;
     puddle_roll_slot *roll_slot;
     puddle_ctx ctx;
@@ -55,6 +63,37 @@ typedef struct {
     int fd;
     char peer[INET6_ADDRSTRLEN + 1];
 } conn;
+
+/* The outbox's view of the streams: where a peer is, whether its certificate is the one we know, and what to
+ * do when something reaches an end. (Acting on the ends is roadmap 3.5; for now they are logged.) */
+static int ob_addresses(void *user, const char *peer, puddle_address *out, int max)
+{
+    puddle_stream st;
+    if (puddle_streams_get(((puddle_server *)user)->streams, peer, &st) != 0)
+        return 0;
+    int n = 0;
+    for (int i = 0; i < st.naddr && n < max; i++)
+        if (puddle_address_parse(st.addresses[i], &out[n]) == 0)
+            n++;
+    puddle_stream_free(&st);
+    return n;
+}
+
+static int ob_fingerprint(void *user, const char *peer, const char *fp)
+{
+    int ok = puddle_streams_check_fingerprint(((puddle_server *)user)->streams, peer, fp);
+    if (!ok)
+        puddle_log(PUDDLE_LOG_WARN, "%.12s… has a different certificate from before; nothing is sent until you say it is fine", peer);
+    return ok;
+}
+
+static void ob_done(void *user, const puddle_ob_item *it, puddle_ob_outcome outcome, const puddle_net_reply *reply)
+{
+    puddle_flow_done(&((puddle_server *)user)->ctx, it, outcome, reply);
+    puddle_log(outcome == PUDDLE_OB_DELIVERED ? PUDDLE_LOG_INFO : PUDDLE_LOG_WARN, "outbox: %s to %.12s… %s%s%s", it->kind, it->peer,
+               outcome == PUDDLE_OB_DELIVERED ? "delivered" : outcome == PUDDLE_OB_HOLD ? "held" : "failed",
+               outcome == PUDDLE_OB_DELIVERED ? "" : ": ", outcome == PUDDLE_OB_DELIVERED ? "" : it->reason);
+}
 
 static void seterr(char *err, size_t n, const char *fmt, ...)
 {
@@ -153,8 +192,26 @@ puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t 
     s->assignments = puddle_assignments_open(cfg->data_dir, err, errlen);
     if (!s->assignments)
         goto fail;
+    s->streams = puddle_streams_open(cfg->data_dir, err, errlen);
+    if (!s->streams)
+        goto fail;
     s->replay = puddle_replay_new(0);
     if (!s->replay) {
+        seterr(err, errlen, "out of memory");
+        goto fail;
+    }
+    {
+        puddle_outbox_hooks hooks = { .identity = s->identity, .addresses = ob_addresses, .fingerprint = ob_fingerprint,
+                                      .done = ob_done, .user = s };
+        s->outbox = puddle_outbox_open(cfg->data_dir, &hooks, err, errlen);
+        if (!s->outbox)
+            goto fail;
+    }
+    /* checking a stranger's key chain costs signatures: 50 a second on average, 100 in a burst. A requester
+     * may ask five times an hour. */
+    s->anon_bucket = puddle_bucket_new(50, 100);
+    s->access_limit = puddle_keyed_new(1024, 5, 3600 * 1000LL);
+    if (!s->anon_bucket || !s->access_limit) {
         seterr(err, errlen, "out of memory");
         goto fail;
     }
@@ -164,13 +221,17 @@ puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t 
         goto fail;
     }
     s->ctx = (puddle_ctx){ .config = &s->cfg, .roll_slot = s->roll_slot, .identity = s->identity, .store = s->store, .profiles = &s->profiles,
-                           .assignments = s->assignments, .replay = s->replay };
-    s->router = (puddle_router){ .routes = puddle_routes, .count = puddle_routes_count, .ctx = &s->ctx };
+                           .assignments = s->assignments, .streams = s->streams, .outbox = s->outbox, .replay = s->replay,
+                           .anon_bucket = s->anon_bucket, .access_limit = s->access_limit,
+                           .peer_key = puddle_streams_peer_key, .peer_key_user = s->streams };
+    s->router = (puddle_router){ .ctx = &s->ctx };
+    s->router.routes = puddle_all_routes(&s->router.count);
     puddle_log(PUDDLE_LOG_INFO, "%zu profile%s loaded, default '%s'", s->profiles.count,
                s->profiles.count == 1 ? "" : "s", s->profiles.items[0].id);
     s->tls = puddle_tls_context(cfg->dir, err, errlen);
     if (!s->tls)
         goto fail;
+    puddle_tls_fingerprint_hex(s->tls, s->ctx.own_tls_fp);
     if (open_listener(s, err, errlen) != 0)
         goto fail;
     if (pipe(s->stop_pipe) != 0) {
@@ -210,6 +271,16 @@ puddle_assignments *puddle_server_assignments(puddle_server *s)
     return s->assignments;
 }
 
+puddle_streams *puddle_server_streams(puddle_server *s)
+{
+    return s->streams;
+}
+
+puddle_outbox *puddle_server_outbox(puddle_server *s)
+{
+    return s->outbox;
+}
+
 void puddle_server_stop(puddle_server *s)
 {
     int saved = errno;
@@ -230,6 +301,10 @@ void puddle_server_destroy(puddle_server *s)
     SSL_CTX_free(s->tls);
     puddle_replay_free(s->replay);
     puddle_roll_slot_free(s->roll_slot);
+    puddle_outbox_close(s->outbox); /* stops its worker before what the worker uses goes away */
+    puddle_streams_close(s->streams);
+    puddle_bucket_free(s->anon_bucket);
+    puddle_keyed_free(s->access_limit);
     puddle_assignments_close(s->assignments);
     puddle_identity_close(s->identity);
     puddle_auth_close(s->auth);
@@ -339,6 +414,14 @@ static void prepare_client_fd(int fd)
 int puddle_server_run(puddle_server *s)
 {
     int rc = 0;
+    int synced = puddle_sync_resume(&s->ctx);
+    if (synced)
+        puddle_log(PUDDLE_LOG_INFO, "queued %d update%s for the people we are connected to", synced, synced == 1 ? "" : "s");
+    int resumed = puddle_flow_resume(&s->ctx);
+    if (resumed)
+        puddle_log(PUDDLE_LOG_INFO, "queued %d answer%s that were still owed", resumed, resumed == 1 ? "" : "s");
+    if (puddle_outbox_start(s->outbox) != 0)
+        puddle_log(PUDDLE_LOG_WARN, "cannot start the outbox; nothing will be sent to other Puddles");
 
     for (;;) {
         struct pollfd pfd[2] = {

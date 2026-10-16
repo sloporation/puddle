@@ -748,7 +748,7 @@ int puddle_store_append(puddle_store *s, const char *chat_id, const char *event,
         for (size_t i = 0; i < sl; i++) {
             char c = sig[i];
             if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                  c == '+' || c == '/' || c == '=' || c == '-' || c == '_')) {
+                  c == '+' || c == '/' || c == '=' || c == '-' || c == '_' || c == ':')) { /* ':' joins a key id to a signature */
                 seterr(err, errlen, "signature must be base64");
                 return -1;
             }

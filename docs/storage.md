@@ -20,6 +20,11 @@ Identity, signing and encryption are in [identity.md](identity.md).
       profile/avatar.png
       media/<sha256>                       images (profile pictures, banners, attachments), named by content hash
       state/stream-profiles.tsv            which profile each stream sees (docs/profiles.md)
+      state/streams/<user id>.json         one file per peer: state, verified key chain, addresses, note (docs/streams.md)
+      state/blocks.tsv                     blocked user ids, one per line with the time
+      state/invites.tsv                    live invite tokens: token, created, expires, uses left
+      state/access-policy                  who may ask for a stream: manual (default), open or closed
+      state/owner-token                    the owner token (mode 0600)
       state.json                           mutable non-event state: login sessions, read markers
 
 Files sort by chat id, then by day, so everything for one chat sits together.
@@ -61,7 +66,9 @@ One JSON object per line, UTF-8, terminated by `\n`:
   and an integer `ts`. Objects with a duplicate top-level key are rejected as ambiguous.
 - `id`: SHA-256 of the **exact bytes** of the `event` value as written. A reader verifies it by
   hashing the same bytes. Never re-serialize before hashing.
-- `sig`: the sender's signature over those same bytes (identity.md).
+- `sig`: `<key id>:<base64>`: who signed (the hex SHA-256 of the signing public key) and an Ed25519 signature over
+  `puddle-event-v1\n` followed by those same bytes. The key id is outside the bytes, so signing the same event with a
+  new key changes neither its id nor the bytes. A receiver of live events accepts only the sender's current key.
 - `rts`: when *this* server received it. Outside the hash and signature, so it differs per server.
 - An event is stored **exactly as signed**. Once encryption is on, that means message bodies are
   ciphertext on disk.
@@ -78,8 +85,15 @@ One JSON object per line, UTF-8, terminated by `\n`:
 | `body`   | text (encrypted), for `message` / `edit` / `chat.rename` |
 | `ref`    | target event id, for `edit`, `redact`, replies |
 
-A chat's first record is `chat.create` (carrying `kind: "dm" | "group"` and initial members), so a
-chat is self-describing. Name, membership, edits and redactions are derived by replaying it.
+A **group** chat's first record is `chat.create` (initial members), so it is self-describing; name, membership,
+edits and redactions are derived by replaying it. A **direct message** chat has no `chat.create`: its id already
+names both people, so there is nothing for it to say.
+
+A direct message is `{"type":"message","chat":<dm id>,"sender":<id>,"ts":<ms>,"body":<text>}` with an optional
+`"ref"` (the id of the message replied to), fields in that order, no spaces. The body is 1 to 4000 characters
+of valid UTF-8 with no control characters but newline and tab. An event is at most 16 KiB. `ts` is made
+strictly increasing per Puddle, so two messages sent in the same millisecond are never the same bytes (which
+would make them one message).
 
 ## Rules
 

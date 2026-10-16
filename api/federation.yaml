@@ -56,24 +56,27 @@ paths:
           description: OK
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Chain" }
+              schema: { $ref: "#/components/schemas/ChainBody" }
     post:
       tags: [access]
       operationId: pushIdentityChain
       summary: Tell a peer your keys rolled
       description: |
-        Sent to every active stream after a roll. The recipient verifies the chain extends the one it
-        holds (same id, same earlier records, one or more new ones, each signed by the committed
-        keys). Authenticated by that chain rather than by a stored key, since the signing key has just
-        changed. A chain that does not verify is ignored.
+        Sent after a roll to every peer that holds our chain (an active stream, or a request of ours still waiting),
+        ahead of anything else queued for them: what else is waiting was signed with the new key, which they will
+        not believe until they have this. The recipient takes it only if it is the chain it already holds for that id
+        plus more records, each verifying; anything else is ignored. The request is authenticated by the new chain in
+        the body (the signing key has just changed), which any stranger could do with a chain of their own, so it is
+        **always answered `202`**: what counts is that it continues a chain we hold, which only the owner of the keys can
+        produce. Items already queued for the peer are signed again (the key id is outside the signed bytes), and
+        what carried our old chain (a request, an answer) is rewritten to carry the new.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/Chain" }
+            schema: { $ref: "#/components/schemas/ChainBody" }
       responses:
-        "204": { description: Accepted }
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "202": { description: Received }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /stream/v1/address:
@@ -81,7 +84,15 @@ paths:
       tags: [access]
       operationId: pushAddress
       summary: Tell a peer where to reach you now
-      description: The highest `seq` wins. Peers keep every address they have heard of, newest first.
+      description: |
+        Where the sender is now, signed by its current key. Sent to every active stream when its address or its
+        TLS certificate changes (it notices at start). The highest `seq` wins; one that is not newer, or that
+        carries no addresses, leaves what we hold alone. A `tls_fp` in it is the fingerprint of the sender's new
+        certificate: since the record is signed by a key we already trust, it is accepted without asking, and anything
+        held back for the owner on account of that certificate is released. (A certificate that changes **without**
+        being announced still holds sending until the owner says it is fine.) Addresses we would never connect to
+        (unspecified, multicast, link-local) are refused. Answered `400 bad_record` for a record that does not check
+        out, `204` otherwise.
       requestBody:
         required: true
         content:
@@ -99,9 +110,13 @@ paths:
       summary: Ask for a stream
       description: |
         The one request a Puddle takes from a stranger. It is signed with the requester's key, checkable
-        because the requester's `chain` is in the body. **Always answered `202` with an empty body,
-        whatever happens**: blocked, refused by policy, rate-limited, or invalid are all dropped
-        silently. The outcome arrives later at the requester's `access/result`, or by polling
+        because the requester's `chain` is in the body. A request that does not check out (malformed, a
+        chain that is not the requester's, a bad or missing signature, a replay) is answered `404`, exactly
+        like a path that does not exist. One that does is **always answered `202` with an empty body,
+        whatever is decided**: blocked, refused by policy, rate-limited, over capacity, approved at once or
+        left waiting for the owner are indistinguishable, and dropped ones are dropped silently. The
+        requester's `profile` is read for `display_name`, `blurb`, `about` and `pronouns` only (cleaned and
+        length-limited); pictures and colors come later, over the stream. At most 96 KiB. The outcome arrives later at the requester's `access/result`, or by polling
         `access/status`. Set `scope` to ask for a group-only connection: the target auto-approves if
         `scope.proof` is a membership event it already holds for that group.
       requestBody:
@@ -117,41 +132,60 @@ paths:
       tags: [access]
       operationId: sendAccessResult
       summary: Tell the requester what the owner decided
-      description: Called by the target on the requester's Puddle once the owner accepts or declines.
+      description: |
+        Called by the target on the requester's Puddle once the owner accepts or declines (or at once, when an
+        invite or an open policy let them in). Like the request, it is proven by the chain in its body: the
+        requester has no keys of the target's yet, only the id from the link it followed, so it accepts an
+        answer only from a Puddle whose chain belongs to exactly that id, signed by that chain's key, for a request
+        it has sent and not yet had answered. Anything else is dropped. **Always `202` once it authenticates**
+        (a stranger can authenticate with any key of their own, so the answer must say nothing); an answer that is
+        accepted shows only in the requester's own state. A decline carries the responder's chain too, as the
+        requester could not otherwise tell it from a forgery.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AccessResult" }
       responses:
-        "204": { description: Recorded }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "202": { description: Received }
 
   /stream/v1/access/status:
-    get:
+    post:
       tags: [access]
       operationId: getAccessStatus
       summary: What became of the request I sent you
       description: |
-        For a requester whose Puddle missed the result call. Answers only a requester it has a record
-        of. A requester that is blocked, or refused by policy, is told `pending` forever; anyone else
-        unknown gets `404`.
+        For a requester whose Puddle missed the answer. A POST rather than a GET, and chain-proven like the request,
+        because the target may hold nothing about the requester (a request it ignored leaves no trace), and so
+        could not otherwise tell who is asking. It answers `approved` (with its own `responder` details) only to
+        a requester it has an active stream with, `declined` to one whose stream it closed, and **`pending` to
+        everyone else**: blocked, ignored because it is closed to requests, never heard of. So no answer reveals a
+        block, a closed door, or that the request was seen.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requester]
+              properties:
+                requester: { $ref: "#/components/schemas/Peer" }
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AccessState" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/NotFound" }
 
   /stream/v1/close:
     post:
       tags: [access]
       operationId: closeStream
       summary: Tell the peer this stream is closed
-      description: Sent when the owner deletes a stream. A block sends nothing.
+      description: |
+        Sent when the owner deletes a stream (or withdraws a request that is still waiting). A block sends nothing.
+        Signed with a key the recipient already holds, so it can be answered plainly: `403 no_stream` if there is
+        no open stream or request from the sender to close.
       requestBody:
         required: true
         content:
@@ -163,6 +197,7 @@ paths:
       responses:
         "204": { description: Closed }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/NoStream" }
 
   /stream/v1/events:
     post:
@@ -170,9 +205,15 @@ paths:
       operationId: deliverEvents
       summary: Deliver signed events for one chat
       description: |
-        Messages, edits, deletes and group membership events. Safe to repeat: events already held
-        are reported as duplicates. Events for a chat the sender is not allowed in (no stream, not a
-        group member, or a scoped stream for a different chat) are rejected.
+        Messages (edits, deletes and group membership events follow). Signed by the sender's **current** key,
+        so a key that has since been replaced, which is what a stolen phone leaves behind, cannot deliver. Safe
+        to repeat: events already held are reported as `duplicate`. The sender must have an open stream
+        (`403 no_stream`), and `chat` must be the direct-message chat between the two of you (`400`).
+        At most 100 events and 256 KiB; more than that is refused whole. Each event is then judged on its own, and
+        a `rejected` entry says why: `malformed`, `too_large`, `bad_id` (the id is not the SHA-256 of the bytes),
+        `bad_signature`, `unknown_key` (signed by a key that is not the sender's current one),
+        `unsupported_type`, `wrong_chat`, `wrong_sender` (the event names someone other than the sender),
+        `bad_time` (not between the years 2000 and 2100), `bad_body`, `storage_error`.
       requestBody:
         required: true
         content:
@@ -341,24 +382,25 @@ components:
 
 
     Chain:
-      type: object
+      type: string
+      maxLength: 65536
       description: |
-        A Puddle's identity chain. Each element is one line of `chain.jsonl`, exactly as written
-        (`{"record":{...},"sig":"..."}`), because the signatures cover the exact bytes. Verified with
-        the rules in docs/identity.md; the reader pins it to the id they expect.
+        A Puddle's identity chain: the text of its `chain.jsonl`, one record per line, exactly as written
+        (`{"record":{...},"sig":"..."}`), because the signatures cover the exact bytes. Verified with the
+        rules in docs/identity.md; the reader pins it to the id they expect.
+
+    ChainBody:
+      type: object
       required: [chain]
       properties:
-        chain:
-          type: array
-          minItems: 1
-          maxItems: 10000
-          items: { type: string }
+        chain: { $ref: "#/components/schemas/Chain" }
 
     AddressRecord:
       type: object
       description: |
-        `record` is the exact JSON text `{"type":"address","id":..,"addresses":[..],"seq":N,"ts":..}`,
-        signed with the sender's current key; `sig` is base64.
+        `record` is the exact JSON text
+        `{"type":"address","id":..,"addresses":[..],"tls_fp":"<64 hex>","seq":N,"ts":..}` (`tls_fp` optional), and `sig`
+        is `<key id>:<base64>` over `puddle-address-v1\n` followed by those bytes, made with the sender's current key.
       required: [record, sig]
       properties:
         record: { type: string }
@@ -401,6 +443,9 @@ components:
       required: [state]
       properties:
         state: { type: string, enum: [pending, approved, declined] }
+        responder:
+          description: "With `approved`: who the target is, as in an access result"
+          $ref: "#/components/schemas/Peer"
 
     AccessResult:
       type: object
@@ -418,7 +463,13 @@ components:
         event:
           type: string
           description: The event's exact JSON text. `id` is the SHA-256 of these bytes.
-        sig: { type: string, description: Sender's signature over the same bytes, base64 }
+        sig:
+          type: string
+          description: |
+            `<key id>:<base64 signature>`: the key id is the hex SHA-256 of the signing public key, and the
+            signature is Ed25519 over `puddle-event-v1\n` followed by the event's bytes. The key id is outside
+            the signed bytes, so a Puddle that has changed keys can sign the same event again without
+            changing its id.
 
     Delivery:
       type: object
@@ -427,7 +478,7 @@ components:
         chat: { $ref: "#/components/schemas/ChatId" }
         events:
           type: array
-          maxItems: 500
+          maxItems: 100
           items: { $ref: "#/components/schemas/SignedEvent" }
 
     DeliveryResult:
@@ -486,6 +537,11 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     Unauthorized:
       description: Authenticated, but not acceptable now (`clock_skew`, `replayed`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NoStream:
+      description: "Authenticated, but you share no open stream with us (code `no_stream`)"
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

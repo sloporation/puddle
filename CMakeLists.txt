@@ -37,23 +37,35 @@ add_compile_options(-Wall -Wextra)
 
 # --- core: config, TLS, HTTP, listener (plain C, shared by both targets) -----
 add_library(puddle_core STATIC
+  src/core/access.c
   src/core/auth.c
+  src/core/client.c
   src/core/config.c
   src/core/encoding.c
+  src/core/flow.c
   src/core/fsutil.c
   src/core/hash.c
   src/core/http.c
   src/core/identity.c
+  src/core/inbound.c
   src/core/json.c
+  src/core/keysync.c
   src/core/log.c
+  src/core/message.c
+  src/core/messages.c
   src/core/phrase.c
+  src/core/outbox.c
+  src/core/owner_streams.c
   src/core/profile.c
+  src/core/ratelimit.c
+  src/core/link.c
   src/core/router.c
   src/core/routes.c
   src/core/reqsig.c
   src/core/serve.c
   src/core/server.c
   src/core/store.c
+  src/core/streams.c
   src/core/tls.c
   src/core/yamltree.c)
 target_include_directories(puddle_core PUBLIC src/core)
@@ -114,7 +126,7 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes)
+foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link streams ratelimit access owner_streams client outbox inbound flow message messages keysync e2e)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)

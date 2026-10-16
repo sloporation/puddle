@@ -15,8 +15,11 @@
 #include "identity.h"
 #include "json.h"
 #include "profile.h"
+#include "outbox.h"
+#include "ratelimit.h"
 #include "reqsig.h"
 #include "store.h"
+#include "streams.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -39,9 +42,15 @@ typedef struct {
     puddle_store *store;
     const puddle_profiles *profiles;
     puddle_assignments *assignments;
+    puddle_streams *streams;
+    puddle_outbox *outbox;                 /* what we owe other Puddles; NULL in tests that do not send */
     puddle_replay *replay;                 /* one nonce memory for the whole Puddle */
+    puddle_bucket *anon_bucket;            /* work done for strangers before they are authenticated; NULL = unlimited */
+    puddle_keyed *access_limit;            /* requests for a stream, per requester; NULL = unlimited */
+    char own_tls_fp[65];                   /* the SHA-256 of our certificate, hex; "" if not known */
+    size_t max_peers;                      /* records on file before new strangers are ignored; 0 = PUDDLE_MAX_PEERS */
     puddle_roll_slot *roll_slot;
-    puddle_peer_key_fn peer_key;           /* PEER routes: current signing key of a known peer; NULL = none known */
+    puddle_peer_key_fn peer_key;           /* PEER routes: current signing key of a known peer (puddle_streams_peer_key); NULL = none known */
     void *peer_key_user;
     int64_t (*now_ms)(void);               /* NULL = the clock; a seam for tests */
 } puddle_ctx;
@@ -86,12 +95,32 @@ size_t puddle_router_body_limit(const puddle_router *r, const puddle_request *re
 size_t puddle_router_handle(const puddle_router *r, const puddle_request *req, int owner_ok,
                             const unsigned char *body, size_t body_len, char *out, size_t cap, int *status);
 
+/* The time in milliseconds, from the context's clock when there is one (tests set it). */
+int64_t puddle_ctx_now_ms(const puddle_ctx *ctx);
+int64_t puddle_call_now_ms(const puddle_call *call);
+
+/* puddle://<id>@<where to reach us>[?invite=<token>] for this Puddle, or 0 if we cannot say where that is:
+ * listening on every interface says nothing about which address the outside world should use, so the owner
+ * has to set `advertise:` in the config. */
+int puddle_make_link(const puddle_config *cfg, const char *id, const char *invite, char *out, size_t cap);
+
+#define PUDDLE_QUERY_VALUE_MAX 80 /* room for a user id (52 characters) */
+
+/* Read the query string of a request target. `keys` lists the parameters allowed; each found one is copied
+ * (letters, digits, `_` and `-` only, up to 79 characters) to `values[i]`, and left "" if absent. A parameter not
+ * in the list, repeated, empty, or with any other character is an error. 0 or -1. */
+int puddle_query_parse(const char *target, const char *const *keys, size_t nkeys, char (*values)[PUDDLE_QUERY_VALUE_MAX]);
+
 /* Helper for handlers: write {"error":"<code>"} and return `status`. */
 int puddle_fail(puddle_jw *w, int status, const char *code);
 
 /* The Puddle's own routes (routes.c). */
 extern const puddle_route puddle_routes[];
 extern const size_t puddle_routes_count;
+
+/* Every route the Puddle serves: the table above plus the owner's stream routes. Built once, on first use;
+ * call it before starting threads. */
+const puddle_route *puddle_all_routes(size_t *count);
 
 #ifdef __cplusplus
 }

@@ -2,6 +2,13 @@
  * up here, one handler at a time. */
 #include "router.h"
 
+#include "access.h"
+#include "flow.h"
+#include "inbound.h"
+#include "keysync.h"
+#include "messages.h"
+#include "owner_streams.h"
+
 #include "phrase.h"
 
 #include <pthread.h>
@@ -12,14 +19,7 @@
 
 #define ROLL_TTL_MS (10 * 60 * 1000)
 
-static int64_t now_of(const puddle_call *c)
-{
-    if (c->ctx->now_ms)
-        return c->ctx->now_ms();
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
+#define now_of puddle_call_now_ms
 
 /* ---- the pending roll ---- */
 
@@ -49,29 +49,17 @@ void puddle_roll_slot_free(puddle_roll_slot *s)
 
 /* ---- shared pieces ---- */
 
-/* puddle://<id>@<where to reach us>, or 0 if we cannot say where that is: listening on every interface
- * says nothing about which address the outside world should use, so the owner has to tell us. */
-static int make_link(const puddle_config *cfg, const char *id, char *out, size_t cap)
+int puddle_make_link(const puddle_config *cfg, const char *id, const char *invite, char *out, size_t cap)
 {
-    char where[160];
-    if (cfg->advertise[0]) {
-        snprintf(where, sizeof where, "%s", cfg->advertise);
-    } else if (!strcmp(cfg->address, "::") || !strcmp(cfg->address, "0.0.0.0")) {
-        return 0;
-    } else if (strchr(cfg->address, ':')) {
-        snprintf(where, sizeof where, "[%s]:%u", cfg->address, cfg->port);
-    } else {
-        snprintf(where, sizeof where, "%s:%u", cfg->address, cfg->port);
-    }
-    int n = snprintf(out, cap, "puddle://%s@%s", id, where);
-    return n > 0 && (size_t)n < cap;
+    char where[PUDDLE_ADDR_MAX];
+    return puddle_my_address(cfg, where, sizeof where) && puddle_link_format(id, where, invite, out, cap) == 0;
 }
 
 static void link_member(puddle_jw *w, const puddle_ctx *ctx, const char *id)
 {
     char link[256];
     puddle_jw_key(w, "link");
-    if (ctx->config && make_link(ctx->config, id, link, sizeof link))
+    if (ctx->config && puddle_make_link(ctx->config, id, NULL, link, sizeof link))
         puddle_jw_string(w, link);
     else
         puddle_jw_null(w);
@@ -227,6 +215,8 @@ static int roll_confirm(const puddle_call *c, puddle_jw *w)
         puddle_jw_end_object(w);
         return 500;
     }
+    if (c->ctx->streams && c->ctx->outbox)
+        puddle_sync_after_roll(c->ctx); /* tell the people who hold our keys, ahead of anything else waiting for them */
     identity_json(w, c->ctx);
     return 200;
 }
@@ -253,5 +243,26 @@ const puddle_route puddle_routes[] = {
     { "POST", "/api/v1/identity/roll",     PUDDLE_AUTH_OWNER, 512, roll_start,   NULL },
     { "POST", "/api/v1/identity/roll/confirm", PUDDLE_AUTH_OWNER, 64, roll_confirm, NULL },
     { "POST", "/api/v1/identity/roll/cancel",  PUDDLE_AUTH_OWNER, 64, roll_cancel,  NULL },
+    { "POST", "/stream/v1/access",             PUDDLE_AUTH_CHAIN, PUDDLE_ACCESS_BODY_MAX, puddle_access_post, puddle_access_chain_key },
 };
 const size_t puddle_routes_count = sizeof puddle_routes / sizeof puddle_routes[0];
+
+const puddle_route *puddle_all_routes(size_t *count)
+{
+    static puddle_route all[64];
+    static size_t n;
+    if (n == 0) {
+        memcpy(all, puddle_routes, puddle_routes_count * sizeof *all);
+        memcpy(all + puddle_routes_count, puddle_owner_stream_routes, puddle_owner_stream_routes_count * sizeof *all);
+        memcpy(all + puddle_routes_count + puddle_owner_stream_routes_count, puddle_inbound_routes,
+               puddle_inbound_routes_count * sizeof *all);
+        memcpy(all + puddle_routes_count + puddle_owner_stream_routes_count + puddle_inbound_routes_count, puddle_message_routes,
+               puddle_message_routes_count * sizeof *all);
+        memcpy(all + puddle_routes_count + puddle_owner_stream_routes_count + puddle_inbound_routes_count + puddle_message_routes_count,
+               puddle_sync_routes, puddle_sync_routes_count * sizeof *all);
+        n = puddle_routes_count + puddle_owner_stream_routes_count + puddle_inbound_routes_count + puddle_message_routes_count +
+            puddle_sync_routes_count;
+    }
+    *count = n;
+    return all;
+}

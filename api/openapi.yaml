@@ -232,18 +232,33 @@ paths:
       tags: [streams]
       operationId: listStreams
       summary: Streams, including pending requests in both directions
+      description: |
+        Most recently changed first, in pages. `next` is the `offset` of the following page, or `null` at the
+        end. A page can be shorter than `limit` when its entries are large.
       parameters:
         - name: state
           in: query
           schema: { $ref: "#/components/schemas/StreamState" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/Stream" }
+                type: object
+                required: [streams, next]
+                properties:
+                  streams:
+                    type: array
+                    items: { $ref: "#/components/schemas/Stream" }
+                  next: { type: [integer, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
 
   /api/v1/stream/request:
     post:
@@ -253,7 +268,12 @@ paths:
       description: |
         Sends a stream request to the target, with an optional short note ("hey it's Jayden from work").
         Returns a `pending_out` stream; it becomes `active` when they accept. Requesting someone who
-        has blocked you looks exactly like a request that is still pending.
+        has blocked you looks exactly like a request that is still pending. The other Puddle can only answer
+        if it can reach you, so this needs this Puddle's public address (`409 no_address`; set `advertise:`).
+        `409` also for `already_streaming`, `already_requested`, `they_asked` (they have asked you; accept
+        instead) and `blocked`. If the other Puddle can be found but refuses the request (not a Puddle, wrong
+        id) the stream goes to `closed` with an `error` saying why; if it is simply away the request waits and
+        is retried.
       requestBody:
         required: true
         content:
@@ -273,6 +293,9 @@ paths:
       tags: [streams]
       operationId: acceptStream
       summary: Accept a request someone sent you
+      description: |
+        Only for a `pending_in` stream (`409 not_waiting` otherwise). The stream is active at once; telling the
+        requester is queued and retried until it gets through (docs/roadmap.md 3.4).
       requestBody:
         required: true
         content:
@@ -292,7 +315,9 @@ paths:
       tags: [streams]
       operationId: declineStream
       summary: Decline a request someone sent you
-      description: The requester is told it was declined. To refuse silently and permanently, block them.
+      description: |
+        Only for a `pending_in` stream (`409 not_waiting` otherwise). The requester is told it was declined. To
+        refuse silently and permanently, block them.
       requestBody:
         required: true
         content:
@@ -301,6 +326,7 @@ paths:
       responses:
         "204": { description: Declined }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/stream/invite:
     post:
@@ -330,6 +356,48 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Invite" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: |
+            `no_address`: this Puddle doesn't know its public address, so there is nothing to put in the link.
+            Set `advertise: host:port` in `puddle.yaml`. Or `cannot_create`: too many live invites (64).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      tags: [streams]
+      operationId: listInvites
+      summary: Your live invites
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invites]
+                properties:
+                  invites:
+                    type: array
+                    items: { $ref: "#/components/schemas/Invite" }
+
+  /api/v1/stream/invite/revoke:
+    post:
+      tags: [streams]
+      operationId: revokeInvite
+      summary: Cancel an invite so its link stops working
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "204": { description: Revoked }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/stream/policy:
     get:
@@ -388,14 +456,42 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/v1/stream/trust:
+    post:
+      tags: [streams]
+      operationId: trustStreamCertificate
+      summary: Accept a peer's new certificate
+      description: |
+        Every Puddle makes its own TLS certificate, so none can be checked against a CA. What we do keep is
+        its fingerprint, recorded when we first connect. If a peer shows a different one (it was reinstalled,
+        or something else is answering at that address), nothing is sent to it, what was waiting is held,
+        and the stream shows `certificate_changed`. If you know the change is genuine, say so here; sending
+        resumes. `409 nothing_to_trust` if nothing is waiting on you.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StreamRef" }
+      responses:
+        "200":
+          description: Trusted; held messages are on their way
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stream" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
   /api/v1/stream/delete:
     post:
       tags: [streams]
       operationId: deleteStream
       summary: Dry up a stream
       description: |
-        Closes the connection. Not a block: they can ask again. Existing DM history stays; sending
-        stops until a new stream exists.
+        Closes the connection and tells the peer. Not a block: they can ask again. Existing DM history stays;
+        sending stops until a new stream exists. For an `active` stream, or a request you made that is still
+        `pending_out` (withdrawing it); `409 not_open` for any other state (answer a request waiting on you
+        with decline).
       requestBody:
         required: true
         content:
@@ -404,6 +500,7 @@ paths:
       responses:
         "204": { description: Closed }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   # --- conversations -------------------------------------------------------------
   /api/v1/conversations:
@@ -426,6 +523,11 @@ paths:
       tags: [dm]
       operationId: sendDm
       summary: Send a direct message
+      description: |
+        Needs an open stream with `to` (`403 no_stream`, also for someone you have blocked). The message is
+        signed, saved in the chat, and queued for delivery, which is retried while they are away. A body is 1 to
+        4000 characters of text with no control characters but newline and tab (`400 bad_body`). `500 not_queued`
+        means it was saved here but could not be queued; its `id` is in the answer.
       requestBody:
         required: true
         content:
@@ -473,23 +575,33 @@ paths:
         "204": { description: Delete stored and queued for delivery }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  /api/v1/dm/{user}/messages:
+  /api/v1/dm/messages:
     get:
       tags: [dm]
       operationId: listDmMessages
       summary: Messages in the DM with this user
+      description: |
+        Newest page first by default: `offset` counts messages from the newest, and the page itself is in
+        chat order, oldest first. `next` is the `offset` for the page before this one, `null` at the start. A page
+        can hold fewer than `limit` messages when they are long. History stays after a stream is closed.
       parameters:
-        - { $ref: "#/components/parameters/UserIdPath" }
-        - { $ref: "#/components/parameters/Before" }
-        - { $ref: "#/components/parameters/Limit" }
+        - { name: user, in: query, required: true, schema: { $ref: "#/components/schemas/UserId" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
         "200":
-          description: Oldest first
+          description: OK
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/Message" }
+                type: object
+                required: [messages, next]
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
+                  next: { type: [integer, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
 
   # --- groups ---------------------------------------------------------------------
   /api/v1/gm/create:
@@ -679,14 +791,28 @@ paths:
       tags: [blocks]
       operationId: listBlocks
       summary: Your block list
+      description: Oldest first, in pages like the stream list (`limit`, `offset`, `next`).
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/Block" }
+                type: object
+                required: [blocks, next]
+                properties:
+                  blocks:
+                    type: array
+                    items: { $ref: "#/components/schemas/Block" }
+                  next: { type: [integer, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
     post:
       tags: [blocks]
       operationId: blockUser
@@ -705,13 +831,9 @@ paths:
               required: [user]
               properties:
                 user: { $ref: "#/components/schemas/UserId" }
-                note:
-                  type: string
-                  maxLength: 200
-                  description: For your eyes only
       responses:
         "201":
-          description: Blocked
+          description: Blocked (blocking someone already blocked keeps the first time)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Block" }
@@ -875,10 +997,12 @@ components:
 
     Person:
       type: object
-      required: [id, profile]
+      required: [id]
       properties:
         id: { $ref: "#/components/schemas/UserId" }
-        profile: { $ref: "#/components/schemas/Profile" }
+        profile:
+          description: What they showed us; absent until they have (a request we sent, not yet answered)
+          $ref: "#/components/schemas/Profile"
 
     Me:
       type: object
@@ -925,9 +1049,10 @@ components:
 
     Invite:
       type: object
-      required: [link, expires_at, uses]
+      required: [link, token, expires_at, uses]
       properties:
         link: { type: string }
+        token: { type: string, description: The token in the link; what you revoke }
         expires_at: { type: integer, format: int64, description: UTC ms }
         uses: { type: integer, description: Uses remaining }
 
@@ -942,9 +1067,19 @@ components:
       type: object
       required: [id, peer, state]
       properties:
-        id: { type: string }
+        id: { type: string, description: The peer's user id }
         peer: { $ref: "#/components/schemas/Person" }
         state: { $ref: "#/components/schemas/StreamState" }
+        address: { type: string, description: Where we reach them, host:port }
+        error:
+          type: string
+          description: Why a request of yours, or an answer you owed, did not get through; absent when nothing went wrong
+        certificate_changed:
+          type: boolean
+          description: |
+            Their TLS certificate is not the one we first saw, so nothing is being sent to them until you
+            confirm with `stream/trust`. Absent otherwise.
+        created_at: { type: integer, format: int64, description: UTC ms }
         message:
           type: string
           description: The note sent with the request
@@ -973,7 +1108,7 @@ components:
 
     Message:
       type: object
-      required: [id, chat, sender, ts, body]
+      required: [id, chat, sender, ts, body, outgoing]
       properties:
         id: { $ref: "#/components/schemas/EventId" }
         chat:
@@ -985,6 +1120,8 @@ components:
           format: int64
           description: UTC ms, the sender's clock
         body: { type: string, maxLength: 4000 }
+        outgoing: { type: boolean, description: Sent by you }
+        received_at: { type: integer, format: int64, description: UTC ms, when this Puddle stored it }
         edited: { type: boolean }
         deleted: { type: boolean }
         reply_to: { $ref: "#/components/schemas/EventId" }
@@ -1076,7 +1213,6 @@ components:
       required: [user, created_at]
       properties:
         user: { $ref: "#/components/schemas/UserId" }
-        note: { type: string }
         created_at: { type: integer, format: int64 }
 
     Error:

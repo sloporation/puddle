@@ -9,6 +9,9 @@ static const char *reason(int status)
     switch (status) {
     case 200: return "OK";
     case 202: return "Accepted";
+    case 204: return "No Content";
+    case 201: return "Created";
+    case 409: return "Conflict";
     case 400: return "Bad Request";
     case 401: return "Unauthorized";
     case 404: return "Not Found";
@@ -24,6 +27,11 @@ static const char *reason(int status)
 size_t puddle_http_response(int status, const char *extra_headers, const char *body, size_t blen, char *out,
                             size_t cap)
 {
+    if (status == 204) { /* by the rules of HTTP, no length and no type */
+        int m = snprintf(out, cap, "HTTP/1.1 204 No Content\r\nCache-Control: no-store\r\nConnection: close\r\n%s\r\n",
+                         extra_headers ? extra_headers : "");
+        return m > 0 && (size_t)m < cap ? (size_t)m : 0;
+    }
     int n = snprintf(out, cap,
                      "HTTP/1.1 %d %s\r\n"
                      "Content-Type: application/json\r\n"

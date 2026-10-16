@@ -15,6 +15,10 @@ extern "C" {
  * The certificate's SHA-256 fingerprint is logged so clients can pin it. */
 SSL_CTX *puddle_tls_context(const char *dir, char *err, size_t errlen);
 
+/* The certificate in `ctx` as 64 lowercase hex characters of its SHA-256: the form the outbound client records and
+ * compares. 0 or -1. */
+int puddle_tls_fingerprint_hex(SSL_CTX *ctx, char out[65]);
+
 #ifdef __cplusplus
 }
 #endif

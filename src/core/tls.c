@@ -143,6 +143,18 @@ static void log_fingerprint(SSL_CTX *ctx)
     puddle_log(PUDDLE_LOG_INFO, "certificate SHA-256 %s", hex);
 }
 
+int puddle_tls_fingerprint_hex(SSL_CTX *ctx, char out[65])
+{
+    X509 *cert = SSL_CTX_get0_certificate(ctx);
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdlen = 0;
+    if (!cert || !X509_digest(cert, EVP_sha256(), md, &mdlen) || mdlen != 32)
+        return -1;
+    for (unsigned i = 0; i < 32; i++)
+        snprintf(out + i * 2, 3, "%02x", md[i]);
+    return 0;
+}
+
 SSL_CTX *puddle_tls_context(const char *dir, char *err, size_t errlen)
 {
     char certpath[PUDDLE_PATH_MAX], keypath[PUDDLE_PATH_MAX];

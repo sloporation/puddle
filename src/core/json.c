@@ -145,6 +145,44 @@ static const char *scan_value(const char *p, const char *end, int depth)
     }
 }
 
+int puddle_json_array_next(puddle_span array, size_t *cursor, puddle_span *item)
+{
+    const char *end = array.p + array.len;
+    const char *p;
+    if (*cursor == 0) {
+        p = skip_ws(array.p, end);
+        if (p >= end || *p != '[')
+            return -1;
+        p = skip_ws(p + 1, end);
+        if (p < end && *p == ']') {
+            *cursor = (size_t)-1;
+            return 0;
+        }
+    } else {
+        if (*cursor == (size_t)-1)
+            return 0; /* already ended */
+        if (*cursor >= array.len)
+            return -1; /* ran out before the closing bracket */
+        p = skip_ws(array.p + *cursor, end);
+        if (p >= end)
+            return -1;
+        if (*p == ']') {
+            *cursor = (size_t)-1;
+            return 0;
+        }
+        if (*p != ',')
+            return -1;
+        p = skip_ws(p + 1, end);
+    }
+    const char *e = scan_value(p, end, 1);
+    if (!e)
+        return -1;
+    item->p = p;
+    item->len = (size_t)(e - p);
+    *cursor = (size_t)(e - array.p);
+    return 1;
+}
+
 int puddle_json_valid_object(const char *json, size_t len)
 {
     const char *end = json + len;
