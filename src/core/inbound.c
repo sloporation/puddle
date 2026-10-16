@@ -30,6 +30,7 @@ static int result_chain_key(puddle_ctx *ctx, const unsigned char *body, size_t l
 typedef struct {
     const puddle_peer_info *peer;
     int approved;
+    int scoped;   /* the answer is yes to a group-only connection */
     int64_t now;
 } answer;
 
@@ -40,11 +41,20 @@ static int apply_answer(void *user, puddle_stream *st, int exists)
         return 1; /* not a request of ours: nothing to answer */
     st->updated_ms = a->now;
     st->error[0] = '\0';
+    if (a->scoped && !st->scoped_req)
+        return 1; /* a yes to something we did not ask for: it is no one's friend request */
     if (!a->approved) {
         st->state = PUDDLE_STREAM_CLOSED;
+        st->scoped_req = 0;
         return 0;
     }
-    st->state = PUDDLE_STREAM_ACTIVE;
+    if (a->scoped) {
+        st->state = PUDDLE_STREAM_SCOPED; /* we asked only because of a group: it is for that */
+        st->group_ok = 1;
+    } else {
+        st->state = PUDDLE_STREAM_ACTIVE; /* a friend's yes upgrades anything */
+    }
+    st->scoped_req = 0;
     puddle_stream_add_address(st, a->peer->address); /* the one from the link stays first */
     if (puddle_stream_set_chain(st, a->peer->chain, a->peer->chain_len) != 0 ||
         puddle_stream_set_profile(st, a->peer->profile, strlen(a->peer->profile)) != 0)
@@ -77,7 +87,9 @@ static int result_post(const puddle_call *c, puddle_jw *w)
     /* An answer to a request we sent to an address says who they are; the ticket in it is the one only they were given. */
     puddle_span tv;
     char ticket[33] = "";
-    if (valid_bool && !strcmp(p.id, c->sender) && puddle_json_member(b, c->body_len, "ticket", &tv) == 0 &&
+    puddle_span sv;
+    int scoped = puddle_json_member(b, c->body_len, "scoped", &sv) == 0 && sv.len == 4 && !memcmp(sv.p, "true", 4);
+    if (!scoped && valid_bool && !strcmp(p.id, c->sender) && puddle_json_member(b, c->body_len, "ticket", &tv) == 0 &&
         puddle_json_string(tv, ticket, sizeof ticket) == 0 && ticket[0]) {
         int ar = puddle_flow_adopt(c->ctx, ticket, p.id);
         if (ar == 0) {
@@ -89,7 +101,7 @@ static int result_post(const puddle_call *c, puddle_jw *w)
         }
     }
     if (valid_bool && !strcmp(p.id, c->sender)) {
-        answer a = { &p, approved, puddle_call_now_ms(c) };
+        answer a = { &p, approved, scoped, puddle_call_now_ms(c) };
         char err[300];
         int rc = puddle_streams_update(c->ctx->streams, p.id, apply_answer, &a, err, sizeof err);
         if (rc == 0) {

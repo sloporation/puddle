@@ -60,7 +60,7 @@ int puddle_flow_write_self(puddle_ctx *ctx, const char *peer, puddle_jw *w)
 #define BODY_ROOM(chain_estimate) ((chain_estimate) * 6 + 24 * 1024)
 
 static char *build_body(puddle_ctx *ctx, const char *peer, const char *kind, const char *message, const char *invite, const char *ticket,
-                        int approved, size_t *len)
+                        int approved, int scoped, size_t *len)
 {
     size_t cl = 0;
     char *c = puddle_identity_chain(ctx->identity, &cl);
@@ -87,7 +87,9 @@ static char *build_body(puddle_ctx *ctx, const char *peer, const char *kind, con
         if (puddle_flow_write_self(ctx, peer, &w) != 0)
             goto bad;
         puddle_jw_flag(&w, "approved", approved);
-        if (ticket && *ticket)
+        if (scoped)
+            puddle_jw_flag(&w, "scoped", 1); /* yes to a group-only connection: not an answer to anyone's friend request */
+        if (ticket && *ticket && !scoped)
             puddle_jw_str(&w, "ticket", ticket); /* what they put in their request, so they know which one this answers */
     }
     puddle_jw_end_object(&w);
@@ -144,7 +146,7 @@ static int known_at(puddle_ctx *ctx, const char *address, puddle_stream_state *s
         return 0;
     for (size_t i = 0; i < n && !found; i++)
         for (int k = 0; k < all[i].naddr; k++)
-            if (!strcmp(all[i].addresses[k], address) && all[i].state != PUDDLE_STREAM_CLOSED) {
+            if (!strcmp(all[i].addresses[k], address) && all[i].state != PUDDLE_STREAM_CLOSED && all[i].state != PUDDLE_STREAM_SCOPED) {
                 *state = all[i].state;
                 found = 1;
                 break;
@@ -205,7 +207,7 @@ int puddle_flow_request(puddle_ctx *ctx, const puddle_link *link, const char *me
         puddle_assignments_set(ctx->assignments, pid, profile_id, err, sizeof err);
 
     size_t len;
-    char *body = build_body(ctx, pid, "access", clean, link->invite, ticket, 0, &len);
+    char *body = build_body(ctx, pid, "access", clean, link->invite, ticket, 0, 0, &len);
     if (!body || puddle_outbox_enqueue(ctx->outbox, pid, PUDDLE_OB_KIND_OPEN_ACCESS, "/stream/v1/access", body, len, err, sizeof err) != 0) {
         free(body);
         puddle_streams_forget(ctx->streams, pid);
@@ -256,7 +258,7 @@ int puddle_flow_owe(puddle_ctx *ctx, const char *peer, puddle_owed owed)
             memcpy(ticket, st.ticket, sizeof ticket);
             puddle_stream_free(&st);
         }
-        body = build_body(ctx, peer, "result", NULL, NULL, ticket, owed == PUDDLE_OWED_APPROVED, &len);
+        body = build_body(ctx, peer, "result", NULL, NULL, ticket, owed == PUDDLE_OWED_APPROVED || owed == PUDDLE_OWED_SCOPED, owed == PUDDLE_OWED_SCOPED, &len);
     }
     int rc = body && puddle_outbox_enqueue(ctx->outbox, peer, kind, path, body, len, err, sizeof err) == 0 ? 0 : -1;
     if (rc != 0)
@@ -348,7 +350,7 @@ void puddle_flow_done(void *user, const puddle_ob_item *item, puddle_ob_outcome 
         if (!strcmp(item->kind, "close"))
             o.settled = PUDDLE_OWED_CLOSED;
         else
-            o.settled = strstr(item->body, "\"approved\":true") ? PUDDLE_OWED_APPROVED : PUDDLE_OWED_DECLINED;
+            o.settled = strstr(item->body, "\"scoped\":true") ? PUDDLE_OWED_SCOPED : strstr(item->body, "\"approved\":true") ? PUDDLE_OWED_APPROVED : PUDDLE_OWED_DECLINED;
         if (outcome != PUDDLE_OB_DELIVERED) {
             snprintf(why, sizeof why, "they could not be told: %.150s", item->reason);
             o.error = why;

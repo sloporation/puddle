@@ -314,7 +314,9 @@ static int push_all(puddle_ctx *ctx, const address_state *as, int64_t now)
     char err[300];
     for (size_t i = 0; i < n; i++) {
         const puddle_stream *s = &all[i];
-        int holds_chain = s->state == PUDDLE_STREAM_ACTIVE || s->state == PUDDLE_STREAM_PENDING_OUT;
+        if (s->provisional)
+            continue; /* we only know where they are, not who: nothing to push to a made-up id */
+        int holds_chain = puddle_stream_carries_groups(s) || s->state == PUDDLE_STREAM_PENDING_OUT;
         if (chain && holds_chain && s->chain_sent < seq && !waiting_for(items, ni, s->id, "identity")) {
             sbuf b = { 0 };
             sb_add(&b, "{\"chain\":", 9);
@@ -324,7 +326,7 @@ static int push_all(puddle_ctx *ctx, const address_state *as, int64_t now)
                 queued++;
             free(b.p);
         }
-        if (s->state == PUDDLE_STREAM_ACTIVE && s->addr_sent < as->seq && !waiting_for(items, ni, s->id, "address")) {
+        if (puddle_stream_carries_groups(s) && s->addr_sent < as->seq && !waiting_for(items, ni, s->id, "address")) {
             size_t bl;
             char *body = address_body(ctx, as, now, &bl);
             if (body && puddle_outbox_enqueue(ctx->outbox, s->id, "address", "/stream/v1/address", body, bl, err, sizeof err) == 0)

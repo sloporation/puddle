@@ -687,15 +687,40 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
 
   # --- groups ---------------------------------------------------------------------
+  /api/v1/gm:
+    get:
+      tags: [groups]
+      operationId: listGroups
+      summary: The groups you are in or have been invited to
+      description: |
+        Most recently changed first, in pages (`limit`, `offset`, `next`). `my` says where you stand: `in`, or `invited` for an invitation
+        waiting for your answer. Groups you have left or declined are not listed. A group's chat is in `conversations`, with the direct messages.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups, next]
+                properties:
+                  groups:
+                    type: array
+                    items: { $ref: "#/components/schemas/Group" }
+                  next: { type: [integer, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
   /api/v1/gm/create:
     post:
       tags: [groups]
       operationId: createGroup
       summary: Start a group chat
       description: |
-        Every initial member must already share an active stream with you. Each is sent an invite and
-        asked to accept. Members who share no stream with each other get a group-only connection when
-        they accept; it does not make them friends.
+        You are its only member until the others say yes. Everyone named in `members` is invited, and each must be a friend of yours
+        (`no_stream` otherwise; the others are still invited, and the ones who could not be are listed in `not_invited`).
       requestBody:
         required: true
         content:
@@ -703,18 +728,123 @@ paths:
             schema: { $ref: "#/components/schemas/GroupCreate" }
       responses:
         "201":
-          description: Created, with invites out
+          description: Created, with invitations out
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Group" }
         "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/gm/invite:
+    post:
+      tags: [groups]
+      operationId: inviteToGroup
+      summary: Invite a friend into a group
+      description: |
+        Any member can. The members and the other invited hear of it as an event; the invitee is sent the invitation, with who is in the group.
+        `403 no_stream` if they are not a friend of yours, `409 already_in`, `409 group_full` (50 at most), `409 not_in_group`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupUser" }
+      responses:
+        "204": { description: Invited }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "403": { $ref: "#/components/responses/NoStream" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/gm/accept:
+    post:
+      tags: [groups]
+      operationId: acceptGroupInvite
+      summary: Join the group
+      description: |
+        Everyone in the group will be able to see your address and connect to your Puddle for this group: say so before asking. Refused with
+        `403 blocked_member` if someone in the group is on your block list. Joining does not make you friends with the other members.
+        The members are told, and you are connected to the ones you share no stream with (a group-only connection).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupRef" }
+      responses:
+        "200":
+          description: Joined
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "403": { description: Someone in the group is blocked (code `blocked_member`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/gm/decline:
+    post:
+      tags: [groups]
+      operationId: declineGroupInvite
+      summary: Say no to an invitation
+      description: Whoever invited you is told, and nobody else.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupRef" }
+      responses:
+        "204": { description: Declined }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/gm/leave:
+    post:
+      tags: [groups]
+      operationId: leaveGroup
+      summary: Leave a group
+      description: |
+        The members are told. A group-only connection to someone you shared no other group with is closed. Nobody can remove someone else.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GroupRef" }
+      responses:
+        "204": { description: Left }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/gm/rename:
+    post:
+      tags: [groups]
+      operationId: renameGroup
+      summary: Change a group's name
+      description: Any member can; the newest name wins.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group, name]
+              properties:
+                group: { $ref: "#/components/schemas/ChatId" }
+                name: { type: string, minLength: 1, maxLength: 100 }
+      responses:
+        "200":
+          description: Renamed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/gm/send:
     post:
       tags: [groups]
       operationId: sendGroupMessage
       summary: Send a message to a group
+      description: |
+        Signed by you, kept here, and queued for every member you have an open stream with (a friend, or a group-only connection). A member you
+        cannot reach right now is retried; one you have no stream with gets nothing.
       requestBody:
         required: true
         content:
@@ -728,6 +858,7 @@ paths:
               schema: { $ref: "#/components/schemas/Message" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/gm/edit:
     post:
@@ -738,7 +869,13 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/MessageEdit" }
+            schema:
+              type: object
+              required: [group, message, body]
+              properties:
+                group: { $ref: "#/components/schemas/ChatId" }
+                message: { $ref: "#/components/schemas/EventId" }
+                body: { type: string, minLength: 1, maxLength: 4000 }
       responses:
         "200":
           description: Edit stored and queued for delivery
@@ -747,6 +884,7 @@ paths:
               schema: { $ref: "#/components/schemas/Message" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/gm/delete:
     post:
@@ -757,115 +895,61 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/MessageRef" }
+            schema:
+              type: object
+              required: [group, message]
+              properties:
+                group: { $ref: "#/components/schemas/ChatId" }
+                message: { $ref: "#/components/schemas/EventId" }
       responses:
         "204": { description: Delete stored and queued for delivery }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  /api/v1/gm/{group}/messages:
-    get:
-      tags: [groups]
-      operationId: listGroupMessages
-      summary: Messages in a group
-      parameters:
-        - { $ref: "#/components/parameters/GroupIdPath" }
-        - { $ref: "#/components/parameters/Before" }
-        - { $ref: "#/components/parameters/Limit" }
-      responses:
-        "200":
-          description: Oldest first
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: "#/components/schemas/Message" }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /api/v1/gm/{group}/members:
+  /api/v1/gm/retry:
     post:
       tags: [groups]
-      operationId: addGroupMember
-      summary: Propose adding someone to a group
-      description: |
-        You must share an active stream with them. Every current member's Puddle must approve (each
-        checks its own blocks, automatically); one refusal vetoes the add. Always returns `202`; the
-        result arrives as a `group.member_added` or `group.member_refused` event. A refusal does not
-        say who refused or why.
-      parameters:
-        - { $ref: "#/components/parameters/GroupIdPath" }
+      operationId: retryGroup
+      summary: Try again to deliver what is stuck in this group
+      description: Failed items for the members are queued again, and ones waiting for a retry are tried now. `404` when nothing is stuck.
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [user]
-              properties:
-                user: { $ref: "#/components/schemas/UserId" }
+            schema: { $ref: "#/components/schemas/GroupRef" }
       responses:
-        "202": { description: Proposal published; waiting for approvals }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "403": { $ref: "#/components/responses/NoStream" }
+        "204": { description: Trying again }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  /api/v1/gm/{group}/leave:
-    post:
-      tags: [groups]
-      operationId: leaveGroup
-      summary: Leave a group
-      parameters:
-        - { $ref: "#/components/parameters/GroupIdPath" }
-      responses:
-        "204": { description: Left }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /api/v1/gm/invites:
+  /api/v1/gm/messages:
     get:
       tags: [groups]
-      operationId: listGroupInvites
-      summary: Group invites waiting for your answer
+      operationId: listGroupMessages
+      summary: Messages in a group
+      description: |
+        As `dm/messages`: newest page first by default, a page in chat order, `next` for the page before. `delivery` on your own messages
+        is the worst of what became of it across the members. `notices` are what happened to the group since the oldest message shown
+        (or all of it, on the page that reaches the start): who made it, invited, joined, left, renamed. A chat shows them between the messages.
+      parameters:
+        - { name: group, in: query, required: true, schema: { $ref: "#/components/schemas/ChatId" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/GroupInvite" }
-
-  /api/v1/gm/invites/{invite}/accept:
-    post:
-      tags: [groups]
-      operationId: acceptGroupInvite
-      summary: Join the group
-      description: |
-        Refused with `403` if anyone listed in the invite is on your block list. Joining does not make
-        you friends with the other members.
-      parameters:
-        - { $ref: "#/components/parameters/InviteId" }
-      responses:
-        "200":
-          description: Joined
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Group" }
-        "403":
-          description: A member of the group is blocked
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /api/v1/gm/invites/{invite}/decline:
-    post:
-      tags: [groups]
-      operationId: declineGroupInvite
-      summary: Decline the invite
-      description: The inviter is told "declined" and nothing else.
-      parameters:
-        - { $ref: "#/components/parameters/InviteId" }
-      responses:
-        "204": { description: Declined }
+                type: object
+                required: [messages, next, notices]
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
+                  next: { type: [integer, "null"] }
+                  notices:
+                    type: array
+                    items: { $ref: "#/components/schemas/GroupNotice" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # --- blocks ---------------------------------------------------------------------
@@ -953,9 +1037,8 @@ paths:
         - `message.new`, `message.edited`, `message.deleted`: data is a `Message`
         - `stream.requested`: someone asked you; data is a `Stream` (`pending_in`)
         - `stream.active`, `stream.closed`: data is a `Stream`
-        - `group.invited`: data is a `GroupInvite`
-        - `group.joined`: you joined; data is a `Group`
-        - `group.member_added`, `group.member_refused`: data is `{group, user}` (refusals never say who refused)
+        - `group.invited`: you were invited; data is a `Group` (`my: invited`)
+        - `group.changed`: someone joined, left, was invited or renamed it; data is a `Group`
         - `profile.updated`: a friend changed their profile; data is `{user, profile}`
         - `peer.key_changed`: a friend's keys rolled and verified; data is `{user, seq}`. If one fails to
           verify, `peer.key_rejected` with `{user}` instead.
@@ -982,16 +1065,6 @@ components:
       in: path
       required: true
       schema: { $ref: "#/components/schemas/UserId" }
-    GroupIdPath:
-      name: group
-      in: path
-      required: true
-      schema: { $ref: "#/components/schemas/ChatId" }
-    InviteId:
-      name: invite
-      in: path
-      required: true
-      schema: { type: string }
     Before:
       name: before
       in: query
@@ -1141,10 +1214,11 @@ components:
 
     StreamState:
       type: string
-      enum: [pending_out, pending_in, active, closed]
+      enum: [pending_out, pending_in, active, closed, scoped]
       description: |
         `pending_out` you asked, `pending_in` they asked and are waiting on you, `active` trusted
-        in both directions, `closed` dried up.
+        in both directions, `closed` dried up, `scoped` a group-only connection with someone you share a group with and are not friends
+        with: group events and nothing else (docs/groups.md).
 
     Stream:
       type: object
@@ -1261,44 +1335,77 @@ components:
 
     GroupCreate:
       type: object
-      required: [name, members]
+      required: [name]
       properties:
         name: { type: string, minLength: 1, maxLength: 100 }
         members:
           type: array
-          minItems: 1
+          description: Friends to invite
           items: { $ref: "#/components/schemas/UserId" }
+
+    GroupRef:
+      type: object
+      required: [group]
+      properties:
+        group: { $ref: "#/components/schemas/ChatId" }
+
+    GroupUser:
+      type: object
+      required: [group, user]
+      properties:
+        group: { $ref: "#/components/schemas/ChatId" }
+        user: { $ref: "#/components/schemas/UserId" }
 
     GroupMember:
       type: object
-      required: [id, profile, state]
+      required: [id, state]
       properties:
         id: { $ref: "#/components/schemas/UserId" }
-        profile: { $ref: "#/components/schemas/Profile" }
         state: { type: string, enum: [invited, member] }
+        by: { $ref: "#/components/schemas/UserId" }
 
     Group:
       type: object
-      required: [id, name, members]
+      required: [id, name, my, creator, members]
       properties:
         id: { $ref: "#/components/schemas/ChatId" }
         name: { type: string }
+        my: { type: string, enum: [invited, in, left, declined], description: "`invited`: an invitation waiting for your answer" }
+        creator: { $ref: "#/components/schemas/UserId" }
+        invited_by: { $ref: "#/components/schemas/UserId" }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
         members:
           type: array
+          description: Everyone in it or invited, yourself included; names come from `stream` (their profile), as for friends
           items: { $ref: "#/components/schemas/GroupMember" }
-
-    GroupInvite:
-      type: object
-      required: [id, group, name, from, members]
-      properties:
-        id: { type: string }
-        group: { $ref: "#/components/schemas/ChatId" }
-        name: { type: string }
-        from: { $ref: "#/components/schemas/Person" }
-        members:
+        not_invited:
           type: array
-          description: Everyone else in the group, so you can see who you would be joining
-          items: { $ref: "#/components/schemas/Person" }
+          description: Only from `gm/create`
+          items:
+            type: object
+            properties:
+              user: { type: string }
+              reason: { type: string }
+
+    GroupSend:
+      type: object
+      required: [group, body]
+      properties:
+        group: { $ref: "#/components/schemas/ChatId" }
+        body: { type: string, minLength: 1, maxLength: 4000 }
+        reply_to: { $ref: "#/components/schemas/EventId" }
+
+    GroupNotice:
+      type: object
+      required: [id, type, sender, ts]
+      properties:
+        id: { $ref: "#/components/schemas/EventId" }
+        type: { type: string, enum: [create, rename, invite, join, leave] }
+        sender: { $ref: "#/components/schemas/UserId" }
+        ts: { type: integer, format: int64 }
+        member: { $ref: "#/components/schemas/UserId", description: "`invite`: who was invited" }
+        name: { type: string, description: "`create`, `rename`" }
 
     Conversation:
       type: object

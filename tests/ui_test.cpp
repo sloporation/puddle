@@ -41,6 +41,14 @@ static QList<QQuickItem *> all(const QString &name, bool visibleOnly = true)
     return out;
 }
 static QQuickItem *find(const QString &name) { return all(name).value(0); }
+// the visible item with this objectName whose text is `text`
+static QQuickItem *find_text(const QString &name, const QString &text)
+{
+    for (QQuickItem *i : all(name))
+        if (i->property("text").toString() == text)
+            return i;
+    return nullptr;
+}
 
 // a visible button with this text (for the standard dialog buttons)
 static QQuickItem *button(const QString &text)
@@ -63,6 +71,14 @@ static void settle(int ms = 300)
     t.start();
     while (t.elapsed() < ms)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+}
+
+static QJsonObject row(JsonListModel *m, const QString &key, const QString &value)
+{
+    for (const QJsonObject &o : m->items())
+        if (o.value(key).toString() == value)
+            return o;
+    return {};
 }
 
 static QPoint centre(QQuickItem *i) { return i->mapToScene(QPointF(i->width() / 2, i->height() / 2)).toPoint(); }
@@ -304,6 +320,118 @@ int main(int argc, char **argv)
         CHECK(until([&] { return find("codeLabel") == nullptr; }, 3000));
         CHECK(click(find("acceptButton")));                                    /* and it can be accepted without ever seeing an ID */
         CHECK(until([&] { return A.incomingRequests() == 0 && A.friendCount() == 2; }));
+    }
+
+    /* ================= groups ================= */
+    {
+        Node dana;
+        CHECK(dana.up(home.path() + "/friends", "Dana"));
+        Chats &D = *dana.chats;
+        auto *msgs_d = static_cast<JsonListModel *>(D.messages());
+        auto *conv_a = static_cast<JsonListModel *>(A.conversations());
+        A.request(dana.link, "dana, it is the window");
+        CHECK(until([&] { return D.incomingRequests() == 1; }));
+        D.accept(backend.myId());
+        CHECK(until([&] { return A.friendCount() == 3; }));
+        auto group_rows = [&](JsonListModel *m) { int n = 0; for (const QJsonObject &o : m->items()) n += o.value("kind").toString() == "group"; return n; };
+
+        /* ---- make a group from the window: a name, and which friends ---- */
+        CHECK(clickName("friendsButton") || true);
+        CHECK(clickName("newGroupButton"));
+        CHECK(until([&] { return find("groupNameField") != nullptr; }, 3000));
+        CHECK(click(find("groupNameField")));
+        typeText("Weekend");
+        CHECK(until([&] { return find_text("friendPick", "Bob") && find_text("friendPick", "Dana"); }, 5000));
+        CHECK(click(find_text("friendPick", "Bob")));
+        CHECK(click(find_text("friendPick", "Dana")));
+        CHECK(find("createGroupButton") && find("createGroupButton")->property("text").toString().contains("2"));
+        QSignalSpy made(&A, &Chats::groupCreated);
+        CHECK(click(find("createGroupButton")));
+        CHECK(until([&] { return made.count() == 1; }));
+        const QString gid = made.at(0).at(0).toString();
+        CHECK(until([&] { return A.currentIsGroup() && A.current() == gid && find("composer") != nullptr; }, 5000));   /* the window opens it */
+        CHECK(A.currentName() == "Weekend" && A.currentState() == "active");
+        CHECK(until([&] { return find("groupNotice") != nullptr; }, 5000));                       /* "You made the group “Weekend”" */
+        CHECK(find("groupNotice")->property("text").toString().contains("Weekend") && find("groupNotice")->property("text").toString().contains("You"));
+
+        /* ---- they say yes; bob and dana have never met, and are connected through it ---- */
+        CHECK(until([&] { return B.incomingGroupInvites() >= 1 && D.incomingGroupInvites() == 1; }));
+        B.acceptGroup(gid);
+        D.acceptGroup(gid);
+        CHECK(until([&] { return A.members()->property("count").toInt() == 3; }));
+        CHECK(until([&] { return row(static_cast<JsonListModel *>(B.people()), "id", dana.uid).value("state").toString() == "scoped"; }));
+        CHECK(until([&] {
+            int joined = 0;
+            for (QQuickItem *i : all("groupNotice"))
+                joined += i->property("text").toString().contains("joined");
+            return joined == 2;
+        }, 8000));
+
+        /* ---- talk ---- */
+        CHECK(click(find("composer")));
+        typeText("hello group");
+        key(Qt::Key_Return);
+        CHECK(until([&] { return shows("hello group"); }, 5000));
+        D.open(gid, "group");
+        CHECK(until([&] {
+            for (const QJsonObject &o : msgs_d->items())
+                if (o.value("body").toString() == "hello group" && !o.value("senderName").toString().isEmpty() && o.value("senderName").toString() != "You")
+                    return true;
+            return false;
+        }));
+        B.open(gid, "group");
+        B.send("hi from bob");
+        CHECK(until([&] { return shows("hi from bob"); }, 5000));
+        CHECK(until([&] {
+            for (const QJsonObject &o : msgs_d->items())
+                if (o.value("body").toString() == "hi from bob" && o.value("senderName").toString() == "Bob")
+                    return true;                                                                   /* dana hears bob directly */
+            return false;
+        }));
+        B.close();
+        D.close();
+
+        /* ---- the members, a new name, and leaving ---- */
+        CHECK(clickName("membersButton"));
+        CHECK(until([&] { return find("memberList") != nullptr && find("memberList")->property("count").toInt() == 3; }, 5000));
+        CHECK(click(find("renameField")));
+        typeText("Weekend away");
+        CHECK(click(find("renameButton")));
+        CHECK(until([&] { return A.currentName() == "Weekend away"; }));
+        CHECK(until([&] { return row(conv_a, "id", gid).value("name").toString() == "Weekend away"; }));
+        CHECK(clickName("leaveGroupButton"));
+        CHECK(until([&] { return button("OK") != nullptr; }, 3000));
+        CHECK(click(button("OK")));
+        CHECK(until([&] { return A.current().isEmpty() && group_rows(conv_a) == 0; }, 5000));
+        CHECK(until([&] { return find("memberList") == nullptr; }, 3000));                        /* and the box is gone */
+
+        /* ---- invited: the invitation waits in Pending, and joining says what it costs ---- */
+        QSignalSpy invited(&A, &Chats::newGroupInvite);
+        B.createGroup("Bob's trip", { backend.myId() });
+        CHECK(until([&] { return A.incomingGroupInvites() == 1 && invited.count() == 1; }));
+        CHECK(clickName("friendsButton"));
+        CHECK(clickName("tab1"));
+        CHECK(until([&] { return find("acceptGroupButton") != nullptr; }, 5000));
+        CHECK(click(find("acceptGroupButton")));
+        CHECK(until([&] { return button("OK") != nullptr; }, 3000));                               /* "Everyone in this group will be able to see your address" */
+        {
+            bool said = false;
+            walk(win->contentItem(), [&](QQuickItem *i) {
+                said = said || (i->isVisible() && i->property("text").toString().contains("see your address"));
+                return false;
+            });
+            CHECK(said);
+        }
+        CHECK(click(button("OK")));
+        CHECK(until([&] { return A.incomingGroupInvites() == 0 && group_rows(conv_a) == 1; }, 5000));
+        /* and one that is turned down */
+        B.createGroup("Not for me", { backend.myId() });
+        CHECK(until([&] { return A.incomingGroupInvites() == 1; }));
+        CHECK(until([&] { return find("declineGroupButton") != nullptr; }, 5000));
+        CHECK(click(find("declineGroupButton")));
+        CHECK(until([&] { return A.incomingGroupInvites() == 0; }));
+        settle(500);
+        CHECK(group_rows(conv_a) == 1);
     }
 
     return failures ? 1 : 0;

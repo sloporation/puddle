@@ -10,6 +10,7 @@ Pane {
     required property var chats
     property bool narrow: false
     signal back()
+    signal showGroup()
 
     padding: 0
 
@@ -90,6 +91,14 @@ Pane {
                 ToolButton { objectName: "chatBack"; visible: page.narrow; text: "‹"; font.pixelSize: 22; Accessible.name: qsTr("Back"); onClicked: page.back() }
                 Avatar { chats: page.chats; name: page.chats.currentName; hash: page.chats.currentAvatar; tint: page.chats.currentColor; size: 28 }
                 Label { text: page.chats.currentName; font.bold: true; font.pixelSize: 16; elide: Text.ElideRight; Layout.fillWidth: true }
+                ToolButton {
+                    objectName: "membersButton"
+                    visible: page.chats.currentIsGroup
+                    text: "👥 " + page.chats.members.count
+                    Accessible.name: qsTr("Members")
+                    ToolTip.text: qsTr("Members and settings"); ToolTip.visible: hovered
+                    onClicked: page.showGroup()
+                }
             }
             Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: palette.mid; opacity: 0.5 }
         }
@@ -127,12 +136,13 @@ Pane {
                 required property var model
                 readonly property bool mine: model.outgoing === true
                 readonly property bool grouped: model.grouped === true
+                readonly property bool notice: model.kind === "notice"
                 readonly property bool editing: page.editingId === model.id
                 width: ListView.view.width
                 implicitHeight: col.implicitHeight
 
                 HoverHandler { id: hover }
-                TapHandler { acceptedButtons: Qt.RightButton; onTapped: ctx.popup() }
+                TapHandler { acceptedButtons: Qt.RightButton; enabled: !msg.notice; onTapped: ctx.popup() }
 
                 Menu {
                     id: ctx
@@ -166,7 +176,7 @@ Pane {
 
                     // what it replies to
                     RowLayout {
-                        visible: msg.model.reply_to !== undefined
+                        visible: !msg.notice && msg.model.reply_to !== undefined
                         Layout.leftMargin: 72
                         Layout.rightMargin: 16
                         Layout.topMargin: 6
@@ -183,7 +193,24 @@ Pane {
                         }
                     }
 
+                    // something that happened to the group, between the messages
+                    Label {
+                        objectName: "groupNotice"
+                        visible: msg.notice
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
+                        Layout.topMargin: 6
+                        Layout.bottomMargin: 6
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 12
+                        opacity: 0.6
+                        text: msg.model.noticeText || ""
+                    }
+
                     RowLayout {
+                        visible: !msg.notice
                         Layout.fillWidth: true
                         Layout.leftMargin: 16
                         Layout.rightMargin: 16
@@ -198,7 +225,7 @@ Pane {
                             Layout.alignment: Qt.AlignTop
                             Avatar {
                                 visible: !msg.grouped
-                                chats: page.chats; name: msg.model.senderName; hash: msg.model.avatar; tint: msg.model.tint || ""; size: 40
+                                chats: page.chats; name: msg.model.senderName || ""; hash: msg.model.avatar || ""; tint: msg.model.tint || ""; size: 40
                             }
                             Label {
                                 visible: msg.grouped && hover.hovered
@@ -215,7 +242,7 @@ Pane {
                             RowLayout {
                                 visible: !msg.grouped
                                 spacing: 8
-                                Label { text: msg.model.senderName; font.bold: true }
+                                Label { text: msg.model.senderName || ""; font.bold: true }
                                 Label { text: page.dayLabel(msg.model.ts); font.pixelSize: 11; opacity: 0.55 }
                             }
                             TextEdit {
@@ -295,7 +322,7 @@ Pane {
 
                 // hover tools
                 Row {
-                    visible: hover.hovered && !msg.editing && !msg.model.deleted
+                    visible: hover.hovered && !msg.notice && !msg.editing && !msg.model.deleted
                     anchors.right: parent.right
                     anchors.rightMargin: 16
                     y: msg.model.dayStart === true ? 34 : 0

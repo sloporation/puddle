@@ -93,6 +93,11 @@ void Backend::startServer()
     if (host == QLatin1String("::") || host == QLatin1String("0.0.0.0"))
         host = host == QLatin1String("::") ? QStringLiteral("::1") : QStringLiteral("127.0.0.1");
     const QString base = (host.contains(':') ? QStringLiteral("https://[%1]:%2") : QStringLiteral("https://%1:%2")).arg(host).arg(cfg_.port);
+    {
+        char sid[PUDDLE_USER_ID_LEN + 1];
+        puddle_identity_id(puddle_server_identity(srv_), sid);
+        chats_.setSelf(QString::fromLatin1(sid));
+    }
     if (!chats_.attach(QUrl(base), QString::fromUtf8(cfg_.data_dir) + "/state/owner-token", QString::fromUtf8(cfg_.dir) + "/cert.pem"))
         setError(QStringLiteral("Could not open the owner token or certificate to talk to your Puddle."));
     char id[PUDDLE_USER_ID_LEN + 1], link[512];

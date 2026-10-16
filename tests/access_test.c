@@ -292,7 +292,7 @@ int main(void)
         free(b);
         b = body_for(&carol, PROFILE, "203.0.113.7:8443", "\"scope\":{\"group\":\"x\"}", NULL);
         sign_for(&carol, b, sig, sizeof sig);
-        CHECK(post(b, sig).status == 202 && !has(&carol));                                       /* group-only: not yet, and silent */
+        CHECK(post(b, sig).status == 404 && !has(&carol));                                       /* a group-only request with no proof in it is not one */
         free(b);
         CHECK(post("not json", NULL).status == 404 && post("{}", NULL).status == 404);
         CHECK(!has(&carol));

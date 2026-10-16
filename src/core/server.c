@@ -12,6 +12,7 @@
 #include "router.h"
 #include "serve.h"
 #include "store.h"
+#include "groupflow.h"
 #include "streams.h"
 #include "tls.h"
 
@@ -44,6 +45,7 @@ struct puddle_server {
     puddle_profiles profiles;
     puddle_assignments *assignments;
     puddle_streams *streams;
+    puddle_groups *groups;
     puddle_outbox *outbox;
     puddle_bucket *anon_bucket;
     puddle_keyed *access_limit;
@@ -195,6 +197,9 @@ puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t 
     s->streams = puddle_streams_open(cfg->data_dir, err, errlen);
     if (!s->streams)
         goto fail;
+    s->groups = puddle_groups_open(cfg->data_dir, err, errlen);
+    if (!s->groups)
+        goto fail;
     s->replay = puddle_replay_new(0);
     if (!s->replay) {
         seterr(err, errlen, "out of memory");
@@ -221,7 +226,7 @@ puddle_server *puddle_server_create(const puddle_config *cfg, char *err, size_t 
         goto fail;
     }
     s->ctx = (puddle_ctx){ .config = &s->cfg, .roll_slot = s->roll_slot, .identity = s->identity, .store = s->store, .profiles = &s->profiles,
-                           .assignments = s->assignments, .streams = s->streams, .outbox = s->outbox, .replay = s->replay,
+                           .assignments = s->assignments, .streams = s->streams, .groups = s->groups, .outbox = s->outbox, .replay = s->replay,
                            .anon_bucket = s->anon_bucket, .access_limit = s->access_limit,
                            .peer_key = puddle_streams_peer_key, .peer_key_user = s->streams };
     s->router = (puddle_router){ .ctx = &s->ctx };
@@ -276,6 +281,11 @@ puddle_streams *puddle_server_streams(puddle_server *s)
     return s->streams;
 }
 
+puddle_groups *puddle_server_groups(puddle_server *s)
+{
+    return s->groups;
+}
+
 puddle_outbox *puddle_server_outbox(puddle_server *s)
 {
     return s->outbox;
@@ -303,6 +313,7 @@ void puddle_server_destroy(puddle_server *s)
     puddle_roll_slot_free(s->roll_slot);
     puddle_outbox_close(s->outbox); /* stops its worker before what the worker uses goes away */
     puddle_streams_close(s->streams);
+    puddle_groups_close(s->groups);
     puddle_bucket_free(s->anon_bucket);
     puddle_keyed_free(s->access_limit);
     puddle_assignments_close(s->assignments);
@@ -426,6 +437,7 @@ int puddle_server_run(puddle_server *s)
     int resumed = puddle_flow_resume(&s->ctx);
     if (resumed)
         puddle_log(PUDDLE_LOG_INFO, "queued %d answer%s that were still owed", resumed, resumed == 1 ? "" : "s");
+    puddle_group_reconcile(&s->ctx); /* connect to group members we are not yet connected to */
     if (puddle_outbox_start(s->outbox) != 0)
         puddle_log(PUDDLE_LOG_WARN, "cannot start the outbox; nothing will be sent to other Puddles");
 

@@ -29,7 +29,8 @@ typedef enum {
     PUDDLE_STREAM_PENDING_OUT, /* we asked, they have not answered */
     PUDDLE_STREAM_PENDING_IN,  /* they asked, the owner has not answered */
     PUDDLE_STREAM_ACTIVE,      /* trusted both ways */
-    PUDDLE_STREAM_CLOSED       /* dried up; either side may ask again */
+    PUDDLE_STREAM_CLOSED,      /* dried up; either side may ask again */
+    PUDDLE_STREAM_SCOPED       /* a group-only connection: group events with them, nothing else (docs/groups.md) */
 } puddle_stream_state;
 
 const char *puddle_stream_state_name(puddle_stream_state s);
@@ -41,7 +42,8 @@ typedef enum {
     PUDDLE_OWED_NONE,
     PUDDLE_OWED_APPROVED, /* tell them `access/result` approved */
     PUDDLE_OWED_DECLINED, /* ...declined */
-    PUDDLE_OWED_CLOSED    /* tell them the stream is closed */
+    PUDDLE_OWED_CLOSED,   /* tell them the stream is closed */
+    PUDDLE_OWED_SCOPED    /* tell them yes to a group-only connection */
 } puddle_owed;
 
 typedef struct {
@@ -59,6 +61,8 @@ typedef struct {
     int64_t addr_sent;     /* the highest seq of OUR address record this peer is known to hold; -1 = not known */
     char ticket[33];       /* 32 hex characters: a request we sent to an address, until its answer names who they are (and the
                             * same ticket on the record of someone who asked us, to be handed back in our answer); "" if none */
+    int scoped_req;        /* a request we sent only because we share a group with them: if it is answered yes, the stream is `scoped` */
+    int group_ok;          /* we have a group connection with them: group events pass whatever else is true of the stream (friends or not) */
     int provisional;       /* a request we sent to an address whose owner we do not know yet: filed under a made-up id */
     char error[200];       /* why a request we sent, or an answer we owed, did not get through; "" if nothing went wrong */
     char note[PUDDLE_NOTE_MAX_BYTES + 1]; /* the message sent with the request */
@@ -70,6 +74,10 @@ typedef struct {
  * the answer must repeat. Both are made here. */
 int puddle_ticket_new(char out[33]);
 int puddle_provisional_id(const char *ticket, char out[PUDDLE_USER_ID_LEN + 1]);
+
+/* May group events travel over this stream: friends, group-only connections, and anyone we share a group connection with? (A block
+ * is checked separately.) */
+int puddle_stream_carries_groups(const puddle_stream *st);
 
 /* Fill in an empty record for `id`. 0, or -1 if `id` is not a valid user id. */
 int puddle_stream_init(puddle_stream *st, const char *id, puddle_stream_state state, int64_t now_ms);

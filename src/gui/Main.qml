@@ -17,7 +17,7 @@ ApplicationWindow {
     height: 600
     minimumWidth: 320
     minimumHeight: 400
-    readonly property int alerts: backend.chats.unreadTotal + backend.chats.incomingRequests
+    readonly property int alerts: backend.chats.unreadTotal + backend.chats.incomingRequests + backend.chats.incomingGroupInvites
     title: alerts > 0 ? "(" + alerts + ") Puddle" : "Puddle"
 
     property string notified: "" // who the last notification was about
@@ -114,9 +114,16 @@ ApplicationWindow {
         }
         function onUnreadTotalChanged() { root.updateBadge() }
         function onIncomingRequestsChanged() { root.updateBadge() }
+        function onGroupInvitesChanged() { root.updateBadge() }
+        function onNewGroupInvite(groupId) {
+            if (!root.visible || !root.active) {
+                root.notified = ""
+                tray.showMessage(qsTr("Group invitation"), qsTr("You were invited to %1.").arg(root.backend.chats.nameOf(groupId)))
+            }
+        }
     }
     function updateBadge() {
-        backend.setDockBadge(backend.chats.unreadTotal + backend.chats.incomingRequests)
+        backend.setDockBadge(alerts)
     }
 
     // Cmd/Ctrl+W closes the window (to the tray), as in any chat app

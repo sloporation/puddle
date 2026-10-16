@@ -15,7 +15,7 @@ static int is_active(puddle_ctx *ctx, const char *peer)
 {
     puddle_stream st;
     int have = puddle_streams_get(ctx->streams, peer, &st);
-    int ok = have == 0 && st.state == PUDDLE_STREAM_ACTIVE;
+    int ok = have == 0 && puddle_stream_carries_groups(&st); /* group members see each other's pictures */
     if (have == 0)
         puddle_stream_free(&st);
     return ok;
@@ -119,7 +119,7 @@ typedef struct {
 static int apply_profile(void *user, puddle_stream *st, int exists)
 {
     profile_set *p = user;
-    if (!exists || st->state != PUDDLE_STREAM_ACTIVE)
+    if (!exists || !puddle_stream_carries_groups(st))
         return 1;
     return puddle_stream_set_profile(st, p->profile, strlen(p->profile)) == 0 ? 0 : -1;
 }
@@ -154,7 +154,7 @@ int puddle_media_want(puddle_ctx *ctx, const char *peer)
     if (puddle_streams_get(ctx->streams, peer, &st) != 0)
         return 0;
     puddle_media_ref refs[3];
-    size_t n = st.state == PUDDLE_STREAM_ACTIVE && st.profile ? puddle_profile_wire_media(st.profile, strlen(st.profile), refs) : 0;
+    size_t n = puddle_stream_carries_groups(&st) && st.profile ? puddle_profile_wire_media(st.profile, strlen(st.profile), refs) : 0;
     puddle_stream_free(&st);
     if (!n)
         return 0;

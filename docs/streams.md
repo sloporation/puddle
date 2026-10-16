@@ -197,10 +197,9 @@ typed in. A leaked *old* phrase is harmless, because its keys are retired and it
 
 ## Group-only connections
 
-Not detailed here: a group's members who share no real stream with each other get a connection
-limited to that group, set up when the invitee accepts. It uses `POST /stream/v1/access` with
-`scope` set, auto-approved by the target because it already holds a membership event naming the
-requester. The name for it is still undecided.
+A group's members who share no stream with each other get a connection limited to groups (`scoped`), set up when the invitee joins:
+`POST /stream/v1/access` with `scope` set and the requester's own signed `member.join` as proof, approved by the target because it is in that
+group and the requester is invited to it. The whole design is in `docs/groups.md`. The display name for it is still undecided.
 
 ## Ponds
 

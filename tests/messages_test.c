@@ -836,7 +836,7 @@ int main(void)
 
         r = owner("GET", "/api/v1/conversations", NULL);
         b = (char *)body_of(r);
-        CHECK(r->status == 200 && strstr(b, "\"conversations\":[{\"user\":\"") );
+        CHECK(r->status == 200 && strstr(b, "\"conversations\":[{\"kind\":\"dm\",\"user\":\"") );
         const char *mine = conv_of(r, dave.uid);
         CHECK(mine && strstr(mine, "\"preview\":\"second\"") && strstr(mine, "\"unread\":2") && strstr(mine, "\"outgoing\":false"));
         CHECK(strstr(b, dave.uid) == strstr(b, "\"user\":\"") + 8); /* the newest conversation comes first */

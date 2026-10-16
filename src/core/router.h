@@ -11,6 +11,7 @@
  *          stream, or a peer pushing its new keys after a roll. The route says how to find the key. */
 
 #include "config.h"
+#include "group.h"
 #include "http.h"
 #include "identity.h"
 #include "json.h"
@@ -43,6 +44,7 @@ typedef struct {
     const puddle_profiles *profiles;
     puddle_assignments *assignments;
     puddle_streams *streams;
+    puddle_groups *groups;                 /* the group chats we are in or invited to; NULL in tests that have none */
     puddle_outbox *outbox;                 /* what we owe other Puddles; NULL in tests that do not send */
     puddle_replay *replay;                 /* one nonce memory for the whole Puddle */
     puddle_bucket *anon_bucket;            /* work done for strangers before they are authenticated; NULL = unlimited */

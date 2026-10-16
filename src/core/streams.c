@@ -63,16 +63,17 @@ static void seterr(char *err, size_t n, const char *fmt, ...)
 
 /* ---- names ---- */
 
-static const char *const STATE_NAMES[] = { "pending_out", "pending_in", "active", "closed" };
+static const char *const STATE_NAMES[] = { "pending_out", "pending_in", "active", "closed", "scoped" };
+#define STATE_COUNT 5
 
 const char *puddle_stream_state_name(puddle_stream_state s)
 {
-    return (unsigned)s < 4 ? STATE_NAMES[s] : "closed";
+    return (unsigned)s < STATE_COUNT ? STATE_NAMES[s] : "closed";
 }
 
 int puddle_stream_state_parse(const char *name, puddle_stream_state *out)
 {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < STATE_COUNT; i++)
         if (name && !strcmp(name, STATE_NAMES[i])) {
             *out = (puddle_stream_state)i;
             return 0;
@@ -97,6 +98,11 @@ int puddle_access_parse(const char *name, puddle_access *out)
 }
 
 /* ---- the record ---- */
+
+int puddle_stream_carries_groups(const puddle_stream *st)
+{
+    return st->state == PUDDLE_STREAM_ACTIVE || st->state == PUDDLE_STREAM_SCOPED || st->group_ok;
+}
 
 int puddle_stream_init(puddle_stream *st, const char *id, puddle_stream_state state, int64_t now_ms)
 {
@@ -220,6 +226,10 @@ static char *encode(const puddle_stream *st, size_t *out_len)
         puddle_jw_str(&w, "ticket", st->ticket);
     if (st->provisional)
         puddle_jw_flag(&w, "provisional", 1);
+    if (st->scoped_req)
+        puddle_jw_flag(&w, "scoped_req", 1);
+    if (st->group_ok)
+        puddle_jw_flag(&w, "group_ok", 1);
     if (st->error[0])
         puddle_jw_str(&w, "error", st->error);
     if (st->chain_sent >= 0)
@@ -292,7 +302,7 @@ static int decode(const char *json, size_t len, const char *expect_id, puddle_st
         return -1;
     if (orc == 0) {
         int64_t o;
-        if (puddle_json_int64(ow, &o) != 0 || o < 0 || o > PUDDLE_OWED_CLOSED)
+        if (puddle_json_int64(ow, &o) != 0 || o < 0 || o > PUDDLE_OWED_SCOPED)
             return -1;
         st->owed = (puddle_owed)o;
     }
@@ -326,6 +336,14 @@ static int decode(const char *json, size_t len, const char *expect_id, puddle_st
         if (prc < 0)
             return -1;
         st->provisional = prc == 0 && tv.len == 4 && !memcmp(tv.p, "true", 4);
+        int src = puddle_json_member(json, len, "scoped_req", &tv);
+        if (src < 0)
+            return -1;
+        st->scoped_req = src == 0 && tv.len == 4 && !memcmp(tv.p, "true", 4);
+        int grc = puddle_json_member(json, len, "group_ok", &tv);
+        if (grc < 0)
+            return -1;
+        st->group_ok = grc == 0 && tv.len == 4 && !memcmp(tv.p, "true", 4);
     }
     {
         puddle_span ev;
@@ -909,14 +927,14 @@ int puddle_streams_adopt(puddle_streams *s, const char *provisional_id, const ch
         goto out;
     }
     if (find_entry(s, real_id)) {
-        /* We know them already. If that stream was closed, this request starts it afresh; any other state stands. */
+        /* We know them already. If that stream was closed, or only for groups, this request starts it afresh; any other state stands. */
         puddle_stream old;
         char rpath[1200];
         size_t rlen;
         record_path(s, real_id, rpath, sizeof rpath);
         char *rtext = read_all(rpath, &rlen);
         if (rtext && decode(rtext, rlen, real_id, &old, &head, &has_head) == 0) {
-            if (old.state == PUDDLE_STREAM_CLOSED) {
+            if (old.state == PUDDLE_STREAM_CLOSED || old.state == PUDDLE_STREAM_SCOPED) { /* a group-only connection becomes a friend request */
                 old.state = PUDDLE_STREAM_PENDING_OUT;
                 old.owed = PUDDLE_OWED_NONE;
                 old.error[0] = '\0';

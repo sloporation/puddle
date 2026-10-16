@@ -13,7 +13,7 @@ certificate pinning), the retrying outbox, direct messages with edit and delete,
 pictures over a stream, and the Qt app (Friends, conversations, chat, delivery state). 32 test suites, including two Puddles
 talking over TLS and the window driven by real clicks and keys.
 
-Not built: group chats, Ponds, the phone client, encryption at rest. See "Later" below and `discuss-later.md`.
+Group chats (phase 5) are built. Not built: Ponds, the phone client, encryption at rest. See "Later" below and `discuss-later.md`.
 
 ## Order, and why
 
@@ -452,9 +452,40 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
 
 *Commit point.*
 
+## Phase 5: Group chats
+
+Design in `docs/groups.md`. Decided with the owner: groups appear in the same list as direct messages; members who are strangers to each other
+are connected by a group-only connection (a `scoped` stream) rather than through the creator; the cost, that every member learns every other
+member's address, is accepted and shown before joining (like phone numbers, nothing hides it); any member can invite a friend, rename or leave,
+nobody can remove another member; a new member sees nothing from before they joined; 50 members at most; blocking someone means neither of you
+gets the other's messages in a group, and you can still be in it.
+
+- [x] **5.1 The group itself.** `group.c/h`: the id (`base32(SHA-256("group\n" creator "\n" ts "\n" nonce))`), the five membership events and their
+  strict parse, the rules every Puddle applies the same way (`puddle_group_apply`), and the store of group records (`state/groups/`).
+- [x] **5.2 Group messages on the wire.** `groupflow.c`, `groupapi.c`: fan-out of events to each member we have an open stream with (the
+  existing outbox), `POST /stream/v1/events` for a group chat judged by the group's rules (the envelope and signature checks are shared with
+  direct messages through a policy, `puddle_take_signed`), the invitation (`POST /stream/v1/group/invite`, from a friend), accept, decline, leave,
+  rename. A decline is a `member.leave` to whoever invited.
+- [x] **5.3 Group-only connections.** A new stream state `scoped`, and two flags on a stream: `group_ok` (group events may pass whatever else the
+  stream is) and `scoped_req` (our request was only for a group). `POST /stream/v1/access` with `scope` and the requester's own signed
+  `member.join` as proof; answered by `access/result` with `scoped:true`; both sides then tell each other they have joined, once. A friend request
+  over a group connection leaves the group going. When the last shared group is left, a connection that was only for groups is closed.
+- [x] **5.4 Owner API.** `GET /api/v1/gm`, `gm/create|invite|accept|decline|leave|rename|send|edit|delete|retry`, `GET gm/messages` (with `notices`
+  for who made it, joined, left, renamed). `conversations` lists groups beside DMs (`kind`), `dm/read` takes `group`.
+- [x] **5.5 The app.** Groups in the DM list, "+" for a new group (name and friends to ask), group chat with the notices between the messages and a
+  members box (rename, ask a friend, leave), invitations in Pending with a plain statement that joining shows your address.
+- [x] **5.6 Tests.** `group_test`, `groupapi_test` (the receiving side and the scoped connections), `groupowner_test` (the owner's routes),
+  `group_e2e_test` (three real Puddles over TLS where two are strangers, ending with a friend request over the group connection and leaving),
+  `chats_test` and `ui_test` (the window: new group, accept with the address notice, decline, talk, members, rename, leave).
+
+Found while doing it, and fixed: a made-up stream id was being sent key pushes (4.6); a join someone could not learn from anyone but its author
+now travels directly (`told`); events about the group go to the invited too, or they cannot tell who else is coming.
+
+*Commit point.*
+
 ## Later, not planned in detail
 
-Group chats and the approval rule, group-only connections (needs a name), Ponds, encrypting message
+Removing a member, a display name for the group-only connection, Ponds, encrypting message
 bodies, encrypting data at rest, the phone client and device pairing. Parked questions are in
 `discuss-later.md`.
 

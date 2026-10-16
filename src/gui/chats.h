@@ -17,6 +17,10 @@ class Chats : public QObject {
     Q_PROPERTY(QObject *conversations READ conversations CONSTANT)  // newest first
     Q_PROPERTY(QObject *messages READ messages CONSTANT)            // the open chat, oldest first
     Q_PROPERTY(QObject *blocked READ blocked CONSTANT)              // people we blocked: user, name, created_at
+    Q_PROPERTY(QObject *groupInvites READ groupInvites CONSTANT)    // invitations to groups waiting for an answer
+    Q_PROPERTY(QObject *members READ members CONSTANT)              // the open group's members: id, name, avatar, color, state, isMe, friend
+    Q_PROPERTY(bool currentIsGroup READ currentIsGroup NOTIFY currentChanged)
+    Q_PROPERTY(int incomingGroupInvites READ incomingGroupInvites NOTIFY groupInvitesChanged)
     Q_PROPERTY(QObject *profiles READ profiles CONSTANT)            // our own profiles: id, display_name, avatar, default
     Q_PROPERTY(QString myName READ myName NOTIFY profilesChanged)   // the default profile's display name
     Q_PROPERTY(QString myAvatar READ myAvatar NOTIFY profilesChanged)
@@ -40,6 +44,11 @@ public:
     QObject *conversations() { return &conversations_; }
     QObject *messages() { return &messages_; }
     QObject *blocked() { return &blocked_; }
+    QObject *groupInvites() { return &invites_; }
+    QObject *members() { return &members_; }
+    bool currentIsGroup() const { return currentKind_ == QLatin1String("group"); }
+    int incomingGroupInvites() const { return groupInviteCount_; }
+    void setSelf(const QString &id) { self_ = id; } // our own user id, so "you" can be said of what we did
     QObject *profiles() { return &profiles_; }
     QString myName() const { return myName_; }
     QString myAvatar() const { return myAvatar_; }
@@ -66,15 +75,25 @@ public:
     // Fetch everything now (also runs on a timer).
     Q_INVOKABLE void refresh();
 
-    Q_INVOKABLE void open(const QString &userId);   // show this chat and mark it read
+    Q_INVOKABLE void open(const QString &id, const QString &kind = QStringLiteral("dm")); // show this chat ("dm" with a person, "group") and mark it read
     Q_INVOKABLE void close();
     Q_INVOKABLE void loadOlder();
-    Q_INVOKABLE QString userAt(int row) const { return conversations_.at(row).value("user").toString(); }
+    Q_INVOKABLE QString userAt(int row) const { return conversations_.at(row).value("id").toString(); }
+    Q_INVOKABLE QString kindAt(int row) const { return conversations_.at(row).value("kind").toString(); }
     Q_INVOKABLE QVariantMap messageAt(int row) const { return messages_.at(row).toVariantMap(); }
     Q_INVOKABLE void retry();                           // try again to deliver what is stuck in the open chat
     Q_INVOKABLE void send(const QString &text, const QString &replyTo = QString());
     Q_INVOKABLE void edit(const QString &messageId, const QString &text);
     Q_INVOKABLE void remove(const QString &messageId);
+
+    // groups
+    Q_INVOKABLE bool isGroupMember(const QString &userId) const { for (const QJsonObject &m : members_.items()) if (m.value("id").toString() == userId) return true; return false; }
+    Q_INVOKABLE void createGroup(const QString &name, const QStringList &friends);
+    Q_INVOKABLE void inviteToGroup(const QString &userId);   // into the open group
+    Q_INVOKABLE void acceptGroup(const QString &groupId);
+    Q_INVOKABLE void declineGroup(const QString &groupId);
+    Q_INVOKABLE void leaveGroup();                           // the open one
+    Q_INVOKABLE void renameGroup(const QString &name);       // the open one
 
     Q_INVOKABLE void accept(const QString &userId);
     Q_INVOKABLE void decline(const QString &userId);
@@ -104,6 +123,10 @@ signals:
     void failed(const QString &what);                    // something the owner asked for did not work
     void newIncoming(const QString &userId, int unread); // for notifications: a chat has more unread than before
     void newRequest(const QString &userId);
+    void groupInvitesChanged();
+    void newGroupInvite(const QString &groupId);
+    void groupCreated(const QString &groupId);
+    void groupLeft();
     void avatarReady(const QString &hash);
     void profilesChanged();
     void currentInfoChanged();
@@ -117,14 +140,22 @@ private:
     void refreshMessages();
     void updateCurrentInfo();
     void refreshBlocked();
+    void refreshGroups();
     void refreshProfiles();
     void post(const QString &path, const QJsonObject &body, const QString &failure, bool andRefresh = true);
     void setConnected(bool c);
     void markRead();
+    bool notice(QJsonObject &n) const;
+    void rebuildMembers();
 
     ApiClient api_;
     QTimer timer_;
-    JsonListModel people_, conversations_, messages_, blocked_, profiles_;
+    JsonListModel people_, conversations_, messages_, blocked_, profiles_, invites_, members_;
+    QHash<QString, QJsonObject> groups_;   // the groups we are in or invited to, by id
+    QSet<QString> invitedTo_;
+    QString currentKind_ = QStringLiteral("dm"), self_;
+    int groupInviteCount_ = 0;
+    bool groupsLoaded_ = false;
     QString curName_, curAvatar_, curColor_, curState_;
     bool curCert_ = false, hasOlder_ = false, attentive_ = true;
     QString myName_, myAvatar_, cacheDir_;
@@ -139,5 +170,5 @@ private:
     int messageLimit_ = 50;
     bool connected_ = true; // until a request fails, so the banner does not flash at start-up
     bool marking_ = false, profilesLoaded_ = false;
-    bool busy_[5] = { false, false, false, false, false };
+    bool busy_[6] = { false, false, false, false, false, false };
 };

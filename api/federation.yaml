@@ -22,12 +22,15 @@ info:
     - Only GET and POST are used. GET reads and never changes anything; POST does everything else.
     - **Events are sent as strings.** An event's id is the SHA-256 of its exact bytes, so `event` is the
       raw JSON text as a string, never re-serialized. See docs/storage.md.
-    - Group membership votes are ordinary events (`member.propose`, `member.approve`, `member.deny`,
-      `member.add`, `member.leave`) delivered through `/stream/v1/events`. A group's add only counts
-      if the log holds an approval from every member it builds on; each Puddle checks this itself.
+    - Groups: a group's id is made from its creator, a time and a nonce, and written into its first event, `chat.create`. Messages,
+      edits and redactions are the direct-message events with the group's id as the `chat`. Five more events change the group
+      (`chat.create`, `chat.rename`, `member.invite`, `member.join`, `member.leave`), delivered through `/stream/v1/events` like any
+      other; each Puddle applies the same rules to them, so the same events give the same members (docs/groups.md). Nobody can
+      remove another member.
     - There is deliberately no endpoint for blocks. A blocked sender is answered exactly like an
       ordinary pending request, and never told.
-    - Group-only connections (a "scoped stream") use `/stream/v1/access` with `scope` set.
+    - Group-only connections (a "scoped stream", state `scoped`) use `/stream/v1/access` with `scope` set, and are answered by an
+      `access/result` with `scoped: true`. Members learn each other's addresses this way (docs/groups.md).
 
     Still to decide: the exact signature scheme, retries and ordering, and key rotation records.
 
@@ -117,8 +120,9 @@ paths:
         left waiting for the owner are indistinguishable, and dropped ones are dropped silently. The
         requester's `profile` is read for `display_name`, `blurb`, `about` and `pronouns` only (cleaned and
         length-limited); pictures and colors come later, over the stream. At most 96 KiB. The outcome arrives later at the requester's `access/result`, or by polling
-        `access/status`. Set `scope` to ask for a group-only connection: the target auto-approves if
-        `scope.proof` is a membership event it already holds for that group.
+        `access/status`. Set `scope` to ask for a group-only connection: the requester's own signed `member.join` for a group is the proof, and
+        the target approves if it is in that group, the requester is invited to it (or already in), the join is the requester's own and signed by the
+        key in the chain sent, and the requester is not blocked.
 
         **The request may be signed for no recipient**: where the signature names the recipient's user id it may name `*`,
         because the requester often has only an address and does not know who lives there. This route is the only one that
@@ -289,10 +293,14 @@ paths:
     post:
       tags: [groups]
       operationId: inviteToGroup
-      summary: Invite someone you share a stream with into a group
+      summary: Invite a friend into a group
       description: |
-        The invitee's Puddle checks the stream and the member list against its blocks, then asks its
-        owner. It answers later with `/stream/v1/group/invite/response`.
+        From a friend only (`403 no_stream` otherwise). The body is the group's `chat.create`, the sender's signed `member.invite` naming the
+        recipient, and who is in the group with the addresses they can be reached at (for the group-only connections made on joining). The
+        recipient checks the group's id, the invitation (the sender's own word, signed by their current key) and that the sender is a member; it
+        takes the roster on the sender's word. Answered `202` whatever the owner decides later (they are asked); `400` for something malformed.
+        The recipient says yes by telling the members with `member.join` (to those it has no stream with, in a group-only connection request);
+        no by `member.leave` to the one who invited.
       requestBody:
         required: true
         content:
@@ -301,27 +309,7 @@ paths:
       responses:
         "202": { description: Received }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /stream/v1/group/invite/response:
-    post:
-      tags: [groups]
-      operationId: answerGroupInvite
-      summary: The invitee's answer
-      description: Only "accepted" or "declined"; never a reason.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [group, accepted]
-              properties:
-                group: { $ref: "#/components/schemas/ChatId" }
-                accepted: { type: boolean }
-      responses:
-        "204": { description: Recorded }
-        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Not a friend }
 
 components:
   securitySchemes:
@@ -433,13 +421,13 @@ components:
 
     Scope:
       type: object
-      description: Limits a stream to one group. Absent means a full friendship.
-      required: [group]
+      description: Limits a stream to groups. Absent means a full friendship.
+      required: [group, join]
       properties:
         group: { $ref: "#/components/schemas/ChatId" }
-        proof:
-          type: string
-          description: A membership event (raw JSON text) showing the sender was added to the group
+        join:
+          $ref: "#/components/schemas/SignedEvent"
+          description: The requester's own `member.join` for the group, signed by the key in the chain they sent
 
     AccessRequest:
       type: object
@@ -471,6 +459,9 @@ components:
       properties:
         responder: { $ref: "#/components/schemas/Peer" }
         approved: { type: boolean }
+        scoped:
+          type: boolean
+          description: Yes to a group-only connection. It answers only a request made for a group, never a friend request, and carries no ticket.
         ticket:
           type: string
           pattern: "^[0-9a-f]{32}$"
@@ -524,16 +515,34 @@ components:
 
     GroupInvite:
       type: object
-      required: [group, name, create_event, members]
+      required: [group, create, invite, members]
       properties:
         group: { $ref: "#/components/schemas/ChatId" }
-        name: { type: string }
-        create_event:
-          $ref: "#/components/schemas/SignedEvent"
+        create:
+          type: object
+          description: The group's first event
+          required: [event, sig]
+          properties:
+            event: { type: string }
+            sig: { type: string }
+        invite:
+          type: object
+          description: The sender's signed `member.invite` naming the recipient
+          required: [event, sig]
+          properties:
+            event: { type: string }
+            sig: { type: string }
         members:
           type: array
-          description: Everyone in the group, with the details needed to reach and verify them
-          items: { $ref: "#/components/schemas/Peer" }
+          description: Everyone in it or invited, with where to reach them where the sender knows
+          items:
+            type: object
+            required: [id, state, ts]
+            properties:
+              id: { $ref: "#/components/schemas/UserId" }
+              state: { type: string, enum: [invited, member] }
+              ts: { type: integer, format: int64, description: The time of the event that put them in this state }
+              address: { type: string }
 
     Error:
       type: object

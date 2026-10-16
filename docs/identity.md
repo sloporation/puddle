@@ -152,9 +152,10 @@ later without changing the API, which never exposes keys.
 
 ## Threat model
 
-Group membership is protected by the rule that an add counts only with approval from every member
-it builds on. Each Puddle checks this itself, so a modified app can't make others accept a member
-they refused. It cannot stop a member from sharing what they can read.
+Group membership is protected by rules every Puddle applies itself (docs/groups.md): only a member can invite, a join counts only from someone
+invited, and a connection for a group is made only for someone invited to it, with their own signed join as proof. A modified app cannot make
+others accept a member they never heard of. It cannot stop a member from sharing what they can read, and every member of a group learns every
+other member's address.
 
 ## Open questions
 
@@ -162,5 +163,5 @@ they refused. It cannot stop a member from sharing what they can read.
 - Pre-rotation is a known but intricate design (compare KERI). It needs review before we ship it.
 - Backdating: someone holding a *retired* key could sign events with an old `ts`. Do contacts treat
   events signed by a retired key as invalid after a rotation they have seen, or only before it?
-- Group membership changes and who may make them (signed `member.*` events by an admin?).
+- Removing a member from a group (leaving is each member's own; nobody can remove another, for now).
 - Per-device keys instead of key transfer (see Devices).
