@@ -42,6 +42,8 @@ struct puddle_streams {
     size_t nentries, capentries;
     blocked *blocks;
     size_t nblocks;
+    blocked *reads; /* reuses the shape: an id and a time */
+    size_t nreads;
     puddle_invite invites[PUDDLE_MAX_INVITES];
     size_t ninvites;
     puddle_access access;
@@ -445,6 +447,103 @@ static void load_blocks(puddle_streams *s)
     free(text);
 }
 
+static int save_reads(puddle_streams *s)
+{
+    char *buf = malloc(s->nreads * (PUDDLE_USER_ID_LEN + 24) + 1);
+    if (!buf)
+        return -1;
+    size_t n = 0;
+    for (size_t i = 0; i < s->nreads; i++)
+        n += (size_t)snprintf(buf + n, PUDDLE_USER_ID_LEN + 24, "%s\t%lld\n", s->reads[i].id, (long long)s->reads[i].ts);
+    int rc = write_state_file(s, "read.tsv", buf, n);
+    free(buf);
+    return rc;
+}
+
+static void load_reads(puddle_streams *s)
+{
+    char path[1200];
+    size_t len;
+    snprintf(path, sizeof path, "%s/read.tsv", s->state_dir);
+    char *text = read_all(path, &len);
+    if (!text)
+        return;
+    for (char *save = NULL, *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        char *tab = strchr(line, '\t');
+        if (!tab)
+            continue;
+        *tab = '\0';
+        if (!puddle_id_valid(line))
+            continue;
+        blocked *n = realloc(s->reads, (s->nreads + 1) * sizeof *n);
+        if (!n)
+            break;
+        s->reads = n;
+        memcpy(s->reads[s->nreads].id, line, PUDDLE_USER_ID_LEN + 1);
+        s->reads[s->nreads].ts = atoll(tab + 1);
+        s->nreads++;
+    }
+    free(text);
+}
+
+int64_t puddle_streams_read_marker(puddle_streams *s, const char *id)
+{
+    int64_t ts = 0;
+    if (!puddle_id_valid(id))
+        return 0;
+    pthread_mutex_lock(&s->mu);
+    for (size_t i = 0; i < s->nreads; i++)
+        if (!strcmp(s->reads[i].id, id))
+            ts = s->reads[i].ts;
+    pthread_mutex_unlock(&s->mu);
+    return ts;
+}
+
+int puddle_streams_set_read_marker(puddle_streams *s, const char *id, int64_t ts_ms, char *err, size_t errlen)
+{
+    if (!puddle_id_valid(id) || ts_ms < 0) {
+        seterr(err, errlen, "not a valid user id");
+        return -1;
+    }
+    int rc = 0;
+    pthread_mutex_lock(&s->mu);
+    blocked *at = NULL;
+    for (size_t i = 0; i < s->nreads; i++)
+        if (!strcmp(s->reads[i].id, id))
+            at = &s->reads[i];
+    if (at && at->ts >= ts_ms) {
+        pthread_mutex_unlock(&s->mu); /* never backwards */
+        return 0;
+    }
+    if (at) {
+        int64_t old = at->ts;
+        at->ts = ts_ms;
+        if (save_reads(s) != 0) {
+            at->ts = old;
+            seterr(err, errlen, "cannot save: %s", strerror(errno));
+            rc = -1;
+        }
+    } else {
+        blocked *n = realloc(s->reads, (s->nreads + 1) * sizeof *n);
+        if (!n) {
+            seterr(err, errlen, "out of memory");
+            rc = -1;
+        } else {
+            s->reads = n;
+            memcpy(s->reads[s->nreads].id, id, PUDDLE_USER_ID_LEN + 1);
+            s->reads[s->nreads].ts = ts_ms;
+            s->nreads++;
+            if (save_reads(s) != 0) {
+                s->nreads--;
+                seterr(err, errlen, "cannot save: %s", strerror(errno));
+                rc = -1;
+            }
+        }
+    }
+    pthread_mutex_unlock(&s->mu);
+    return rc;
+}
+
 static void load_invites(puddle_streams *s)
 {
     char path[1200];
@@ -524,6 +623,7 @@ puddle_streams *puddle_streams_open(const char *data_dir, char *err, size_t errl
     closedir(d);
 
     load_blocks(s);
+    load_reads(s);
     load_invites(s);
     char path[1200], word[32] = "";
     size_t len;
@@ -544,6 +644,7 @@ void puddle_streams_close(puddle_streams *s)
         return;
     free(s->entries);
     free(s->blocks);
+    free(s->reads);
     pthread_mutex_destroy(&s->mu);
     free(s);
 }

@@ -35,6 +35,7 @@ typedef struct {
     int status;               /* HTTP status, for OK */
     char reason[200];         /* in words, for anything but OK */
     char fingerprint[65];     /* hex SHA-256 of the certificate; "" if TLS was not reached */
+    char content_type[48];    /* of the answer, as it said (lower case, without parameters); "" if it did not */
     char *body;               /* the response body, NUL-terminated, or NULL. Free with puddle_net_reply_free. */
     size_t body_len;
 } puddle_net_reply;
@@ -43,6 +44,7 @@ typedef struct {
     int connect_timeout_s;    /* 0 = 8 */
     int io_timeout_s;         /* each read or write; 0 = 10 */
     int total_timeout_s;      /* the whole call; 0 = 30 */
+    size_t max_body;          /* the largest answer to accept; 0 = PUDDLE_NET_BODY_MAX. Larger ones fail rather than fill memory. */
     /* Asked once the certificate is known and before anything is sent: 1 to go on, 0 to stop. NULL = always. */
     int (*fingerprint_ok)(void *user, const char *fingerprint_hex);
     void *user;

@@ -55,8 +55,16 @@ typedef struct {
     int64_t (*now_ms)(void);               /* NULL = the clock; a seam for tests */
 } puddle_ctx;
 
+/* An answer that is a file, not JSON: a handler fills this (data is malloc'd; the router sends and frees it). */
+typedef struct {
+    unsigned char *data;
+    size_t len;
+    char mime[40];
+} puddle_blob;
+
 typedef struct {
     puddle_ctx *ctx;
+    puddle_blob *blob;                     /* set to answer with a file instead of JSON */
     const puddle_request *req;
     const unsigned char *body;             /* NUL-terminated past body_len, binary-safe by length */
     size_t body_len;
@@ -86,6 +94,10 @@ typedef struct {
     size_t count;
     puddle_ctx *ctx;
 } puddle_router;
+
+/* As puddle_router_handle, for the server: a file answer comes back in `big` (headers in `out`) instead of having to fit in it. */
+size_t puddle_router_handle_big(const puddle_router *r, const puddle_request *req, int owner_ok, const unsigned char *body,
+                                size_t body_len, char *out, size_t cap, int *status, puddle_big *big);
 
 /* How many body bytes a request may carry, from its headers alone (asked before the body is read). A route the
  * caller could not use gets 0, so a body to it is refused the way an unknown path is. */

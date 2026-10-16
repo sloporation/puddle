@@ -16,7 +16,7 @@ typedef struct {
     long fail_at;            /* ...or report a timeout (-1 never) */
     long tick_from;          /* the fake clock advances 1s per read once this many bytes have been read */
     int64_t clock;
-    char out[16384];
+    char out[300000];
     size_t outlen;
     int reads;
 } fake;
@@ -88,6 +88,24 @@ static puddle_http_handler handler(void)
 {
     puddle_http_handler h = { .owner_check = owner_check, .body_limit = body_limit, .route = route, .deadline_seconds = 15, .now = now_cb };
     return h;
+}
+
+/* a route that can answer with a file */
+static size_t route_big(void *u, const puddle_request *r, int owner_ok, const unsigned char *body, size_t n, char *out, size_t cap, int *status,
+                        puddle_big *big)
+{
+    (void)u; (void)owner_ok; (void)body; (void)n;
+    if (!strcmp(r->path, "/file") || !strcmp(r->path, "/lost")) {
+        big->len = 200000;
+        big->data = malloc(big->len);
+        for (size_t i = 0; i < big->len; i++) big->data[i] = (unsigned char)(i * 7 + 3);
+        if (!strcmp(r->path, "/lost"))
+            return 0; /* the route failed after making the file: it must still be freed */
+        *status = 200;
+        return puddle_http_head(200, "image/png", "X-Extra: 1\r\n", big->len, out, cap);
+    }
+    *status = 200;
+    return puddle_http_response(200, "", "{\"plain\":true}", 14, out, cap);
 }
 
 /* run one request; returns the status sent */
@@ -283,6 +301,60 @@ int main(void)
     const char *right = "GET /small HTTP/1.1\r\nAuthorization: Bearer ok\r\n\r\n";
     CHECK(run(&f, wrong, strlen(wrong), 0, &info) == 200 && strcmp(info.auth, "wrong token") == 0 && !seen.owner);
     CHECK(run(&f, right, strlen(right), 0, &info) == 200 && strcmp(info.auth, "owner token") == 0 && seen.owner);
+
+    /* ---- a file as the answer ---- */
+    {
+        puddle_http_handler h = handler();
+        h.route_big = route_big;
+        puddle_io io;
+        const char *req = "GET /file HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ok\r\n\r\n";
+        memset(&f, 0, sizeof f);
+        f.data = (const unsigned char *)req;
+        f.len = strlen(req);
+        f.chunk = (size_t)-1;
+        f.close_at = f.fail_at = f.tick_from = -1;
+        f.clock = 1000;
+        g_fake = &f;
+        io = (puddle_io){ fake_read, fake_write, &f };
+        CHECK(puddle_http_serve(&h, &io, &info) == 200 && info.status == 200);
+        const char *body = strstr(f.out, "\r\n\r\n");
+        CHECK(body && strstr(f.out, "Content-Type: image/png\r\n") && strstr(f.out, "Content-Length: 200000\r\n") && strstr(f.out, "X-Extra: 1\r\n"));
+        body += 4;
+        CHECK(f.outlen == (size_t)(body - f.out) + 200000);                                     /* headers, then exactly the file */
+        int same = 1;
+        for (size_t i = 0; i < 200000; i++) same &= (unsigned char)body[i] == (unsigned char)(i * 7 + 3);
+        CHECK(same);
+
+        /* a route that makes a file and then fails: a plain 500, and the file is not sent */
+        req = "GET /lost HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ok\r\n\r\n";
+        memset(&f, 0, sizeof f);
+        f.data = (const unsigned char *)req;
+        f.len = strlen(req);
+        f.chunk = (size_t)-1;
+        f.close_at = f.fail_at = f.tick_from = -1;
+        f.clock = 1000;
+        g_fake = &f;
+        io = (puddle_io){ fake_read, fake_write, &f };
+        CHECK(puddle_http_serve(&h, &io, &info) == 500 && f.outlen < 400 && strstr(f.out, "500"));
+
+        /* an ordinary route through the same handler is as before */
+        req = "GET /other HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ok\r\n\r\n";
+        memset(&f, 0, sizeof f);
+        f.data = (const unsigned char *)req;
+        f.len = strlen(req);
+        f.chunk = 3; /* a byte or three at a time */
+        f.close_at = f.fail_at = f.tick_from = -1;
+        f.clock = 1000;
+        g_fake = &f;
+        io = (puddle_io){ fake_read, fake_write, &f };
+        CHECK(puddle_http_serve(&h, &io, &info) == 200 && strstr(f.out, "{\"plain\":true}"));
+
+        /* the head alone */
+        char head[400];
+        size_t hl = puddle_http_head(404, "text/plain", "", 12, head, sizeof head);
+        CHECK(hl > 0 && strstr(head, "404 Not Found") && strstr(head, "Content-Length: 12\r\n") && !strcmp(head + hl - 4, "\r\n\r\n"));
+        CHECK(puddle_http_head(200, "image/png", "", 5, head, 20) == 0);
+    }
 
     return failures ? 1 : 0;
 }

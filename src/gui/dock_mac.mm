@@ -14,3 +14,11 @@ void puddle_set_dock_visible(bool visible)
     if (visible)
         [app activateIgnoringOtherApps:YES];
 }
+
+void puddle_set_dock_badge(int count)
+{
+    NSApplication *app = NSApp;
+    if (!app)
+        return;
+    [[app dockTile] setBadgeLabel:count > 0 ? [NSString stringWithFormat:@"%d", count] : nil];
+}

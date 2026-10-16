@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtCore
 import Qt.labs.platform as Platform
 
 ApplicationWindow {
@@ -8,8 +9,6 @@ ApplicationWindow {
 
     required property var backend
 
-    // Phone-width layouts switch on this; a chat UI would show sidebar + thread
-    // side by side when wide, and one at a time (StackView) when narrow.
     readonly property bool wide: width >= 720
     readonly property int margin: wide ? 24 : 12
 
@@ -18,7 +17,10 @@ ApplicationWindow {
     height: 600
     minimumWidth: 320
     minimumHeight: 400
-    title: "Puddle"
+    readonly property int alerts: backend.chats.unreadTotal + backend.chats.incomingRequests
+    title: alerts > 0 ? "(" + alerts + ") Puddle" : "Puddle"
+
+    property string notified: "" // who the last notification was about
 
     function showWindow() {
         backend.setDockVisible(true)
@@ -53,6 +55,7 @@ ApplicationWindow {
         // macOS template image: drawn black/white to follow the menu bar's light/dark theme.
         icon.mask: Qt.platform.os === "osx"
         tooltip: "Puddle"
+        onMessageClicked: { root.showWindow(); shell.showPerson(root.notified) }
         onActivated: reason => {
             if (reason === Platform.SystemTrayIcon.Trigger
                     || reason === Platform.SystemTrayIcon.DoubleClick)
@@ -67,28 +70,6 @@ ApplicationWindow {
             Platform.MenuItem {
                 text: qsTr("Quit Puddle")
                 onTriggered: Qt.quit()
-            }
-        }
-    }
-
-    header: ToolBar {
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: root.margin
-            anchors.rightMargin: root.margin
-
-            Label {
-                text: "Puddle"
-                font.bold: true
-                font.pixelSize: 18
-            }
-            Item { Layout.fillWidth: true }
-            Label {
-                text: root.backend.needsSetup ? "Setting up"
-                      : root.backend.error === "" ? "Listening on " + root.backend.listenUrl : "Not running"
-                elide: Text.ElideMiddle
-                Layout.maximumWidth: root.width * 0.6
-                opacity: 0.7
             }
         }
     }
@@ -108,23 +89,45 @@ ApplicationWindow {
         text: root.backend.error
     }
 
-    ListView {
-        id: logView
-        visible: root.backend.error === "" && !root.backend.needsSetup
+    Shell {
+        id: shell
         anchors.fill: parent
-        anchors.margins: root.margin
-        clip: true
-        model: root.backend.log
-        onCountChanged: positionViewAtEnd()
-        ScrollBar.vertical: ScrollBar {}
+        visible: root.backend.running && root.backend.error === "" && !root.backend.needsSetup
+        backend: root.backend
+    }
 
-        delegate: Label {
-            required property string display
-            width: ListView.view.width
-            text: display
-            wrapMode: Text.WrapAnywhere
-            font.family: Qt.platform.os === "osx" ? "Menlo" : Qt.platform.os === "windows" ? "Consolas" : "monospace"
-            font.pixelSize: 13
+    // Tell the owner about new things while the window is hidden. The text of a message is never shown here.
+    Connections {
+        target: root.backend.chats
+        function onNewRequest(userId) {
+            if (!root.visible || !root.active) {
+                root.notified = ""
+                tray.showMessage(qsTr("Friend request"),
+                                 qsTr("%1 would like to be your friend.").arg(root.backend.chats.nameOf(userId)))
+            }
         }
+        function onNewIncoming(userId, unread) {
+            if (!root.visible || !root.active) {
+                root.notified = userId
+                tray.showMessage(root.backend.chats.nameOf(userId), qsTr("New message"))
+            }
+        }
+        function onUnreadTotalChanged() { root.updateBadge() }
+        function onIncomingRequestsChanged() { root.updateBadge() }
+    }
+    function updateBadge() {
+        backend.setDockBadge(backend.chats.unreadTotal + backend.chats.incomingRequests)
+    }
+
+    // Cmd/Ctrl+W closes the window (to the tray), as in any chat app
+    Shortcut { sequences: [StandardKey.Close]; onActivated: root.close() }
+
+    // The window comes back the size and place it was left.
+    Settings {
+        category: "window"
+        property alias x: root.x
+        property alias y: root.y
+        property alias width: root.width
+        property alias height: root.height
     }
 }

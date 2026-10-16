@@ -89,6 +89,20 @@ A **group** chat's first record is `chat.create` (initial members), so it is sel
 edits and redactions are derived by replaying it. A **direct message** chat has no `chat.create`: its id already
 names both people, so there is nothing for it to say.
 
+Three event types make a direct-message chat: `message`, `edit` and `redact`. An edit is `{"type":"edit","chat","sender","ts","body","ref":<message id>}`
+and a redaction (taking back) is `{"type":"redact","chat","sender","ts","ref":<message id>}`, with no body at all. They are events like any
+other: appended, signed, delivered, never changed. What a reader sees is worked out from them (the *view*), the same way on every Puddle
+whatever order they arrived in:
+
+- an edit or redaction counts only if its `sender` is the author of the message it names and its `ts` is later than the message's
+  (so it is never "before" what it changes, and a reader that has the message always has what was done to it);
+- the last such edit, in chat order, is the text; a redaction wins over any edit, before or after;
+- the message keeps its place and its time, and shows as edited (with the time of the last edit) or as deleted (no text);
+- an edit or redaction of an event that is not a message, or that is not there yet, changes nothing (and the same events give the
+  same view once it arrives).
+
+Deleting is a request to hide, not an erase: Puddles that copied the text can keep it.
+
 A direct message is `{"type":"message","chat":<dm id>,"sender":<id>,"ts":<ms>,"body":<text>}` with an optional
 `"ref"` (the id of the message replied to), fields in that order, no spaces. The body is 1 to 4000 characters
 of valid UTF-8 with no control characters but newline and tab. An event is at most 16 KiB. `ts` is made

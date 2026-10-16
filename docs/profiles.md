@@ -64,13 +64,19 @@ caught instead of silently ignored. The text must be valid UTF-8.
 
 `<data_dir>/state/stream-profiles.tsv` maps a peer's user id to one of your profile ids (set through
 `POST /api/v1/stream/profile`). If the profile later disappears from your files, that peer sees the
-default again. Editing the files and calling `POST /api/v1/profile/reload` applies changes and
-sends them to the affected streams.
+default again. Profile files are read when the Puddle starts (reloading while running is parked, see `discuss-later.md`).
 
-Over a stream, the peer receives the profile *without* its `id`, with images as hashes they fetch
-from `GET /stream/v1/media`, which only serves images in the profile that peer is meant to see.
+Over a stream, the peer receives the profile *without* its `id`: its text, its colour, and its images as
+`{hash, mime, size}`. They fetch an image they do not hold from `GET /stream/v1/media?hash=`, which only serves images
+in the profile that peer is meant to see, and only over an open stream. What arrives is checked against what the profile
+said (the hash, the size, the kind of image from the file's own first bytes) and kept in `<data_dir>/media/<hash>` only
+if it all matches. Nothing a peer sends is stored as sent: the profile is rebuilt from the fields we understand, each
+checked and cleaned, and one with anything wrong in it is refused whole. A request for a stream carries the profile too, but its
+pictures are fetched only once the stream is open (before that the other side cannot know our keys).
+
+Your own pictures, and the ones fetched from friends, are shown to your app by `GET /api/v1/media?hash=`.
 
 ## Not built yet
 
-Reloading while running, the stream and media endpoints themselves, resizing, and showing profiles
-in the app. The model, the YAML files, validation, image import and assignment are done.
+Reloading while running, resizing, limits on what a receiver will take (see `discuss-later.md`), and showing profiles in the
+app. The model, the YAML files, validation, image import, assignment, the push to a peer and the fetch of its pictures are done.

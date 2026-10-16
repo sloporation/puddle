@@ -29,7 +29,7 @@ extern "C" {
 typedef struct {
     char id[PUDDLE_USER_ID_LEN + 1];
     char address[PUDDLE_ADDR_MAX];
-    char profile[2048];
+    char profile[12288]; /* PUDDLE_WIRE_PROFILE_MAX */
     char *chain;
     size_t chain_len;
 } puddle_peer_info;

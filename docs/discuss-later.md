@@ -43,6 +43,14 @@ hold the genuine chain keep it and reject the fork; someone who has seen only th
 contact normally gets the chain straight from the owner's Puddle, which is what protects them. Stronger answers
 (witnesses, or friends comparing the chains they hold) are for later.
 
+## 5. A public profile for the address
+
+A profile that goes with a Puddle's address (the `puddle://` link) and is shown to someone who is about to send a friend request, so
+the requester can check they are asking the right person before anything is sent. Today nothing is shown until the other side
+accepts, and the request itself says nothing about who it is going to. Questions: what is public and so visible to anyone who has the
+link; how a Puddle answers a stranger's look at it without breaking "nothing is public" (the link would have to prove the asker
+holds it, and the answer would have to be useless to anyone else); and whether it is a profile of its own or one of the existing ones.
+
 ## Carried over from earlier
 
 - Name for the group-only connection (a scoped stream). Options floated: Brook, Rill, Tributary.

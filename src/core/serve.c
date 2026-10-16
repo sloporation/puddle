@@ -125,13 +125,24 @@ int puddle_http_serve(const puddle_http_handler *h, puddle_io *io, puddle_serve_
     /* ---- the answer ---- */
     char out[RESPONSE_MAX];
     int status = 0;
-    size_t outlen = h->route ? h->route(h->user, &req, owner_ok, body, body_len, out, sizeof out, &status) : 0;
+    puddle_big big = { NULL, 0 };
+    size_t outlen = 0;
+    if (h->route_big)
+        outlen = h->route_big(h->user, &req, owner_ok, body, body_len, out, sizeof out, &status, &big);
+    else if (h->route)
+        outlen = h->route(h->user, &req, owner_ok, body, body_len, out, sizeof out, &status);
     free(body);
     if (!outlen) {
+        free(big.data);
+        big.data = NULL;
         status = 500;
         outlen = puddle_http_error(500, out, sizeof out);
     }
     io->write(io->io, out, outlen);
+    if (big.data) {
+        io->write(io->io, big.data, big.len);
+        free(big.data);
+    }
     memset(out, 0, sizeof out); /* an answer can hold a recovery phrase; don't leave it on the stack */
     info->status = status;
     return status;

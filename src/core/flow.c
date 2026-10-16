@@ -2,6 +2,7 @@
 
 #include "access.h"
 #include "keysync.h"
+#include "profiles_api.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -46,12 +47,8 @@ int puddle_flow_write_self(puddle_ctx *ctx, const char *peer, puddle_jw *w)
     puddle_jw_str(w, "address", addr);
     puddle_jw_key(w, "profile");
     puddle_jw_object(w);
-    if (pr) {
-        puddle_jw_str(w, "display_name", pr->display_name);
-        if (pr->blurb) puddle_jw_str(w, "blurb", pr->blurb);
-        if (pr->about) puddle_jw_str(w, "about", pr->about);
-        if (pr->pronouns) puddle_jw_str(w, "pronouns", pr->pronouns);
-    }
+    if (pr)
+        puddle_profile_write_fields(w, pr);
     puddle_jw_end_object(w);
     puddle_jw_key(w, "chain");
     puddle_jw_string_n(w, chain, cl);
@@ -294,6 +291,7 @@ void puddle_flow_done(void *user, const puddle_ob_item *item, puddle_ob_outcome 
 {
     puddle_ctx *ctx = user;
     puddle_sync_done(ctx, item, outcome);
+    puddle_profiles_done(ctx, item, outcome, reply);
     if (outcome == PUDDLE_OB_HOLD)
         return; /* waiting for the owner to trust the new certificate; the stream says so */
     char err[300], why[200];

@@ -83,7 +83,7 @@ static int valid_peer_id(const char *id)
 
 /* ----------------------------------------------------------------- images */
 
-static const char *sniff_mime(const unsigned char *b, size_t n)
+const char *puddle_image_sniff(const unsigned char *b, size_t n)
 {
     if (n >= 8 && memcmp(b, "\x89PNG\r\n\x1a\n", 8) == 0)
         return "image/png";
@@ -131,7 +131,7 @@ static int import_image(const puddle_config *cfg, const char *path, const char *
     }
     close(fd);
 
-    const char *mime = got == size ? sniff_mime(buf, size) : NULL;
+    const char *mime = got == size ? puddle_image_sniff(buf, size) : NULL;
     if (!mime) {
         free(buf);
         puddle_log(PUDDLE_LOG_WARN, "profile %s: %s is not a png, jpg, gif or webp image; leaving it out", who, path);
@@ -639,4 +639,42 @@ const puddle_profile *puddle_profile_for_peer(const puddle_profiles *p, puddle_a
             return found;
     }
     return p->count ? &p->items[0] : NULL;
+}
+
+static void media_member(puddle_jw *w, const char *key, const puddle_media *m)
+{
+    if (!m->hash[0])
+        return;
+    puddle_jw_key(w, key);
+    puddle_jw_object(w);
+    puddle_jw_str(w, "hash", m->hash);
+    puddle_jw_str(w, "mime", m->mime);
+    puddle_jw_num(w, "size", (int64_t)m->size);
+    puddle_jw_end_object(w);
+}
+
+void puddle_profile_write_fields(puddle_jw *w, const puddle_profile *p)
+{
+    puddle_jw_str(w, "display_name", p->display_name);
+    if (p->blurb)
+        puddle_jw_str(w, "blurb", p->blurb);
+    if (p->about)
+        puddle_jw_str(w, "about", p->about);
+    if (p->pronouns)
+        puddle_jw_str(w, "pronouns", p->pronouns);
+    if (p->color.kind != PUDDLE_COLOR_NONE) {
+        puddle_jw_key(w, "color");
+        puddle_jw_object(w);
+        puddle_jw_key(w, "colors");
+        puddle_jw_array(w);
+        for (int i = 0; i < p->color.nstops; i++)
+            puddle_jw_string(w, p->color.stops[i]);
+        puddle_jw_end_array(w);
+        if (p->color.kind == PUDDLE_COLOR_GRADIENT)
+            puddle_jw_num(w, "angle", p->color.angle);
+        puddle_jw_end_object(w);
+    }
+    media_member(w, "avatar", &p->avatar);
+    media_member(w, "banner", &p->banner);
+    media_member(w, "background", &p->background);
 }

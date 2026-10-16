@@ -6,6 +6,7 @@
  * (docs/profiles.md). Images are copied into <data_dir>/media/<sha256> when loaded. */
 
 #include "config.h"
+#include "json.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -58,6 +59,15 @@ typedef struct {
 int puddle_profiles_load(puddle_profiles *out, const puddle_config *cfg, char *err, size_t errlen);
 void puddle_profiles_free(puddle_profiles *p);
 const puddle_profile *puddle_profiles_find(const puddle_profiles *p, const char *id);
+
+/* The kind of image these bytes are (image/png, image/jpeg, image/gif or image/webp), judged by what the file starts with, never
+ * by what it is called or claims; NULL for anything else. */
+const char *puddle_image_sniff(const unsigned char *bytes, size_t len);
+
+/* Write a profile's fields as members of the JSON object `w` has open, in the form they take on the wire and in the owner
+ * API: display_name, then blurb, about, pronouns, color ({"colors":[..],"angle":n}) and avatar, banner, background as
+ * {"hash","mime","size"}, each only if there is one. The caller adds anything of its own (an id) around them. */
+void puddle_profile_write_fields(puddle_jw *w, const puddle_profile *p);
 
 /* Which profile each peer (stream) is shown. Stored in <data_dir>/state/stream-profiles.tsv. */
 typedef struct puddle_assignments puddle_assignments;

@@ -167,14 +167,17 @@ int main(void)
 
     /* ---- a request, the default policy: it waits for the owner ---- */
     CHECK(puddle_streams_access(ss) == PUDDLE_ACCESS_MANUAL);
-    CHECK(ask(&alice, "{\"display_name\":\"Alice\",\"blurb\":\"hi\",\"evil\":{\"x\":1},\"avatar\":{\"hash\":\"zz\"}}", "\"message\":\"hey it's Alice\\nfrom work\"", &first) == 202);
+    CHECK(ask(&alice, "{\"display_name\":\"Alice\",\"blurb\":\"hi\",\"evil\":{\"x\":1},\"color\":{\"colors\":[\"#AABBCC\",\"#001122\"],\"angle\":90},"
+                  "\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":1234}}", "\"message\":\"hey it's Alice\\nfrom work\"", &first) == 202);
     CHECK(first.n > 0 && strstr(first.out, "202 Accepted") && strstr(first.out, "Content-Length: 0\r\n"));
     CHECK(strcmp(strstr(first.out, "\r\n\r\n") + 4, "") == 0);
     CHECK(is(&alice, PUDDLE_STREAM_PENDING_IN) && owes(&alice, PUDDLE_OWED_NONE));
     CHECK(puddle_streams_get(ss, alice.uid, &rec) == 0);
     CHECK(!strcmp(rec.note, "hey it's Alice\nfrom work") && rec.naddr == 1 && !strcmp(rec.addresses[0], "203.0.113.7:8443"));
     CHECK(rec.chain && rec.chain_len > 0 && rec.created_ms == T0);
-    CHECK(rec.profile && !strcmp(rec.profile, "{\"display_name\":\"Alice\",\"blurb\":\"hi\"}")); /* rebuilt from the fields we use */
+    CHECK(rec.profile && !strcmp(rec.profile, "{\"display_name\":\"Alice\",\"blurb\":\"hi\",\"color\":{\"colors\":[\"#aabbcc\",\"#001122\"],\"angle\":90},"
+                                              "\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":1234}}"));
+    /* ...rebuilt from the fields we know: the unknown one is gone, the color is in one spelling */
     puddle_stream_free(&rec);
     {
         unsigned char pub[32];
@@ -248,6 +251,17 @@ int main(void)
             { "[1]", "203.0.113.7:8443", NULL },
             { "{\"display_name\":\"Carol\"}", "not an address", NULL },
             { "{\"display_name\":\"Carol\"}", "", NULL },
+            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"zz\",\"mime\":\"image/png\",\"size\":5}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":5}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/svg+xml\",\"size\":5}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":0}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":99999999999}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"banner\":\"nope\"}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[]}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[\"red\"]}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[\"#000000\",\"#111111\",\"#222222\",\"#333333\",\"#444444\",\"#555555\"]}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[\"#000000\",\"#111111\"],\"angle\":361}}", "203.0.113.7:8443", NULL },
+            { "{\"display_name\":\"Carol\",\"color\":\"#000000\"}", "203.0.113.7:8443", NULL },
             { "{\"display_name\":\"Carol\"}", "0.0.0.0:8443", NULL },                    /* somewhere we would never connect */
             { "{\"display_name\":\"Carol\"}", "169.254.169.254:80", NULL },
             { "{\"display_name\":\"Carol\"}", "[fe80::1]:8443", NULL },

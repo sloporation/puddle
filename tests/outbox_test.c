@@ -58,7 +58,7 @@ static int h_fingerprint(void *u, const char *peer, const char *fp)
 }
 
 #define MAXLOG 128
-static struct { char peer[64]; char kind[32]; int outcome; char reason[200]; int status; } done_log[MAXLOG];
+static struct { size_t reply_len; char peer[64]; char kind[32]; int outcome; char reason[200]; int status; } done_log[MAXLOG];
 static int ndone;
 static puddle_outbox *g_ob;
 static int enqueue_from_done; /* when set, the first delivery queues one more item to the same peer */
@@ -67,11 +67,12 @@ static pthread_mutex_t log_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void h_done(void *u, const puddle_ob_item *it, puddle_ob_outcome o, const puddle_net_reply *r)
 {
-    (void)u; (void)r;
+    (void)u;
     pthread_mutex_lock(&log_mu);
     if (ndone < MAXLOG) {
         snprintf(done_log[ndone].kind, 32, "%s", it->kind);
         snprintf(done_log[ndone].peer, 64, "%s", it->peer);
+        done_log[ndone].reply_len = r && r->body ? r->body_len : 0;
         done_log[ndone].outcome = (int)o;
         snprintf(done_log[ndone].reason, 200, "%s", it->reason);
         done_log[ndone].status = it->status;
@@ -565,6 +566,86 @@ int main(void)
         CHECK(puddle_outbox_dismiss(ob, i0.seq) == 0);
         free(i0.body);
         ts_set(&srv, TS_NORMAL, 200, "{}", 0);
+        ndone = 0;
+    }
+
+    /* ---- fetching: a GET, whose answer reaches the hook ---- */
+    {
+        ts_set(&srv, TS_NORMAL, 200, "{\"answer\":true}", 0);
+        ts_set(&srv2, TS_NORMAL, 200, "{}", 0);
+        puddle_outbox_poll(ob);
+        ndone = 0;
+        const char *hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        char path[200];
+        snprintf(path, sizeof path, "/stream/v1/media?hash=%s", hash);
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", path, 50000, err, sizeof err) == 0);
+        puddle_ob_item g;
+        CHECK(find_kind(ob, "media", &g) && !strcmp(g.method, "GET") && g.body_len == 0 && g.max_reply == 50000 && !strcmp(g.path, path));
+        free(g.body);
+        puddle_outbox_close(ob);
+        ob = open_ob(data);                                                                       /* what it is survives a restart */
+        CHECK(find_kind(ob, "media", &g) && !strcmp(g.method, "GET") && g.max_reply == 50000 && !strcmp(g.path, path));
+        free(g.body);
+        before = srv.requests;
+        puddle_outbox_poll(ob);
+        CHECK(srv.requests == before + 1 && !strcmp(srv.method, "GET") && !strcmp(srv.target, path) && srv.body_len == 0 && ndone == 1 &&
+              done_log[0].outcome == PUDDLE_OB_DELIVERED && done_log[0].reply_len == 15);          /* the answer was handed over */
+        /* a GET is held to its size: an answer over it fails, once */
+        ts_set(&srv, TS_BIG, 200, "", 0);
+        ndone = 0;
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", path, 1000, err, sizeof err) == 0);
+        puddle_outbox_poll(ob);
+        CHECK(ndone == 1 && done_log[0].outcome == PUDDLE_OB_REJECTED && strstr(done_log[0].reason, "large"));
+        ts_set(&srv, TS_NORMAL, 200, "{}", 0);
+        puddle_ob_item *l;
+        size_t n;
+        puddle_outbox_list(ob, &l, &n);
+        for (size_t i = 0; i < n; i++) if (l[i].state == PUDDLE_OB_FAILED) puddle_outbox_dismiss(ob, l[i].seq);
+        puddle_outbox_list_free(l, n);
+        /* ...and may be as large as the caller says */
+        ts_set(&srv, TS_BIG, 200, "", 0);
+        ndone = 0;
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", path, 100000, err, sizeof err) == 0);
+        puddle_outbox_poll(ob);
+        CHECK(ndone == 1 && done_log[0].outcome == PUDDLE_OB_DELIVERED && done_log[0].reply_len == PUDDLE_NET_BODY_MAX + 20000);
+        ts_set(&srv, TS_NORMAL, 200, "{}", 0);
+        /* a file that says it is some other kind of request is not taken up at start */
+        {
+            puddle_outbox_close(ob);
+            char f1[900], good[900];
+            snprintf(good, sizeof good, "%s/state/outbox", data);
+            DIR *d = opendir(good);
+            struct dirent *e;
+            while (d && (e = readdir(d)))
+                if (strstr(e->d_name, ".json")) snprintf(f1, sizeof f1, "%s/%s", good, e->d_name);
+            if (d) closedir(d);
+            (void)f1;
+            char bad[900];
+            snprintf(bad, sizeof bad, "%s/000000090001.json", good);
+            FILE *bf = fopen(bad, "wb");
+            fprintf(bf, "{\"v\":1,\"seq\":90001,\"peer\":\"%s\",\"kind\":\"k\",\"method\":\"DELETE\",\"path\":\"/stream/v1/x\",\"body\":\"{}\",\"created\":1,\"next\":1,"
+                       "\"first_offline\":0,\"attempts\":0,\"state\":\"queued\",\"status\":0,\"reason\":\"\"}", A);
+            fclose(bf);
+            ob = open_ob(data);
+            puddle_ob_item *l2;
+            size_t n2;
+            puddle_outbox_list(ob, &l2, &n2);
+            int seen_bad = 0;
+            for (size_t i = 0; i < n2; i++) seen_bad |= l2[i].seq == 90001;
+            CHECK(!seen_bad);
+            puddle_outbox_list_free(l2, n2);
+        }
+        /* what a GET may and may not be */
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", "/stream/v1/media?hash=a", 0, err, sizeof err) == -1);                       /* a size is needed */
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", "/stream/v1/media?hash=a", 64u * 1024 * 1024 + 1, err, sizeof err) == -1);
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", "/stream/v1/media?hash=a?b", 10, err, sizeof err) == -1);                     /* one query only */
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", "/stream/v1/media?hash=A", 10, err, sizeof err) == -1);                        /* no capitals */
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", "/stream/v1/media?hash=a b", 10, err, sizeof err) == -1);
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", "/api/v1/media?hash=a", 10, err, sizeof err) == -1);
+        CHECK(puddle_outbox_enqueue_get(ob, "nope", "media", "/stream/v1/media?hash=a", 10, err, sizeof err) == -1);
+        CHECK(puddle_outbox_enqueue(ob, A, "k", "/stream/v1/x?y=1", "{}", 2, err, sizeof err) == -1);                                  /* a POST has no query */
+        CHECK(puddle_outbox_enqueue(ob, A, "k", "/stream/v1/x=1", "{}", 2, err, sizeof err) == -1);                                    /* and no `=` in a path */
+        CHECK(puddle_outbox_enqueue_get(ob, A, "media", "/stream/v1/media=hash", 10, err, sizeof err) == -1);
         ndone = 0;
     }
 

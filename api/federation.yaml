@@ -233,7 +233,11 @@ paths:
       tags: [delivery]
       operationId: pushProfile
       summary: The sender changed the profile you see
-      description: Sent whenever the owner edits the profile shown to you, or assigns you a different one.
+      description: |
+        Sent when the owner assigns you a different profile. Needs an open stream (`403 no_stream`). The profile is rebuilt
+        from the fields we understand, each checked (`400` if any is wrong: a colour that is not `#rrggbb`, a picture
+        reference with a malformed hash, a kind of image we do not take, a size over the cap), and the pictures it points
+        at that we do not hold are then fetched from the sender.
       requestBody:
         required: true
         content:
@@ -245,6 +249,7 @@ paths:
                 profile: { $ref: "#/components/schemas/Profile" }
       responses:
         "204": { description: Recorded }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /stream/v1/media:
@@ -253,8 +258,10 @@ paths:
       operationId: getMedia
       summary: An image from the sender's profile
       description: |
-        Only images in the profile the owner shows *you* are served; anything else is `404`, as if it
-        did not exist. The hash is the SHA-256 of the file; check it. Size limits are still to be decided.
+        Only images in the profile the owner shows *you* are served, and only over an open stream; anything else is `404`,
+        as if it did not exist. The hash is the SHA-256 of the file; the fetcher checks it, the size and the kind of
+        image against what the profile said, and keeps nothing that does not match. The size cap is a placeholder
+        (25 MiB), and what a receiver does about oversized or booby-trapped images is still open.
       parameters:
         - name: hash
           in: query

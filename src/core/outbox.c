@@ -85,7 +85,10 @@ static int save_item(const puddle_outbox *ob, const puddle_ob_item *it)
     puddle_jw_num(&w, "seq", (int64_t)it->seq);
     puddle_jw_str(&w, "peer", it->peer);
     puddle_jw_str(&w, "kind", it->kind);
+    puddle_jw_str(&w, "method", it->method);
     puddle_jw_str(&w, "path", it->path);
+    if (it->max_reply)
+        puddle_jw_num(&w, "max_reply", (int64_t)it->max_reply);
     puddle_jw_key(&w, "body");
     puddle_jw_string_n(&w, it->body, it->body_len);
     puddle_jw_num(&w, "created", it->created_ms);
@@ -168,6 +171,15 @@ static int read_item(const char *path, puddle_ob_item *it)
     if (puddle_json_member(text, n, "path", &v) != 0 || puddle_json_string(v, it->path, sizeof it->path) != 0 ||
         strncmp(it->path, "/stream/v1/", 11) != 0)
         goto out;
+    snprintf(it->method, sizeof it->method, "POST");
+    int mrc = puddle_json_member(text, n, "method", &v);
+    if (mrc < 0 || (mrc == 0 && (puddle_json_string(v, it->method, sizeof it->method) != 0 || (strcmp(it->method, "POST") && strcmp(it->method, "GET")))))
+        goto out;
+    mrc = puddle_json_member(text, n, "max_reply", &v);
+    if (mrc < 0 || (mrc == 0 && (puddle_json_int64(v, &i) != 0 || i < 1 || i > 64 * 1024 * 1024)))
+        goto out;
+    if (mrc == 0)
+        it->max_reply = (size_t)i;
     if (puddle_json_member(text, n, "reason", &v) != 0 || puddle_json_string(v, it->reason, sizeof it->reason) != 0)
         goto out;
     if (puddle_json_member(text, n, "state", &v) != 0 || puddle_json_string(v, tmp, sizeof tmp) != 0)
@@ -183,7 +195,7 @@ static int read_item(const char *path, puddle_ob_item *it)
     if (!it->body || puddle_json_string(v, it->body, v.len + 1) != 0)
         goto out;
     it->body_len = strlen(it->body);
-    if (it->body_len > PUDDLE_OUTBOX_BODY_MAX || !puddle_json_valid_object(it->body, it->body_len))
+    if (it->body_len > PUDDLE_OUTBOX_BODY_MAX || (!strcmp(it->method, "POST") && !puddle_json_valid_object(it->body, it->body_len)))
         goto out;
     rc = 0;
 out:
@@ -287,14 +299,22 @@ void puddle_outbox_close(puddle_outbox *ob)
 
 /* ---- queueing ---- */
 
-static int path_ok(const char *p)
+static int path_ok(const char *p, int allow_query)
 {
     size_t n = strlen(p);
-    if (n < 12 || n >= 128 || strncmp(p, "/stream/v1/", 11) != 0)
+    if (n < 12 || n >= 160 || strncmp(p, "/stream/v1/", 11) != 0)
         return 0;
-    for (size_t i = 0; i < n; i++)
-        if (!((p[i] >= 'a' && p[i] <= 'z') || (p[i] >= '0' && p[i] <= '9') || p[i] == '/' || p[i] == '-' || p[i] == '_'))
+    int in_query = 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = p[i];
+        if (c == '?') {
+            if (!allow_query || in_query)
+                return 0;
+            in_query = 1;
+        } else if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || (in_query && (c == '=' || c == '&')))) {
             return 0;
+        }
+    }
     return 1;
 }
 
@@ -309,11 +329,12 @@ static int kind_ok(const char *k)
     return 1;
 }
 
-int puddle_outbox_enqueue(puddle_outbox *ob, const char *peer, const char *kind, const char *path, const char *body,
-                          size_t body_len, char *err, size_t errlen)
+static int enqueue_impl(puddle_outbox *ob, const char *peer, const char *kind, const char *method, const char *path, const char *body,
+                        size_t body_len, size_t max_reply, char *err, size_t errlen)
 {
-    if (!puddle_id_valid(peer) || !kind_ok(kind) || !path_ok(path) || body_len == 0 || body_len > PUDDLE_OUTBOX_BODY_MAX ||
-        !puddle_json_valid_object(body, body_len)) {
+    int is_get = !strcmp(method, "GET");
+    if (!puddle_id_valid(peer) || !kind_ok(kind) || !path_ok(path, is_get) || body_len > PUDDLE_OUTBOX_BODY_MAX ||
+        (is_get ? body_len != 0 : (body_len == 0 || !puddle_json_valid_object(body, body_len)))) {
         seterr(err, errlen, "not something the outbox can send");
         return -1;
     }
@@ -321,13 +342,16 @@ int puddle_outbox_enqueue(puddle_outbox *ob, const char *peer, const char *kind,
     memset(&it, 0, sizeof it);
     memcpy(it.peer, peer, sizeof it.peer);
     snprintf(it.kind, sizeof it.kind, "%s", kind);
+    snprintf(it.method, sizeof it.method, "%s", method);
     snprintf(it.path, sizeof it.path, "%s", path);
+    it.max_reply = max_reply;
     it.body = malloc(body_len + 1);
     if (!it.body) {
         seterr(err, errlen, "out of memory");
         return -1;
     }
-    memcpy(it.body, body, body_len);
+    if (body_len)
+        memcpy(it.body, body, body_len);
     it.body[body_len] = '\0';
     it.body_len = body_len;
     it.state = PUDDLE_OB_QUEUED;
@@ -359,6 +383,22 @@ int puddle_outbox_enqueue(puddle_outbox *ob, const char *peer, const char *kind,
     return rc;
 }
 
+int puddle_outbox_enqueue(puddle_outbox *ob, const char *peer, const char *kind, const char *path, const char *body, size_t body_len,
+                          char *err, size_t errlen)
+{
+    return enqueue_impl(ob, peer, kind, "POST", path, body, body_len, 0, err, errlen);
+}
+
+int puddle_outbox_enqueue_get(puddle_outbox *ob, const char *peer, const char *kind, const char *path, size_t max_reply, char *err,
+                              size_t errlen)
+{
+    if (max_reply == 0 || max_reply > 64u * 1024 * 1024) {
+        seterr(err, errlen, "not something the outbox can send");
+        return -1;
+    }
+    return enqueue_impl(ob, peer, kind, "GET", path, "", 0, max_reply, err, errlen);
+}
+
 /* ---- delivering ---- */
 
 typedef struct {
@@ -386,8 +426,10 @@ static void attempt(puddle_outbox *ob, const puddle_ob_item *it, puddle_net_repl
     puddle_net_opts opts = ob->hooks.net;
     opts.fingerprint_ok = fp_cb;
     opts.user = &fc;
+    if (it->max_reply)
+        opts.max_body = it->max_reply;
     for (int i = 0; i < n; i++) {
-        puddle_net_request(&addrs[i], "POST", it->path, it->body, it->body_len, ob->hooks.identity, it->peer, &opts, reply);
+        puddle_net_request(&addrs[i], it->method, it->path, it->body_len ? it->body : NULL, it->body_len, ob->hooks.identity, it->peer, &opts, reply);
         if (reply->result != PUDDLE_NET_OFFLINE)
             return; /* reached something: that is the answer */
         if (i + 1 < n)
@@ -736,6 +778,27 @@ int puddle_outbox_retry_now(puddle_outbox *ob, const char *peer)
         pthread_cond_broadcast(&ob->wake);
     pthread_mutex_unlock(&ob->mu);
     return n;
+}
+
+int puddle_outbox_requeue(puddle_outbox *ob, uint64_t seq)
+{
+    int rc = 1;
+    int64_t now = now_of(ob);
+    pthread_mutex_lock(&ob->mu);
+    puddle_ob_item *it = find_seq(ob, seq);
+    if (it && it->state == PUDDLE_OB_FAILED) {
+        it->state = PUDDLE_OB_QUEUED;
+        it->attempts = 0;
+        it->status = 0;
+        it->reason[0] = '\0';
+        it->next_ms = now;
+        it->first_offline_ms = 0;
+        save_item(ob, it);
+        pthread_cond_broadcast(&ob->wake);
+        rc = 0;
+    }
+    pthread_mutex_unlock(&ob->mu);
+    return rc;
 }
 
 int puddle_outbox_list(puddle_outbox *ob, puddle_ob_item **out, size_t *count)

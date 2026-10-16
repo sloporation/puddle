@@ -1,7 +1,9 @@
 #include "access.h"
 
 #include "client.h"
+#include "wireprofile.h"
 #include "flow.h"
+#include "profiles_api.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -107,42 +109,6 @@ static int string_member(puddle_span obj, const char *key, char *out, size_t cap
     return puddle_json_member(obj.p, obj.len, key, &v) == 0 && puddle_json_string(v, out, cap) == 0 ? 0 : -1;
 }
 
-/* A profile from a stranger is rebuilt from the few fields we use, never stored as sent. Pictures and colors
- * come with profiles over a stream (roadmap phase 4). */
-static int profile_from(puddle_span prof, char *out, size_t cap)
-{
-    static const struct { const char *key; size_t max; int multiline; int required; } fields[] = {
-        { "display_name", 64, 0, 1 }, { "blurb", 160, 0, 0 }, { "about", 2000, 1, 0 }, { "pronouns", 32, 0, 0 },
-    };
-    puddle_jw w;
-    puddle_jw_init(&w, out, cap);
-    puddle_jw_object(&w);
-    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
-        puddle_span v;
-        int rc = puddle_json_member(prof.p, prof.len, fields[i].key, &v);
-        if (rc < 0 || (rc == 1 && fields[i].required))
-            return -1;
-        if (rc == 1)
-            continue;
-        char *raw = malloc(v.len + 1);
-        if (!raw)
-            return -1;
-        char *clean = malloc(v.len + 4 * 8 + 16);
-        size_t chars;
-        int bad = puddle_json_string(v, raw, v.len + 1) != 0 ||
-                  puddle_clean_text(raw, strlen(raw), fields[i].max, fields[i].multiline, clean, v.len + 4 * 8 + 16, &chars) != 0 ||
-                  (fields[i].required && chars == 0);
-        if (!bad && chars > 0)
-            puddle_jw_str(&w, fields[i].key, clean);
-        free(raw);
-        free(clean);
-        if (bad)
-            return -1;
-    }
-    puddle_jw_end_object(&w);
-    return puddle_jw_finish(&w) ? 0 : -1;
-}
-
 /* ---- a person as one side tells it to the other: id, address, profile, chain ---- */
 
 void puddle_peer_info_free(puddle_peer_info *p)
@@ -165,7 +131,7 @@ int puddle_peer_parse(const char *obj, size_t len, puddle_peer_info *p)
         return -1;
     snprintf(p->address, sizeof p->address, "%s", pa.address);
     if (puddle_json_member(obj, len, "profile", &prof) != 0 || prof.len < 2 || prof.p[0] != '{' ||
-        profile_from(prof, p->profile, sizeof p->profile) != 0)
+        puddle_profile_wire_clean(prof.p, prof.len, p->profile, sizeof p->profile) != 0)
         return -1;
     if (puddle_json_member(obj, len, "chain", &v) != 0 || v.len < 2 || v.p[0] != '"' || v.len > PUDDLE_ACCESS_CHAIN_MAX * 6u)
         return -1;
@@ -340,8 +306,10 @@ int puddle_access_post(const puddle_call *call, puddle_jw *w)
         int urc = puddle_streams_update(ctx->streams, id, apply_request, &a, err, sizeof err);
         if (urc == 0) {
             puddle_log(PUDDLE_LOG_INFO, "stream request from %.12s… %s", id, approve ? "approved" : "waiting for the owner");
-            if (approve)
+            if (approve) {
                 puddle_flow_owe(ctx, id, PUDDLE_OWED_APPROVED);
+                puddle_media_want(ctx, id);
+            }
         }
         else if (urc < 0)
             puddle_log(PUDDLE_LOG_WARN, "stream request from %.12s… could not be recorded", id);

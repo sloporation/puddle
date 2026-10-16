@@ -47,6 +47,19 @@ size_t puddle_http_response(int status, const char *extra_headers, const char *b
     return (size_t)n + blen;
 }
 
+size_t puddle_http_head(int status, const char *content_type, const char *extra_headers, size_t content_length, char *out, size_t cap)
+{
+    int n = snprintf(out, cap,
+                     "HTTP/1.1 %d %s\r\n"
+                     "Content-Type: %s\r\n"
+                     "Content-Length: %zu\r\n"
+                     "Connection: close\r\n"
+                     "%s"
+                     "\r\n",
+                     status, reason(status), content_type, content_length, extra_headers ? extra_headers : "");
+    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
+}
+
 size_t puddle_http_error(int status, char *out, size_t cap)
 {
     char body[96];

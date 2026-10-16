@@ -3,6 +3,7 @@
 #include "hash.h"
 #include "reqsig.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -269,7 +270,8 @@ void puddle_net_request(const puddle_address *addr, const char *method, const ch
     }
 
     /* the answer: headers, then a body of the length it promises, or until the other side closes */
-    size_t cap = PUDDLE_NET_BODY_MAX + 8192, len = 0;
+    size_t max_body = o.max_body ? o.max_body : PUDDLE_NET_BODY_MAX;
+    size_t cap = max_body + 8192, len = 0;
     raw = malloc(cap + 1);
     if (!raw) {
         why(out, PUDDLE_NET_FAILED, "out of memory");
@@ -306,10 +308,20 @@ void puddle_net_request(const puddle_address *addr, const char *method, const ch
                 for (const char *l = strchr(raw, '\n'); l && l < raw + hend; l = strchr(l + 1, '\n'))
                     if (!strncasecmp(l + 1, "content-length:", 15))
                         cl = l + 16;
+                for (const char *l = strchr(raw, '\n'); l && l < raw + hend; l = strchr(l + 1, '\n'))
+                    if (!strncasecmp(l + 1, "content-type:", 13)) {
+                        const char *v = l + 14;
+                        while (*v == ' ' || *v == '\t')
+                            v++;
+                        size_t k = 0;
+                        while (v < raw + hend && *v != ';' && *v != '\r' && *v != '\n' && *v != ' ' && k + 1 < sizeof out->content_type)
+                            out->content_type[k++] = (char)tolower((unsigned char)*v++);
+                        out->content_type[k] = '\0';
+                    }
                 if (cl) {
                     char *endp;
                     long v = strtol(cl, &endp, 10);
-                    if (v < 0 || v > (long)PUDDLE_NET_BODY_MAX) {
+                    if (v < 0 || (unsigned long)v > max_body) {
                         why(out, PUDDLE_NET_FAILED, "the answer from %s was too large", addr->address);
                         goto done;
                     }
@@ -331,7 +343,7 @@ void puddle_net_request(const puddle_address *addr, const char *method, const ch
     size_t bl = len - hend;
     if (want >= 0 && (size_t)want < bl)
         bl = (size_t)want;
-    if (bl > PUDDLE_NET_BODY_MAX) {
+    if (bl > max_body) {
         why(out, PUDDLE_NET_FAILED, "the answer from %s was too large", addr->address);
         goto done;
     }

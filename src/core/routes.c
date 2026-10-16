@@ -7,6 +7,7 @@
 #include "inbound.h"
 #include "keysync.h"
 #include "messages.h"
+#include "profiles_api.h"
 #include "owner_streams.h"
 
 #include "phrase.h"
@@ -65,45 +66,12 @@ static void link_member(puddle_jw *w, const puddle_ctx *ctx, const char *id)
         puddle_jw_null(w);
 }
 
-static void media_member(puddle_jw *w, const char *key, const puddle_media *m)
-{
-    if (!m->hash[0])
-        return;
-    puddle_jw_key(w, key);
-    puddle_jw_object(w);
-    puddle_jw_str(w, "hash", m->hash);
-    puddle_jw_str(w, "mime", m->mime);
-    puddle_jw_num(w, "size", (int64_t)m->size);
-    puddle_jw_end_object(w);
-}
-
 static void profile_json(puddle_jw *w, const puddle_profile *p, int is_default)
 {
     puddle_jw_object(w);
     puddle_jw_str(w, "id", p->id);
     puddle_jw_flag(w, "default", is_default);
-    puddle_jw_str(w, "display_name", p->display_name);
-    if (p->blurb)
-        puddle_jw_str(w, "blurb", p->blurb);
-    if (p->about)
-        puddle_jw_str(w, "about", p->about);
-    if (p->pronouns)
-        puddle_jw_str(w, "pronouns", p->pronouns);
-    if (p->color.kind != PUDDLE_COLOR_NONE) {
-        puddle_jw_key(w, "color");
-        puddle_jw_object(w);
-        puddle_jw_key(w, "colors");
-        puddle_jw_array(w);
-        for (int i = 0; i < p->color.nstops; i++)
-            puddle_jw_string(w, p->color.stops[i]);
-        puddle_jw_end_array(w);
-        if (p->color.kind == PUDDLE_COLOR_GRADIENT)
-            puddle_jw_num(w, "angle", p->color.angle);
-        puddle_jw_end_object(w);
-    }
-    media_member(w, "avatar", &p->avatar);
-    media_member(w, "banner", &p->banner);
-    media_member(w, "background", &p->background);
+    puddle_profile_write_fields(w, p);
     puddle_jw_end_object(w);
 }
 
@@ -260,8 +228,11 @@ const puddle_route *puddle_all_routes(size_t *count)
                puddle_message_routes_count * sizeof *all);
         memcpy(all + puddle_routes_count + puddle_owner_stream_routes_count + puddle_inbound_routes_count + puddle_message_routes_count,
                puddle_sync_routes, puddle_sync_routes_count * sizeof *all);
+        memcpy(all + puddle_routes_count + puddle_owner_stream_routes_count + puddle_inbound_routes_count + puddle_message_routes_count +
+                   puddle_sync_routes_count,
+               puddle_profile_routes, puddle_profile_routes_count * sizeof *all);
         n = puddle_routes_count + puddle_owner_stream_routes_count + puddle_inbound_routes_count + puddle_message_routes_count +
-            puddle_sync_routes_count;
+            puddle_sync_routes_count + puddle_profile_routes_count;
     }
     *count = n;
     return all;

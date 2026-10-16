@@ -1,6 +1,7 @@
 #include "router.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -106,6 +107,27 @@ static size_t not_found(char *out, size_t cap, int *status)
 size_t puddle_router_handle(const puddle_router *r, const puddle_request *req, int owner_ok,
                             const unsigned char *body, size_t body_len, char *out, size_t cap, int *status)
 {
+    /* the plain form: a file answer has to fit in `out` with its headers, as it can for a small image in a test */
+    puddle_big big = { NULL, 0 };
+    size_t n = puddle_router_handle_big(r, req, owner_ok, body, body_len, out, cap, status, &big);
+    if (big.data) {
+        if (n && n + big.len <= cap) {
+            memcpy(out + n, big.data, big.len);
+            n += big.len;
+        } else {
+            *status = 500;
+            n = puddle_http_error(500, out, cap);
+        }
+        free(big.data);
+    }
+    return n;
+}
+
+size_t puddle_router_handle_big(const puddle_router *r, const puddle_request *req, int owner_ok,
+                                const unsigned char *body, size_t body_len, char *out, size_t cap, int *status, puddle_big *big)
+{
+    big->data = NULL;
+    big->len = 0;
     char json[BODY_BUF];
     puddle_jw w;
     puddle_ctx *ctx = r->ctx;
@@ -132,7 +154,9 @@ size_t puddle_router_handle(const puddle_router *r, const puddle_request *req, i
     if (body_len > rt->body_max)
         return not_found(out, cap, status); /* the server never reads this much; belt and braces */
 
-    puddle_call call = { .ctx = ctx, .req = req, .body = body, .body_len = body_len, .auth = rt->auth };
+    puddle_blob blob;
+    memset(&blob, 0, sizeof blob);
+    puddle_call call = { .ctx = ctx, .blob = &blob, .req = req, .body = body, .body_len = body_len, .auth = rt->auth };
     char sender[PUDDLE_USER_ID_LEN + 1];
 
     if (rt->auth == PUDDLE_AUTH_OWNER) {
@@ -174,6 +198,19 @@ size_t puddle_router_handle(const puddle_router *r, const puddle_request *req, i
 run:
     puddle_jw_init(&w, json, sizeof json);
     int st = rt->fn(&call, &w);
+    if (blob.data) { /* a file: headers here, the bytes sent after them */
+        *status = st;
+        size_t hl = puddle_http_head(st, blob.mime[0] ? blob.mime : "application/octet-stream",
+                                     "Cache-Control: private, max-age=31536000, immutable\r\nX-Content-Type-Options: nosniff\r\n", blob.len, out, cap);
+        if (!hl) {
+            free(blob.data);
+            *status = 500;
+            return puddle_http_error(500, out, cap);
+        }
+        big->data = blob.data;
+        big->len = blob.len;
+        return hl;
+    }
     size_t n = 0;
     if (w.len == 0 && !w.err) {
         json[0] = '\0'; /* empty answer */

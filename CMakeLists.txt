@@ -51,12 +51,14 @@ add_library(puddle_core STATIC
   src/core/json.c
   src/core/keysync.c
   src/core/log.c
+  src/core/media.c
   src/core/message.c
   src/core/messages.c
   src/core/phrase.c
   src/core/outbox.c
   src/core/owner_streams.c
   src/core/profile.c
+  src/core/profiles_api.c
   src/core/ratelimit.c
   src/core/link.c
   src/core/router.c
@@ -67,6 +69,7 @@ add_library(puddle_core STATIC
   src/core/store.c
   src/core/streams.c
   src/core/tls.c
+  src/core/wireprofile.c
   src/core/yamltree.c)
 target_include_directories(puddle_core PUBLIC src/core)
 # Only yamltree.c sees libyaml's headers: a shared include dir like /opt/homebrew/include would
@@ -82,7 +85,7 @@ install(TARGETS puddled RUNTIME DESTINATION bin)
 # --- Puddle: the desktop app (Qt). Embeds the server, so nothing else is needed.
 option(PUDDLE_BUILD_GUI "Build the Qt desktop app" ON)
 if(PUDDLE_BUILD_GUI)
-  find_package(Qt6 COMPONENTS Quick QuickControls2 QUIET)
+  find_package(Qt6 COMPONENTS Quick QuickControls2 Network Test QUIET)
   if(Qt6_FOUND)
     qt_standard_project_setup()
     qt_policy(SET QTP0001 NEW)
@@ -90,13 +93,20 @@ if(PUDDLE_BUILD_GUI)
     qt_add_executable(puddle WIN32 MACOSX_BUNDLE
       src/gui/main.cpp
       src/gui/backend.cpp
-      src/gui/backend.h)
+      src/gui/backend.h
+      src/gui/chats.cpp
+      src/gui/chats.h
+      src/gui/apiclient.cpp
+      src/gui/apiclient.h
+      src/gui/jsonlistmodel.cpp
+      src/gui/jsonlistmodel.h)
     qt_add_qml_module(puddle
       URI Puddle
       VERSION 1.0
-      QML_FILES src/gui/Main.qml src/gui/Setup.qml
+      QML_FILES src/gui/Main.qml src/gui/Setup.qml src/gui/Shell.qml src/gui/Avatar.qml src/gui/PersonRow.qml
+        src/gui/ChatPage.qml src/gui/FriendsPage.qml src/gui/AddFriendPopup.qml src/gui/LogPage.qml
       RESOURCES src/gui/puddle.png)
-    target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2)
+    target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network)
     if(APPLE)
       enable_language(OBJCXX)
       target_sources(puddle PRIVATE src/gui/dock_mac.mm)
@@ -110,14 +120,37 @@ if(PUDDLE_BUILD_GUI)
     install(TARGETS puddle BUNDLE DESTINATION . RUNTIME DESTINATION bin)
 
     # The first-run state machine, against the real core, with no window (needs the offscreen platform).
-    add_executable(backend_test tests/backend_test.cpp src/gui/backend.cpp src/gui/backend.h)
+    add_executable(backend_test tests/backend_test.cpp src/gui/backend.cpp src/gui/backend.h src/gui/chats.cpp src/gui/chats.h
+      src/gui/apiclient.cpp src/gui/apiclient.h src/gui/jsonlistmodel.cpp src/gui/jsonlistmodel.h)
     target_include_directories(backend_test PRIVATE src/gui)
-    target_link_libraries(backend_test PRIVATE puddle_core Qt6::Gui)
+    target_link_libraries(backend_test PRIVATE puddle_core Qt6::Gui Qt6::Network)
     if(APPLE)
       target_sources(backend_test PRIVATE src/gui/dock_mac.mm)
       target_link_libraries(backend_test PRIVATE "-framework AppKit")
     endif()
     add_test(NAME backend COMMAND backend_test)
+
+    # The app's view of a Puddle (owner API over pinned TLS), against two real Puddles talking to each other.
+    add_executable(chats_test tests/chats_test.cpp src/gui/chats.cpp src/gui/chats.h src/gui/apiclient.cpp src/gui/apiclient.h
+      src/gui/jsonlistmodel.cpp src/gui/jsonlistmodel.h)
+    set_target_properties(chats_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(chats_test PRIVATE puddle_core Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
+    add_test(NAME chats COMMAND chats_test)
+
+    # The window, driven with real mouse and key events against two real Puddles.
+    add_executable(ui_test tests/ui_test.cpp src/gui/backend.cpp src/gui/backend.h src/gui/chats.cpp src/gui/chats.h
+      src/gui/apiclient.cpp src/gui/apiclient.h src/gui/jsonlistmodel.cpp src/gui/jsonlistmodel.h)
+    set_target_properties(ui_test PROPERTIES AUTOMOC ON)
+    target_include_directories(ui_test PRIVATE src/gui)
+    target_compile_definitions(ui_test PRIVATE PUDDLE_GUI_DIR="${CMAKE_SOURCE_DIR}/src/gui")
+    target_link_libraries(ui_test PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Test)
+    if(APPLE)
+      target_sources(ui_test PRIVATE src/gui/dock_mac.mm)
+      target_link_libraries(ui_test PRIVATE "-framework AppKit")
+    endif()
+    add_test(NAME ui COMMAND ui_test)
+    set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 180)
+    set_tests_properties(chats PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
     set_tests_properties(backend PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   else()
     message(WARNING "Qt6 Quick not found; skipping the Puddle app (set -DPUDDLE_BUILD_GUI=OFF to silence)")
@@ -126,7 +159,7 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link streams ratelimit access owner_streams client outbox inbound flow message messages keysync e2e)
+foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link streams ratelimit access owner_streams client outbox inbound flow message messages keysync wireprofile profiles e2e)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)

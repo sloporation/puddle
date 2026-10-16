@@ -136,6 +136,13 @@ typedef struct {
 /* Blocked ids with the time they were blocked, oldest first. Writes up to `max`; returns how many there are. */
 size_t puddle_streams_blocked(puddle_streams *s, puddle_block *out, size_t max);
 
+/* ---- what has been read ---- */
+
+/* When the owner last read the chat with `id`, in our own clock's milliseconds (0 = never). Messages that arrived after it are unread. */
+int64_t puddle_streams_read_marker(puddle_streams *s, const char *id);
+/* Record that the chat with `id` has been read up to `ts_ms`. It only ever moves forward. 0 or -1. */
+int puddle_streams_set_read_marker(puddle_streams *s, const char *id, int64_t ts_ms, char *err, size_t errlen);
+
 /* ---- who may ask ---- */
 
 typedef enum {

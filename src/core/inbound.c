@@ -3,6 +3,7 @@
 #include "access.h"
 #include "flow.h"
 #include "log.h"
+#include "profiles_api.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,8 +69,11 @@ static int result_post(const puddle_call *c, puddle_jw *w)
         answer a = { &p, approved, puddle_call_now_ms(c) };
         char err[300];
         int rc = puddle_streams_update(c->ctx->streams, p.id, apply_answer, &a, err, sizeof err);
-        if (rc == 0)
+        if (rc == 0) {
             puddle_log(PUDDLE_LOG_INFO, "%.12s… %s our request", p.id, approved ? "accepted" : "declined");
+            if (approved)
+                puddle_media_want(c->ctx, p.id);
+        }
         else if (rc < 0)
             puddle_log(PUDDLE_LOG_WARN, "an answer from %.12s… could not be recorded", p.id);
     }

@@ -354,6 +354,12 @@ static size_t body_limit_cb(void *user, const puddle_request *req, int owner_ok)
     return puddle_router_body_limit(&((puddle_server *)user)->router, req, owner_ok);
 }
 
+static size_t route_big_cb(void *user, const puddle_request *req, int owner_ok, const unsigned char *body, size_t body_len, char *out,
+                           size_t cap, int *status, puddle_big *big)
+{
+    return puddle_router_handle_big(&((puddle_server *)user)->router, req, owner_ok, body, body_len, out, cap, status, big);
+}
+
 static size_t route_cb(void *user, const puddle_request *req, int owner_ok, const unsigned char *body,
                        size_t body_len, char *out, size_t cap, int *status)
 {
@@ -362,7 +368,7 @@ static size_t route_cb(void *user, const puddle_request *req, int owner_ok, cons
 
 static void handle_request(puddle_server *srv, SSL *ssl, const char *peer)
 {
-    puddle_http_handler h = { .owner_check = owner_check_cb, .body_limit = body_limit_cb, .route = route_cb,
+    puddle_http_handler h = { .owner_check = owner_check_cb, .body_limit = body_limit_cb, .route = route_cb, .route_big = route_big_cb,
                               .user = srv, .deadline_seconds = REQUEST_DEADLINE_SEC };
     puddle_io io = { .read = ssl_read_cb, .write = ssl_write_cb, .io = ssl };
     puddle_serve_info info;

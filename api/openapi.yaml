@@ -433,8 +433,9 @@ paths:
       operationId: setStreamProfile
       summary: Choose which of your profiles a stream sees
       description: |
-        Takes effect immediately and is pushed to that peer. `profile: null` goes back to your
-        default profile. Anyone you have not assigned a profile sees the default.
+        Takes effect immediately and is pushed to that peer, who fetches any pictures it does not hold. `profile: null`
+        goes back to your default profile. Anyone you have not assigned a profile sees the default. The choice is kept
+        for a stream that is not open yet, and used when it is. `400 unknown_profile` for an id you do not have.
       requestBody:
         required: true
         content:
@@ -503,20 +504,6 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
 
   # --- conversations -------------------------------------------------------------
-  /api/v1/conversations:
-    get:
-      tags: [conversations]
-      operationId: listConversations
-      summary: All DMs and groups, most recently active first
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: "#/components/schemas/Conversation" }
-
   # --- direct messages ------------------------------------------------------------
   /api/v1/dm/send:
     post:
@@ -547,6 +534,11 @@ paths:
       tags: [dm]
       operationId: editDm
       summary: Edit one of your direct messages
+      description: |
+        Only your own messages (`404 not_found` for someone else's, or one that is not there), and only while you have an
+        open stream (`403 no_stream`). The new text is a message body (`400 bad_body`). A message already taken back cannot
+        be edited (`409 deleted`). The edit is its own signed event, queued for delivery; the message keeps its place and
+        its time, and the last edit is the text. Answers with the message as it now reads.
       requestBody:
         required: true
         content:
@@ -566,6 +558,10 @@ paths:
       tags: [dm]
       operationId: deleteDm
       summary: Delete one of your direct messages (a request to hide it)
+      description: |
+        Takes back one of your own messages: it stays in the chat as a gap (`deleted`, no body), in its place, and the other
+        side is asked to hide it too, which an honest Puddle does. It is a request: a Puddle that copied the text can
+        keep it. Same rules as an edit for who and when; deleting one that is already gone is `204` and sends nothing.
       requestBody:
         required: true
         content:
@@ -573,6 +569,91 @@ paths:
             schema: { $ref: "#/components/schemas/MessageRef" }
       responses:
         "204": { description: Delete stored and queued for delivery }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/conversations:
+    get:
+      tags: [dm]
+      operationId: listConversations
+      summary: The chats that have messages, most recent first
+      description: |
+        One entry per person we have a chat with, newest activity first, with the last message and how many
+        incoming messages have arrived since the chat was last marked read (counted up to 99). Includes people whose
+        stream is closed, since history stays. A deleted last message has no `preview`. `next` is the `offset` for the
+        following page, `null` at the end.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversations, next]
+                properties:
+                  conversations:
+                    type: array
+                    items:
+                      type: object
+                      required: [user, stream, last, unread]
+                      properties:
+                        user: { $ref: "#/components/schemas/UserId" }
+                        stream: { type: string, enum: [pending_out, pending_in, active, closed] }
+                        last:
+                          type: object
+                          required: [id, sender, ts, outgoing]
+                          properties:
+                            id: { type: string }
+                            sender: { $ref: "#/components/schemas/UserId" }
+                            ts: { type: integer, format: int64 }
+                            outgoing: { type: boolean }
+                            deleted: { type: boolean }
+                            preview: { type: string, description: "The first 120 characters, on one line." }
+                        unread: { type: integer, minimum: 0, maximum: 99 }
+                  next: { type: [integer, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/dm/read:
+    post:
+      tags: [dm]
+      operationId: markDmRead
+      summary: Mark the chat with this user as read, up to now
+      description: The marker only moves forward and is kept by the Puddle, so every app of the owner sees the same unread counts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: { $ref: "#/components/schemas/UserId" }
+      responses:
+        "204": { description: Marked }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/dm/retry:
+    post:
+      tags: [dm]
+      operationId: retryDm
+      summary: Try again to deliver what is stuck for this user
+      description: |
+        Messages and edits that failed are queued again, and the ones waiting for a retry are tried now.
+        `404` when there is nothing to retry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: { $ref: "#/components/schemas/UserId" }
+      responses:
+        "204": { description: Trying again }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/dm/messages:
@@ -1108,7 +1189,7 @@ components:
 
     Message:
       type: object
-      required: [id, chat, sender, ts, body, outgoing]
+      required: [id, chat, sender, ts, outgoing]
       properties:
         id: { $ref: "#/components/schemas/EventId" }
         chat:
@@ -1119,23 +1200,39 @@ components:
           type: integer
           format: int64
           description: UTC ms, the sender's clock
-        body: { type: string, maxLength: 4000 }
+        body: { type: string, maxLength: 4000, description: "The current text; absent once the message has been taken back" }
         outgoing: { type: boolean, description: Sent by you }
         received_at: { type: integer, format: int64, description: UTC ms, when this Puddle stored it }
-        edited: { type: boolean }
-        deleted: { type: boolean }
+        edited: { type: boolean, description: "Present, true, when it has been edited" }
+        edited_at: { type: integer, format: int64, description: "UTC ms, the time of the last edit" }
+        deleted: { type: boolean, description: "Present, true, when its author has taken it back" }
         reply_to: { $ref: "#/components/schemas/EventId" }
+        delivery:
+          type: object
+          description: |
+            Only on your own messages that have not been delivered yet; absent once they have (or when nothing is known).
+            `queued` is waiting for a first attempt, `retrying` means the other Puddle could not be reached (it will be tried again
+            at `next_at`), `failed` will not be retried by itself (see `reason`; `dm/retry` tries again), `held` is waiting for you to
+            trust their changed certificate.
+          required: [state, attempts]
+          properties:
+            state: { type: string, enum: [queued, retrying, failed, held] }
+            reason: { type: string }
+            next_at: { type: integer, format: int64, description: "UTC ms, with `retrying`" }
+            attempts: { type: integer }
 
     MessageRef:
       type: object
-      required: [message]
+      required: [user, message]
       properties:
+        user: { $ref: "#/components/schemas/UserId", description: "The other person in the conversation" }
         message: { $ref: "#/components/schemas/EventId" }
 
     MessageEdit:
       type: object
-      required: [message, body]
+      required: [user, message, body]
       properties:
+        user: { $ref: "#/components/schemas/UserId", description: "The other person in the conversation" }
         message: { $ref: "#/components/schemas/EventId" }
         body: { type: string, minLength: 1, maxLength: 4000 }
 

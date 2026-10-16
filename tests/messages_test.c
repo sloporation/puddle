@@ -28,6 +28,12 @@ static puddle_router R;
 static puddle_streams *ss;
 static puddle_store *store;
 static puddle_outbox *ob;
+static int g_addr_mode; /* 0: we know no address for anyone; 1: a closed port on this machine (so: offline) */
+static int addr_cb(void *u, const char *peer, puddle_address *out, int max)
+{
+    (void)u; (void)peer;
+    return g_addr_mode && max > 0 && puddle_address_parse("127.0.0.1:1", &out[0]) == 0 ? 1 : 0;
+}
 
 static void make(person *p, const char *name)
 {
@@ -99,6 +105,20 @@ static reply *peer_post(person *from, const char *body)
 /* an envelope: {"id":..,"event":"<escaped>","sig":..} */
 typedef struct { char id[65]; char *event; char sig[PUDDLE_SIG_TEXT_MAX]; } env;
 
+/* just the one conversation's object out of a list, so a check cannot match its neighbour */
+static const char *conv_of(const reply *r, const char *uid)
+{
+    static char one[1200];
+    const char *at = strstr(body_of(r), uid);
+    if (!at) return NULL;
+    const char *end = strstr(at, "{\"user\"");
+    size_t n = end ? (size_t)(end - at) : strlen(at);
+    if (n >= sizeof one) n = sizeof one - 1;
+    memcpy(one, at, n);
+    one[n] = '\0';
+    return one;
+}
+
 static char chat_with_me(person *p, char *out) { puddle_dm_chat_id(me.uid, p->uid, out); return 0; }
 
 static env make_env(person *signer, person *claimed_sender, const char *chat, int64_t ts, const char *body, const char *ref)
@@ -114,6 +134,16 @@ static env make_env(person *signer, person *claimed_sender, const char *chat, in
 }
 
 /* {"chat":"<chat>","events":[...]} */
+/* an envelope for an event whose bytes are already made */
+static env env_of(person *signer, const char *event)
+{
+    env e;
+    e.event = strdup(event);
+    puddle_sha256_hex(event, strlen(event), e.id);
+    puddle_event_sign(signer->id, event, strlen(event), e.sig);
+    return e;
+}
+
 static char *delivery(const char *chat, env *es, size_t n)
 {
     size_t cap = 1 << 20;
@@ -221,7 +251,7 @@ int main(void)
         n++;
         es[n++] = make_env(&carol, &alice, chat_a, T0 + 25, "forged", NULL);                    /* 5 signed by someone else */
         es[n++] = make_env(&alice, &alice, chat_a, T0 + 26, "x", NULL);                         /* 6 good (placeholder replaced below) */
-        { free(es[n - 1].event); es[n - 1].event = strdup("{\"type\":\"edit\",\"chat\":\"x\",\"sender\":\"y\",\"ts\":1,\"body\":\"b\"}");
+        { free(es[n - 1].event); es[n - 1].event = strdup("{\"type\":\"chat.create\",\"chat\":\"x\",\"sender\":\"y\",\"ts\":1,\"body\":\"b\"}");
           puddle_sha256_hex(es[n - 1].event, strlen(es[n - 1].event), es[n - 1].id);
           puddle_event_sign(alice.id, es[n - 1].event, strlen(es[n - 1].event), es[n - 1].sig); }  /* 6 a type we do not take */
         es[n++] = make_env(&alice, &alice, chat_a, 0, "no time", NULL);                         /* 7 bad time */
@@ -568,6 +598,198 @@ int main(void)
         CHECK(got == 9 && rounds >= 2);
     }
 
+    /* ---- editing and taking back ---- */
+    {
+        /* a fresh pair of people so the earlier chats stay as they were */
+        person dina;
+        make(&dina, "dina");
+        set_peer(&dina, PUDDLE_STREAM_ACTIVE);
+        char chat_d[64], t[600], bodyj[900];
+        chat_with_me(&dina, chat_d);
+        puddle_ob_item *l;
+        size_t n;
+
+        /* messages in both directions */
+        reply *rr;
+        char mine[3][65];
+        for (int i = 0; i < 3; i++) {
+            clock_now += 1000;
+            snprintf(bodyj, sizeof bodyj, "{\"to\":\"%s\",\"body\":\"mine %d\"}", dina.uid, i);
+            rr = owner("POST", "/api/v1/dm/send", bodyj);
+            CHECK(rr->status == 201);
+            const char *p = strstr(body_of(rr), "\"id\":\"");
+            snprintf(mine[i], 65, "%.64s", p + 6);
+        }
+        env theirs = make_env(&dina, &dina, chat_d, T0 + 900000, "theirs 0", NULL);
+        char *dl = delivery(chat_d, &theirs, 1);
+        clock_now += 1000;
+        CHECK(peer_post(&dina, dl)->status == 200);
+        free(dl);
+
+        /* edit */
+        clock_now += 1000;
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"mine 1, corrected\"}", dina.uid, mine[1]);
+        CHECK(call("POST", "/api/v1/dm/edit", bodyj, NULL, 0)->status == 404);                        /* not the owner */
+        rr = owner("POST", "/api/v1/dm/edit", bodyj);
+        CHECK(rr->status == 200 && strstr(body_of(rr), "\"body\":\"mine 1, corrected\"") && strstr(body_of(rr), "\"edited\":true") &&
+              strstr(body_of(rr), "\"edited_at\":") && strstr(body_of(rr), mine[1]) && strstr(body_of(rr), "\"outgoing\":true"));
+        puddle_outbox_list(ob, &l, &n);
+        {
+            int found = 0;
+            for (size_t i = 0; i < n; i++)
+                if (!strcmp(l[i].peer, dina.uid) && strstr(l[i].body, mine[1]) && strstr(l[i].body, "\\\"type\\\":\\\"edit\\\"")) found++;
+            CHECK(found == 1);                                                                        /* the edit is queued as an event of its own */
+        }
+        puddle_outbox_list_free(l, n);
+        snprintf(t, sizeof t, "/api/v1/dm/messages?user=%s", dina.uid);
+        rr = owner("GET", t, NULL);
+        CHECK(rr->status == 200 && count_in(body_of(rr), "\"outgoing\"") == 4 && strstr(body_of(rr), "mine 1, corrected") && !strstr(body_of(rr), "\"mine 1\""));
+        CHECK(count_in(body_of(rr), "\"edited\":true") == 1);                                         /* edits are not messages: four, not five */
+        clock_now += 1000;
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"mine 1, corrected twice\"}", dina.uid, mine[1]);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 200);
+        rr = owner("GET", t, NULL);
+        CHECK(strstr(body_of(rr), "corrected twice") && !strstr(body_of(rr), "mine 1, corrected\"") && count_in(body_of(rr), "\"outgoing\"") == 4);   /* the last one stands */
+
+        /* what cannot be edited, and why */
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"x\"}", dina.uid, theirs.id);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 404);                                /* hers, not ours */
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"x\"}", dina.uid, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 404);
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"\"}", dina.uid, mine[0]);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 400);
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"bell\\u0007\"}", dina.uid, mine[0]);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 400);
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\"}", dina.uid, mine[0]);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 400);                                /* no text */
+        snprintf(bodyj, sizeof bodyj, "{\"message\":\"%s\",\"body\":\"x\"}", mine[0]);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 400);                                /* no user */
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"short\",\"body\":\"x\"}", dina.uid);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 400);
+        CHECK(owner("POST", "/api/v1/dm/edit", "nonsense")->status == 400);
+
+        /* taking back */
+        clock_now += 1000;
+        size_t before = stored(chat_d);
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\"}", dina.uid, mine[0]);
+        rr = owner("POST", "/api/v1/dm/delete", bodyj);
+        CHECK(rr->status == 204 && !strstr(rr->out, "Content-Length") && stored(chat_d) == before + 1);
+        rr = owner("GET", t, NULL);
+        CHECK(count_in(body_of(rr), "\"outgoing\"") == 4 && count_in(body_of(rr), "\"deleted\":true") == 1 && !strstr(body_of(rr), "\"mine 0\""));
+        CHECK(count_in(body_of(rr), "\"body\"") == 3);                                                 /* the gap has no body at all, not an empty one */
+        CHECK(strstr(body_of(rr), mine[0]));                                                          /* still there, as a gap, in its place */
+        CHECK(owner("POST", "/api/v1/dm/delete", bodyj)->status == 204 && stored(chat_d) == before + 1);   /* again: nothing more is sent */
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"too late\"}", dina.uid, mine[0]);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 409 && strstr(body_of(owner("POST", "/api/v1/dm/edit", bodyj)), "deleted"));
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\"}", dina.uid, theirs.id);
+        CHECK(owner("POST", "/api/v1/dm/delete", bodyj)->status == 404);                              /* hers */
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\"}", dina.uid, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        CHECK(owner("POST", "/api/v1/dm/delete", bodyj)->status == 404);
+        CHECK(owner("POST", "/api/v1/dm/delete", "{}")->status == 400);
+
+        /* paging counts messages, however many edits sit between them */
+        for (int i = 0; i < 6; i++) {
+            clock_now += 1000;
+            snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"mine 2, edit %d\"}", dina.uid, mine[2], i);
+            CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 200);
+        }
+        snprintf(t, sizeof t, "/api/v1/dm/messages?user=%s&limit=1&offset=3", dina.uid);
+        rr = owner("GET", t, NULL);
+        CHECK(count_in(body_of(rr), "\"outgoing\"") == 1 && strstr(body_of(rr), mine[0]) && strstr(body_of(rr), "\"next\":null"));   /* the oldest of four */
+        snprintf(t, sizeof t, "/api/v1/dm/messages?user=%s&limit=2&offset=1", dina.uid);
+        rr = owner("GET", t, NULL);
+        CHECK(count_in(body_of(rr), "\"outgoing\"") == 2 && strstr(body_of(rr), "mine 1, corrected twice") && strstr(body_of(rr), "mine 2, edit 5") &&
+              strstr(body_of(rr), "\"next\":3"));                                                       /* (hers is the newest; then mine 2 and mine 1) */
+
+        /* what has to be said to Dina: no stream, no editing */
+        set_peer(&dina, PUDDLE_STREAM_CLOSED);
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"x\"}", dina.uid, mine[2]);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 403);
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\"}", dina.uid, mine[2]);
+        CHECK(owner("POST", "/api/v1/dm/delete", bodyj)->status == 403);
+        set_peer(&dina, PUDDLE_STREAM_ACTIVE);
+
+        /* far back: the edits of a message that is many events behind */
+        for (int i = 0; i < 70; i++) {
+            clock_now += 10;
+            snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"mine 2, many %d\"}", dina.uid, mine[2], i);
+            CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 200);
+        }
+        env late = make_env(&dina, &dina, chat_d, T0 + 900001, "theirs 1", NULL);
+        dl = delivery(chat_d, &late, 1);
+        clock_now += 1000;
+        CHECK(peer_post(&dina, dl)->status == 200);
+        free(dl);
+        snprintf(t, sizeof t, "/api/v1/dm/messages?user=%s&limit=1&offset=3", dina.uid);
+        rr = owner("GET", t, NULL);
+        CHECK(strstr(body_of(rr), "mine 1, corrected twice") && count_in(body_of(rr), "\"outgoing\"") == 1);   /* behind seventy events */
+        snprintf(t, sizeof t, "/api/v1/dm/messages?user=%s&limit=1&offset=2", dina.uid);
+        rr = owner("GET", t, NULL);
+        CHECK(strstr(body_of(rr), "mine 2, many 69"));                                                /* 70 edits later, the last of them */
+        /* an edit of something even further back, and a clock that has gone backwards */
+        for (int i = 0; i < 60; i++) {
+            clock_now += 10;
+            snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"mine 2, more %d\"}", dina.uid, mine[2], i);
+            CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 200);
+        }
+        clock_now += 1000;
+        snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"mine 1, found far back\"}", dina.uid, mine[1]);
+        CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 200);                                /* more than 128 events behind */
+        {
+            clock_now += 5000000;                                                                      /* a message stamped well ahead... */
+            snprintf(bodyj, sizeof bodyj, "{\"to\":\"%s\",\"body\":\"stamped ahead\"}", dina.uid);
+            rr = owner("POST", "/api/v1/dm/send", bodyj);
+            char ahead[65];
+            const char *ip = strstr(body_of(rr), "\"id\":\"");
+            snprintf(ahead, sizeof ahead, "%.64s", ip + 6);
+            clock_now -= 4000000;                                                                      /* ...and then the clock is set back */
+            snprintf(bodyj, sizeof bodyj, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"fixed anyway\"}", dina.uid, ahead);
+            CHECK(owner("POST", "/api/v1/dm/edit", bodyj)->status == 200);
+            snprintf(t, sizeof t, "/api/v1/dm/messages?user=%s&limit=200", dina.uid);
+            rr = owner("GET", t, NULL);
+            CHECK(strstr(body_of(rr), "fixed anyway") && !strstr(body_of(rr), "stamped ahead"));        /* the edit counted: it was stamped after what it edits */
+            clock_now += 1000000;
+        }
+        free(theirs.event); free(late.event);
+
+        /* ---- and from the other side ---- */
+        {
+            char ev[PUDDLE_EVENT_MAX_BYTES];
+            env es[4];
+            /* Dina edits and takes back her own, and also tries it on one of ours */
+            size_t el = puddle_edit_build(chat_d, dina.uid, T0 + 900100, theirs.id, "theirs 0, edited", 16, ev, sizeof ev);
+            es[0] = env_of(&dina, ev);
+            el = puddle_edit_build(chat_d, dina.uid, T0 + 900101, mine[2], "she rewrites ours", 17, ev, sizeof ev);
+            es[1] = env_of(&dina, ev);
+            el = puddle_redact_build(chat_d, dina.uid, T0 + 900102, mine[2], ev, sizeof ev);
+            es[2] = env_of(&dina, ev);
+            el = puddle_redact_build(chat_d, dina.uid, T0 + 900103, late.id, ev, sizeof ev);
+            es[3] = env_of(&dina, ev);
+            (void)el;
+            dl = delivery(chat_d, es, 4);
+            clock_now += 1000;
+            rr = peer_post(&dina, dl);
+            CHECK(rr->status == 200 && count_in(body_of(rr), "\"reason\"") == 0);
+            free(dl);
+            for (int i = 0; i < 4; i++) free(es[i].event);
+            snprintf(t, sizeof t, "/api/v1/dm/messages?user=%s&limit=200", dina.uid);
+            rr = owner("GET", t, NULL);
+            CHECK(strstr(body_of(rr), "theirs 0, edited") && count_in(body_of(rr), "\"outgoing\":false") == 2);           /* her edit of her own message shows */
+            CHECK(!strstr(body_of(rr), "she rewrites ours") && strstr(body_of(rr), "mine 2, more 59"));                      /* her edit of ours does not */
+            CHECK(count_in(body_of(rr), "\"deleted\":true") == 2);                                                        /* ours (mine 0) and her own (theirs 1) */
+            /* she cannot, though, say it as someone else */
+            el = puddle_edit_build(chat_d, me.uid, T0 + 900200, mine[2], "as the owner", 12, ev, sizeof ev);
+            env bad = env_of(&dina, ev);
+            dl = delivery(chat_d, &bad, 1);
+            clock_now += 1000;
+            rr = peer_post(&dina, dl);
+            CHECK(strstr(body_of(rr), "wrong_sender"));
+            free(dl);
+            free(bad.event);
+        }
+        puddle_identity_close(dina.id);
+    }
+
     /* ---- a message that could not be queued says so ---- */
     {
         puddle_outbox_close(ob);
@@ -584,11 +806,159 @@ int main(void)
         CHECK(r->status == 500 && strstr(body_of(r), "not_queued"));
     }
 
+    ctx.outbox = ob;
+
+    /* ---- conversations and what has been read ---- */
+    {
+        person dave;
+        make(&dave, "dave");
+        clock_now += 100000000; /* well after everything above, so this is the newest conversation */
+        char data2[720];
+        snprintf(data2, sizeof data2, "%s/data2", root);
+        puddle_outbox_hooks hooks2 = { .identity = me.id, .now_ms = now_cb, .addresses = addr_cb };
+        puddle_outbox *ob2 = puddle_outbox_open(data2, &hooks2, err, sizeof err); /* the first one was filled by the tests above */
+        CHECK(ob2 != NULL);
+        ctx.outbox = ob2;
+        set_peer(&dave, PUDDLE_STREAM_ACTIVE);
+        char chat_d[64];
+        chat_with_me(&dave, chat_d);
+        CHECK(puddle_streams_read_marker(ss, dave.uid) == 0);
+        clock_now += 100000;
+        env d1 = make_env(&dave, &dave, chat_d, clock_now, "first\nline", NULL);
+        char *db = delivery(chat_d, &d1, 1);
+        CHECK(peer_post(&dave, db)->status == 200);
+        free(db);
+        clock_now += 1000;
+        env d2 = make_env(&dave, &dave, chat_d, clock_now, "second", NULL);
+        db = delivery(chat_d, &d2, 1);
+        CHECK(peer_post(&dave, db)->status == 200);
+        free(db);
+
+        r = owner("GET", "/api/v1/conversations", NULL);
+        b = (char *)body_of(r);
+        CHECK(r->status == 200 && strstr(b, "\"conversations\":[{\"user\":\"") );
+        const char *mine = conv_of(r, dave.uid);
+        CHECK(mine && strstr(mine, "\"preview\":\"second\"") && strstr(mine, "\"unread\":2") && strstr(mine, "\"outgoing\":false"));
+        CHECK(strstr(b, dave.uid) == strstr(b, "\"user\":\"") + 8); /* the newest conversation comes first */
+        CHECK(owner("GET", "/api/v1/conversations?limit=0", NULL)->status == 400);
+        CHECK(owner("GET", "/api/v1/conversations?offset=x", NULL)->status == 400);
+        CHECK(call("GET", "/api/v1/conversations", NULL, NULL, 0)->status == 404);
+
+        char rb[200];
+        snprintf(rb, sizeof rb, "{\"user\":\"%s\"}", dave.uid);
+        CHECK(owner("POST", "/api/v1/dm/read", rb)->status == 204);
+        CHECK(puddle_streams_read_marker(ss, dave.uid) == clock_now);
+        r = owner("GET", "/api/v1/conversations", NULL);
+        mine = conv_of(r, dave.uid);
+        CHECK(mine && strstr(mine, "\"unread\":0"));
+        CHECK(owner("POST", "/api/v1/dm/read", "{\"user\":\"nope\"}")->status == 400);
+        CHECK(owner("POST", "/api/v1/dm/read", "{}")->status == 400);
+        CHECK(call("POST", "/api/v1/dm/read", rb, NULL, 0)->status == 404);
+
+        /* a later message is unread again; the marker never goes backwards */
+        clock_now += 1000;
+        env d3 = make_env(&dave, &dave, chat_d, clock_now, "third", NULL);
+        db = delivery(chat_d, &d3, 1);
+        CHECK(peer_post(&dave, db)->status == 200);
+        free(db);
+        r = owner("GET", "/api/v1/conversations", NULL);
+        mine = conv_of(r, dave.uid);
+        CHECK(mine && strstr(mine, "\"unread\":1"));
+        int64_t m = puddle_streams_read_marker(ss, dave.uid);
+        CHECK(puddle_streams_set_read_marker(ss, dave.uid, 5, err, sizeof err) == 0 && puddle_streams_read_marker(ss, dave.uid) == m);
+
+        /* it survives a restart */
+        puddle_streams_close(ss);
+        ss = puddle_streams_open(data, err, sizeof err);
+        ctx.streams = ss;
+        ctx.peer_key_user = ss;
+        CHECK(puddle_streams_read_marker(ss, dave.uid) == m);
+
+        /* the owner's own message shows as outgoing, and a deleted one has no preview */
+        {
+            char sb[300];
+            snprintf(sb, sizeof sb, "{\"to\":\"%s\",\"body\":\"mine\"}", dave.uid);
+            clock_now += 1000;
+            CHECK(owner("POST", "/api/v1/dm/send", sb)->status == 201);
+            r = owner("GET", "/api/v1/conversations", NULL);
+            mine = conv_of(r, dave.uid);
+            CHECK(mine && strstr(mine, "\"preview\":\"mine\"") && strstr(mine, "\"outgoing\":true") && strstr(mine, "\"unread\":1"));
+        }
+        /* what became of what we sent: waiting, retrying, failed, and a way to try again */
+        {
+            const char *mk = "/api/v1/dm/messages?user=%s";
+            char url[300], sb2[300];
+            snprintf(url, sizeof url, mk, dave.uid);
+            r = owner("GET", url, NULL);
+            b = (char *)body_of(r);
+            const char *last = strrchr(b, '{');                                     /* the newest message, "mine" */
+            CHECK(strstr(b, "\"body\":\"mine\"") && strstr(strstr(b, "\"body\":\"mine\""), "\"delivery\":{\"state\":\"queued\""));
+            CHECK(!strstr(b, "\"body\":\"third\",\"outgoing\":false,\"delivery\"") && last);
+            CHECK(count_in(b, "\"delivery\"") == 1);                                /* theirs have none */
+
+            g_addr_mode = 0;
+            puddle_outbox_poll(ob2);                                                /* no way to reach them: fails once, with the reason */
+            r = owner("GET", url, NULL);
+            b = (char *)body_of(r);
+            CHECK(strstr(b, "\"delivery\":{\"state\":\"failed\",\"reason\":\"we have no address for them\""));
+            CHECK(owner("POST", "/api/v1/dm/retry", rb)->status == 204);            /* again */
+            r = owner("GET", url, NULL);
+            CHECK(strstr(body_of(r), "\"state\":\"queued\"") && !strstr(body_of(r), "\"state\":\"failed\""));
+
+            g_addr_mode = 1;
+            puddle_outbox_poll(ob2);                                                /* they are offline: it will be tried again */
+            r = owner("GET", url, NULL);
+            b = (char *)body_of(r);
+            CHECK(strstr(b, "\"delivery\":{\"state\":\"retrying\"") && strstr(b, "\"next_at\":") && strstr(b, "\"attempts\":1"));
+            CHECK(owner("POST", "/api/v1/dm/retry", rb)->status == 204);            /* try now */
+
+            /* an edit that is waiting is not mistaken for the delivery of the message it edits */
+            char sbm[300];
+            snprintf(sbm, sizeof sbm, "{\"to\":\"%s\",\"body\":\"mine2\"}", dave.uid);
+            clock_now += 1000;
+            CHECK(owner("POST", "/api/v1/dm/send", sbm)->status == 201);
+            g_addr_mode = 0;
+            puddle_outbox_poll(ob2);                                                /* "mine2" fails */
+            r = owner("GET", url, NULL);
+            b = (char *)body_of(r);
+            {
+                const char *at = strstr(b, "\"body\":\"mine2\"");
+                CHECK(at != NULL);
+                char mid[PUDDLE_ID_HEX + 1] = "";
+                for (const char *q = at; q > b; q--)
+                    if (!strncmp(q, "{\"id\":\"", 7)) { memcpy(mid, q + 7, PUDDLE_ID_HEX); mid[PUDDLE_ID_HEX] = 0; break; }
+                CHECK(strlen(mid) == PUDDLE_ID_HEX);
+                puddle_ob_item *l;
+                size_t cnt;
+                CHECK(puddle_outbox_list(ob2, &l, &cnt) == 0);
+                for (size_t i = 0; i < cnt; i++)
+                    if (!strcmp(l[i].peer, dave.uid) && strstr(l[i].body, mid) && l[i].state == PUDDLE_OB_FAILED)
+                        CHECK(puddle_outbox_dismiss(ob2, l[i].seq) == 0);          /* delivered, as far as the outbox can tell */
+                puddle_outbox_list_free(l, cnt);
+                char eb[400];
+                snprintf(eb, sizeof eb, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"mine2 edited\"}", dave.uid, mid);
+                clock_now += 1000;
+                CHECK(owner("POST", "/api/v1/dm/edit", eb)->status == 200);
+                r = owner("GET", url, NULL);
+                b = (char *)body_of(r);
+                CHECK(strstr(b, "\"body\":\"mine2 edited\"") && count_in(b, "\"delivery\"") == 1); /* only "mine" still has one */
+            }
+            snprintf(sb2, sizeof sb2, "{\"user\":\"%s\"}", alice.uid);
+            CHECK(owner("POST", "/api/v1/dm/retry", sb2)->status == 404);           /* nothing to retry for someone else */
+            CHECK(owner("POST", "/api/v1/dm/retry", "{\"user\":\"nope\"}")->status == 400);
+            CHECK(call("POST", "/api/v1/dm/retry", rb, NULL, 0)->status == 404);
+        }
+        free(d1.event); free(d2.event); free(d3.event);
+        ctx.outbox = ob;
+        puddle_outbox_close(ob2);
+    }
+
     puddle_outbox_close(ob);
     puddle_streams_close(ss);
     puddle_store_close(store);
     puddle_replay_free(ctx.replay);
     puddle_identity_close(me.id); puddle_identity_close(alice.id); puddle_identity_close(carol.id);
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
+
     return failures ? 1 : 0;
 }

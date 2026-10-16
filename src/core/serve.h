@@ -39,6 +39,11 @@ typedef struct {
     size_t (*route)(void *user, const puddle_request *req, int owner_ok, const unsigned char *body, size_t body_len,
                     char *out, size_t cap, int *status);
 
+    /* Like `route`, for routes that can answer with a body too big for `out` (an image): it is handed back in `big`, and
+     * sent after what is in `out`. If this is set it is used instead of `route`. */
+    size_t (*route_big)(void *user, const puddle_request *req, int owner_ok, const unsigned char *body, size_t body_len,
+                        char *out, size_t cap, int *status, puddle_big *big);
+
     void *user;
     int deadline_seconds;       /* for the whole request; 0 = 15 */
     int64_t (*now)(void);       /* seconds; NULL = time(NULL). A seam for tests. */

@@ -2,7 +2,10 @@
 
 #include <QObject>
 #include <QStringListModel>
+#include <memory>
 #include <thread>
+
+#include "chats.h"
 
 extern "C" {
 #include "config.h"
@@ -20,6 +23,9 @@ class Backend : public QObject {
     Q_PROPERTY(bool running READ running NOTIFY startedChanged)
     Q_PROPERTY(QString error READ error NOTIFY errorChanged)   // non-empty if something failed
     Q_PROPERTY(QObject *log READ log CONSTANT)                 // list model, role "display"
+    Q_PROPERTY(QObject *chats READ chats CONSTANT)             // people, conversations, messages (see Chats)
+    Q_PROPERTY(QString myLink READ myLink NOTIFY startedChanged)  // puddle:// link others use to ask us; "" if unknown
+    Q_PROPERTY(QString myId READ myId NOTIFY startedChanged)
     Q_PROPERTY(bool needsSetup READ needsSetup NOTIFY needsSetupChanged)
     // An earlier setup showed a phrase but was never confirmed; it will be started again.
     Q_PROPERTY(bool setupRedo READ setupRedo NOTIFY needsSetupChanged)
@@ -34,6 +40,9 @@ public:
     bool running() const { return srv_ != nullptr; }
     QString error() const { return error_; }
     QObject *log() { return &log_; }
+    Chats *chats() { return &chats_; }
+    QString myLink() const { return myLink_; }
+    QString myId() const { return myId_; }
     bool needsSetup() const { return needsSetup_; }
     bool setupRedo() const { return setupRedo_; }
     bool quitting() const { return quitting_; }
@@ -52,6 +61,9 @@ public:
     // True exactly once per install: the "still running in the tray" hint.
     Q_INVOKABLE bool takeFirstHideNotice();
 
+    // macOS: the unread count on the Dock icon. No-op elsewhere.
+    Q_INVOKABLE void setDockBadge(int count);
+
     // macOS: Dock icon only while the window is shown. No-op on other platforms.
     Q_INVOKABLE void setDockVisible(bool visible);
 
@@ -69,7 +81,8 @@ private:
     void setError(const QString &message);
 
     QStringListModel log_;
-    QString listenUrl_;
+    Chats chats_;
+    QString listenUrl_, myLink_, myId_;
     QString error_;
     bool quitting_ = false;
     bool needsSetup_ = false;

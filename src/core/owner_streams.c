@@ -6,6 +6,7 @@
 
 #include "access.h"
 #include "flow.h"
+#include "profiles_api.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -230,6 +231,7 @@ static int accept_stream(const puddle_call *c, puddle_jw *w)
     if (status)
         return status;
     puddle_flow_owe(c->ctx, id, PUDDLE_OWED_APPROVED); /* queue the news; the record says it is owed until it lands */
+    puddle_media_want(c->ctx, id);                      /* and, after it, ask for the pictures in their profile */
     if (puddle_streams_get(c->ctx->streams, id, &st) != 0)
         return puddle_fail(w, 500, "internal");
     stream_json(w, c->ctx, &st);
@@ -300,6 +302,34 @@ static int request_stream(const puddle_call *c, puddle_jw *w)
     stream_json(w, c->ctx, &st);
     puddle_stream_free(&st);
     return 201;
+}
+
+/* Choose which of our profiles a stream sees. `profile: null` goes back to the default. */
+static int set_stream_profile(const puddle_call *c, puddle_jw *w)
+{
+    puddle_span v;
+    char id[PUDDLE_USER_ID_LEN + 1], pid[PUDDLE_PROFILE_ID_MAX + 8], err[300];
+    const char *b = body_text(c);
+    size_t bl = body_size(c);
+    if (!body_ok(c) || member_id(c, "stream", id) != 0 || puddle_json_member(b, bl, "profile", &v) != 0)
+        return puddle_fail(w, 400, "bad_request");
+    int is_null = v.len == 4 && !memcmp(v.p, "null", 4);
+    if (!is_null && (puddle_json_string(v, pid, sizeof pid) != 0 || !puddle_profiles_find(c->ctx->profiles, pid)))
+        return puddle_fail(w, 400, "unknown_profile");
+    puddle_stream st;
+    if (puddle_streams_get(c->ctx->streams, id, &st) != 0)
+        return puddle_fail(w, 404, "not_found");
+    int active = st.state == PUDDLE_STREAM_ACTIVE;
+    puddle_stream_free(&st);
+    if (puddle_assignments_set(c->ctx->assignments, id, is_null ? NULL : pid, err, sizeof err) != 0)
+        return puddle_fail(w, 500, "internal");
+    if (active)
+        puddle_profile_push(c->ctx, id); /* they are told at once; if they are away, as soon as they are back */
+    if (puddle_streams_get(c->ctx->streams, id, &st) != 0)
+        return puddle_fail(w, 500, "internal");
+    stream_json(w, c->ctx, &st);
+    puddle_stream_free(&st);
+    return 200;
 }
 
 /* The owner has looked at a peer whose certificate changed and says the new one is fine. */
@@ -504,6 +534,7 @@ const puddle_route puddle_owner_stream_routes[] = {
     { "POST", "/api/v1/stream/accept",         PUDDLE_AUTH_OWNER, 256, accept_stream,  NULL },
     { "POST", "/api/v1/stream/decline",        PUDDLE_AUTH_OWNER, 256, decline_stream, NULL },
     { "POST", "/api/v1/stream/delete",         PUDDLE_AUTH_OWNER, 256, delete_stream,  NULL },
+    { "POST", "/api/v1/stream/profile",        PUDDLE_AUTH_OWNER, 256, set_stream_profile, NULL },
     { "POST", "/api/v1/stream/trust",          PUDDLE_AUTH_OWNER, 256, trust_certificate, NULL },
     { "GET",  "/api/v1/stream/invite",         PUDDLE_AUTH_OWNER, 0,   list_invites,   NULL },
     { "POST", "/api/v1/stream/invite",         PUDDLE_AUTH_OWNER, 256, create_invite,  NULL },

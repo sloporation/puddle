@@ -40,7 +40,9 @@ typedef struct {
     uint64_t seq;
     char peer[PUDDLE_USER_ID_LEN + 1];
     char kind[32];             /* what the caller calls it ("access", "result", ...); handed back on `done` */
-    char path[128];            /* the endpoint, POSTed to */
+    char method[8];            /* "POST" (the default) or "GET" */
+    char path[160];            /* the endpoint; a GET may carry a query ("?hash=...") */
+    size_t max_reply;          /* the largest answer to take, for a GET that fetches a file; 0 = the usual */
     char *body;                /* a JSON object, NUL-terminated */
     size_t body_len;
     int64_t created_ms, next_ms, first_offline_ms;
@@ -83,6 +85,11 @@ int puddle_outbox_start(puddle_outbox *ob);
 int puddle_outbox_enqueue(puddle_outbox *ob, const char *peer, const char *kind, const char *path, const char *body,
                           size_t body_len, char *err, size_t errlen);
 
+/* Queue a GET of `path` (with its query) on `peer`, to fetch something: what comes back reaches the `done` hook in the reply, and
+ * nothing larger than `max_reply` bytes is taken. Otherwise as puddle_outbox_enqueue. */
+int puddle_outbox_enqueue_get(puddle_outbox *ob, const char *peer, const char *kind, const char *path, size_t max_reply, char *err,
+                              size_t errlen);
+
 /* One pass: deliver what is due. The worker calls this; tests call it directly. */
 void puddle_outbox_poll(puddle_outbox *ob);
 
@@ -96,6 +103,9 @@ int puddle_outbox_rewrite(puddle_outbox *ob, uint64_t seq, const char *body, siz
 
 /* Try this peer's waiting items now, not at the next scheduled time. Returns how many were waiting. */
 int puddle_outbox_retry_now(puddle_outbox *ob, const char *peer);
+
+/* Give an item that failed another go: it is queued again, to be tried now, as if new. 0, or 1 if there is no such failed item. */
+int puddle_outbox_requeue(puddle_outbox *ob, uint64_t seq);
 
 /* Everything in the outbox, oldest first (a copy: free with puddle_outbox_list_free). */
 int puddle_outbox_list(puddle_outbox *ob, puddle_ob_item **out, size_t *count);

@@ -7,11 +7,13 @@ Items marked **needs you** are decisions I should not make alone.
 
 ## Where we are
 
-Built and tested: storage of chats (day-file logs, dedupe, chunk hashes), config and profiles (YAML),
-the identity (keys, signed key chain, optional roll), the owner token (nothing is public, failed
-checks are `404`), request signing and checking with a replay memory, and the TLS listener.
+Built and tested (phases 1 to 4): the identity (keys from a recovery phrase, the signed key chain, rolling), the owner token and
+the uniform `404`, the HTTPS listener and request signing, streams between Puddles (request, accept, close, block, invites,
+certificate pinning), the retrying outbox, direct messages with edit and delete, key and address announcements, profiles and
+pictures over a stream, and the Qt app (Friends, conversations, chat, delivery state). 32 test suites, including two Puddles
+talking over TLS and the window driven by real clicks and keys.
 
-Not built: anything that handles a stream endpoint, any outgoing request, the stream records.
+Not built: group chats, Ponds, the phone client, encryption at rest. See "Later" below and `discuss-later.md`.
 
 ## Order, and why
 
@@ -302,8 +304,22 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
 
 ## Phase 4: Messages and the rest of a stream
 
-- [ ] **4.1 Direct messages.** `POST /stream/v1/events` delivery with dedupe and sender checks, and the
+- [x] **4.1 Direct messages.** `POST /stream/v1/events` delivery with dedupe and sender checks, and the
   owner `dm/send|edit|delete` and message listing, on top of the chat store.
+  - [x] **4.1b Edits and deletes.** In `message.c` (the events and the view) and `messages.c` (routes).
+    - **Events:** `edit` (new body, `ref` = the message) and `redact` (`ref`, nothing else; a redaction carrying text is refused,
+      so "deleting" can't smuggle content). Same signing, ids, limits and delivery as a message; a receiver judges them the
+      same way, and `unsupported_type` now means any other type.
+    - **The view:** edits and redactions are applied when a chat is read, not when it arrives, so the result is the same on
+      every Puddle whatever the arrival order: only the author's count, only if later than the message, last edit wins, a
+      redaction beats any edit. A message keeps its place and time, and shows `edited` / `edited_at` or `deleted` (no body).
+    - **Owner:** `POST /api/v1/dm/edit` (answers with the message as it now reads) and `/dm/delete` (`204`; deleting twice
+      sends nothing). Both need an open stream, and your own message (`404` otherwise; `409 deleted` to edit a deleted one).
+      The spec gained `user` on both, because messages are filed by chat and an id alone does not say which. Their timestamps
+      are forced past the message's, so a slow clock cannot make them invalid.
+    - **Reading** (`dm/messages`) pages over *messages*, however many edits sit between them: it takes a window of the newest
+      events and widens it until it holds enough messages.
+    - Not here: an erase on this machine (storage.md's "optional local erase"); edit history; an edit window limit.
   - [x] **4.1a Send and receive text.** Built in `src/core/message.c` (the event: chat id, signing, checks) and
     `messages.c` (routes).
     - **The event** is `{"type":"message","chat","sender","ts","body"[,"ref"]}`, stored and sent exactly as signed;
@@ -354,8 +370,66 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   - New in the outbox: waiting items can be rewritten, "retry now" for a peer, and news of a key change goes first.
   - Not here: retrying a message refused as `unknown_key` for a roll we were not told of (the push goes first, so this only
     happens if it was lost); the owner-recovery fetch of a chain from a friend (`GET /stream/v1/identity`).
-- [ ] **4.3 Profiles over a stream.** Assignment and reload endpoints, `profile` push, `media` fetch.
-- [ ] **4.4 The app shows it.** Pending requests, accept/decline, and a message view in the Qt app.
+- [x] **4.3 Profiles over a stream.** Assignment, `profile` push, `media` fetch.
+  Built in `profiles_api.c`, `wireprofile.c` and `media.c`, with larger changes underneath.
+  - **Left out on purpose: reload.** The roadmap listed "reload endpoints", but reloading profiles while running is on
+    `discuss-later.md`, so profiles are still read at start. Nothing else here depends on it.
+  - **The wire profile** is now the whole thing, not only text: colour (one to five `#rrggbb`, an optional angle) and the
+    three images as `{hash, mime, size}`. A stranger's is rebuilt field by field, each checked and cleaned, never stored
+    as sent; one with anything wrong in it is refused whole (a request, an answer or a push alike). One function writes our own
+    (`puddle_profile_write_fields`), used for the owner's API, requests, answers and pushes.
+  - **Assigning** (`POST /api/v1/stream/profile`): sets which profile a stream sees (`null` = the default), tells the peer
+    if the stream is open (retried while it is away), and keeps the choice for a stream that is not open yet.
+    `GET /api/v1/profile` lists our profiles.
+  - **Fetching.** `GET /stream/v1/media?hash=` serves a picture only if it is in the profile that peer is shown, and only over
+    an open stream (anything else is `404`). Pictures we do not hold are fetched, over an open stream only, when a request is
+    answered or accepted, or a profile arrives. The outbox learned to GET, with a cap on the answer (what the profile said the
+    size was, plus a little); what comes back is kept only if its SHA-256, size and kind (judged from the file's first bytes) are
+    what the profile said. Failures say so on the stream (`error`) and are not retried.
+  - **The owner's app** reads any picture we hold (ours or fetched) from `GET /api/v1/media?hash=`.
+  - **Underneath:** responses can now be a file bigger than the answer buffer (headers in the buffer, the file after them,
+    freed by the server), and the client can take answers up to a size the caller names and reports the content type.
+  - Still open, on purpose: what a receiver does about huge, slow or booby-trapped pictures. The 25 MiB cap is the placeholder
+    it always was, and `discuss-later.md` #1 is untouched.
+- [x] **4.4 The app shows it.** Discord-style Qt app for DMs and group chats (no servers yet): a narrow rail with a
+  Friends icon on top (the server list comes later), a DM list with unread marks, a Friends page (All / Pending /
+  Blocked, Add Friend with a `puddle://` link), and flat Discord-style messages (avatar, name, time, grouped, no bubbles).
+  The app talks to its own Puddle over the owner API on HTTPS like a phone client, with the Puddle's own certificate pinned.
+  - [x] **4.4a-core** `GET /api/v1/conversations` (last message, unread count) and `POST /api/v1/dm/read`
+    (read marker in `state/read.tsv`, only moves forward); tests in `messages_test.c`.
+  - [x] **4.4a-qt** `ApiClient` (only the Puddle's own certificate is trusted; the owner token goes with every request),
+    `JsonListModel`, and `Chats` (people, conversations, open chat, actions, a 2 s refresh, signals for new requests and
+    messages so the window can notify). `Backend` attaches it when the server starts. `chats_test.cpp` runs two real Puddles.
+  - [x] **4.4b** shell and Friends page: rail with the Friends icon (and an unread badge), a DM list with unread marks, a user
+    panel (your name, copy your link, activity log), the Friends page (All / Pending / Blocked, Add Friend with link, note
+    and profile), and Pending rows that show the note, a short code (`K7QM-2XPD`, derived from the id) and Accept / Decline.
+    Pictures are fetched through the owner API, checked against their hash, and cached. One pane at a time when narrow.
+    Also: Cmd/Ctrl+N, tray notification (never the message text) and Dock badge, window size and place remembered.
+  - [x] **4.4c** chat view and composer: flat Discord-style messages (picture and name on the first of a run, later lines tucked
+    under it, date dividers, "(edited)", muted "Message deleted"), replies with a preview line, hover tools and a right-click
+    menu (copy, reply, edit, delete with a confirmation), inline edit (Enter saves, Esc cancels, Up in an empty box edits
+    your last message), the composer (Enter sends, Shift+Enter is a new line, 4000 characters, one unsent draft per chat),
+    older history loads on scrolling up, a "Latest" button, a changed-certificate banner with Trust, and a composer that
+    explains itself when the stream is not open. Messages in the open chat count as read only while the window is in view.
+    `scripts/dev.sh [name]` runs the app in its own sandbox (run two names to be friends with yourself).
+  - [x] **4.4d** polish: a banner when the window cannot reach its Puddle, dark-mode fixes (selected rows), the unread count in
+    the window title, Alt+Up / Alt+Down between conversations, Cmd/Ctrl+W closes to the tray, and a clicked notification
+    opens the chat or request it was about.
+
+- [x] **4.5 Prove the app, and show delivery.**
+  - [x] **4.5a The window under test.** `tests/ui_test.cpp` loads the real QML (`Shell`) over the app's real `Backend` and a
+    second real Puddle, and drives it with real mouse and key events (offscreen): Add Friend (link, note, send), the other side
+    accepts, open the chat, send with Enter, Shift+Enter makes a new line, receive, edit with Up, delete through the hover bin and
+    its confirmation, a hidden window leaves messages unread until it is back, and the narrow one-pane layout. `testnode.h`
+    holds the shared test Puddle. It found one real bug: absent `note`/`error` fields reached QML as `undefined`.
+    The "attentive" binding moved from `Main.qml` into `Shell.qml` so the test covers it.
+  - [x] **4.5b Delivery state.** `dm/messages` (and the `dm/send` answer) give each of your own undelivered messages a
+    `delivery` object read from the outbox: `queued` (not tried yet), `retrying` (the other Puddle could not be reached; `next_at`),
+    `failed` (with the reason; never retried by itself) or `held` (their certificate changed). Delivered messages carry none.
+    A message is matched by its own delivery id, so an edit waiting in the outbox is not taken for it. `POST /api/v1/dm/retry`
+    queues failed items again and tries waiting ones now (`puddle_outbox_requeue` is new). The chat shows "Sending…", "X can't be
+    reached right now. Trying again at 14:05." with a Try now button, or "Not delivered: reason" with Retry. The window test takes
+    the friend's Puddle offline, sends, sees the note, brings it back and presses Try now.
 
 *Commit point.*
 

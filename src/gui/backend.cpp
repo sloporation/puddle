@@ -10,6 +10,7 @@
 
 extern "C" {
 #include "identity.h"
+#include "router.h"
 #include "log.h"
 }
 
@@ -85,6 +86,18 @@ void Backend::startServer()
     listenUrl_ = (addr.contains(':') ? QStringLiteral("https://[%1]:%2") : QStringLiteral("https://%1:%2"))
                      .arg(addr).arg(cfg_.port);
     worker_ = std::thread([s = srv_] { puddle_server_run(s); });
+
+    // The window reads everything through the owner API, as a phone client does. "All interfaces" is reached by loopback.
+    QString host = addr;
+    if (host == QLatin1String("::") || host == QLatin1String("0.0.0.0"))
+        host = host == QLatin1String("::") ? QStringLiteral("::1") : QStringLiteral("127.0.0.1");
+    const QString base = (host.contains(':') ? QStringLiteral("https://[%1]:%2") : QStringLiteral("https://%1:%2")).arg(host).arg(cfg_.port);
+    if (!chats_.attach(QUrl(base), QString::fromUtf8(cfg_.data_dir) + "/state/owner-token", QString::fromUtf8(cfg_.dir) + "/cert.pem"))
+        setError(QStringLiteral("Could not open the owner token or certificate to talk to your Puddle."));
+    char id[PUDDLE_USER_ID_LEN + 1], link[512];
+    puddle_identity_id(puddle_server_identity(srv_), id);
+    myId_ = QString::fromLatin1(id);
+    myLink_ = puddle_make_link(&cfg_, id, nullptr, link, sizeof link) == 0 ? QString::fromUtf8(link) : QString();
     emit startedChanged();
 }
 
@@ -140,6 +153,11 @@ bool Backend::eventFilter(QObject *watched, QEvent *event)
         emit quittingChanged();
     }
     return QObject::eventFilter(watched, event);
+}
+
+void Backend::setDockBadge(int count)
+{
+    puddle_set_dock_badge(count);
 }
 
 void Backend::setDockVisible(bool visible)

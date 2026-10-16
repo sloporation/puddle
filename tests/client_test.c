@@ -66,6 +66,7 @@ int main(void)
     puddle_net_request(&at, "POST", "/stream/v1/access/result", body, strlen(body), alice, bob_id, &opts, &r);
     CHECK(r.result == PUDDLE_NET_OK && r.status == 200 && r.body && !strcmp(r.body, "{\"ok\":true}") && r.body_len == 11);
     CHECK(!strcmp(r.fingerprint, srv.fingerprint) && !strcmp(fp, srv.fingerprint));           /* the certificate's SHA-256 */
+    CHECK(!strcmp(r.content_type, "application/json"));                                          /* what it said it was sending */
     CHECK(srv.requests == 1 && !strcmp(srv.method, "POST") && !strcmp(srv.target, "/stream/v1/access/result"));
     CHECK(srv.body_len == strlen(body) && !memcmp(srv.body, body, srv.body_len));
     {
@@ -157,6 +158,19 @@ int main(void)
     if (!(r.result == PUDDLE_NET_FAILED && strstr(r.reason, "large"))) fprintf(stderr, "big: %d %d %s\n", r.result, r.status, r.reason);
     CHECK(r.result == PUDDLE_NET_FAILED && strstr(r.reason, "large"));                            /* more than we will read */
     puddle_net_reply_free(&r);
+    /* a bigger answer, when the caller says how big it will take */
+    {
+        puddle_net_opts big = opts;
+        big.max_body = 100000;
+        ts_set(&srv, TS_BIG, 200, "", 0);
+        puddle_net_request(&at, "GET", "/x", NULL, 0, alice, bob_id, &big, &r);
+        CHECK(r.result == PUDDLE_NET_OK && r.status == 200 && r.body_len == PUDDLE_NET_BODY_MAX + 20000 && r.body[0] == 'x' && r.body[r.body_len - 1] == 'x');
+        puddle_net_reply_free(&r);
+        big.max_body = PUDDLE_NET_BODY_MAX + 19999;                                               /* one byte less than it has */
+        puddle_net_request(&at, "GET", "/x", NULL, 0, alice, bob_id, &big, &r);
+        CHECK(r.result == PUDDLE_NET_FAILED && strstr(r.reason, "large"));
+        puddle_net_reply_free(&r);
+    }
     ts_set(&srv, TS_NORMAL, 200, "{}", 0);
 
     /* ---- nobody there: offline ---- */

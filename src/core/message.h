@@ -10,6 +10,7 @@
  * same event again with the new one without changing its id. */
 
 #include "identity.h"
+#include "store.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -55,13 +56,49 @@ int64_t puddle_event_next_ts(int64_t now_ms);
 size_t puddle_message_build(const char *chat, const char *sender, int64_t ts, const char *body, size_t body_len,
                             const char *ref, char *out, size_t cap);
 
+typedef enum {
+    PUDDLE_EV_MESSAGE, /* `body`, and `ref` if it is a reply */
+    PUDDLE_EV_EDIT,    /* `body` is the new text of the message `ref` */
+    PUDDLE_EV_REDACT   /* the message `ref` is taken back; no body */
+} puddle_ev_type;
+
 typedef struct {
+    puddle_ev_type type;
     char chat[PUDDLE_USER_ID_LEN + 1];
     char sender[PUDDLE_USER_ID_LEN + 1];
     int64_t ts;
-    char *body;      /* malloc'd, NUL-terminated */
+    char *body;      /* malloc'd, NUL-terminated; NULL for a redaction */
     char ref[65];    /* "" if none */
 } puddle_message;
+
+/* Read a chat event of any kind we know (message, edit, redact), as strictly as a message: an edit must name its target and
+ * carry a body, a redaction must name its target and carry nothing else. 0, or -1 with a reason code in *why
+ * (`unsupported_type` for any other type). */
+int puddle_chat_event_parse(const char *event, size_t len, puddle_message *m, const char **why);
+
+/* Build an edit or a redaction of the message `target`, as puddle_message_build builds a message. */
+size_t puddle_edit_build(const char *chat, const char *sender, int64_t ts, const char *target, const char *body, size_t body_len,
+                         char *out, size_t cap);
+size_t puddle_redact_build(const char *chat, const char *sender, int64_t ts, const char *target, char *out, size_t cap);
+
+/* A chat as the reader sees it: the messages, with edits and redactions applied. Built from events in chat order
+ * (puddle_store_tail gives them so). An edit or redaction counts only if it is by the author of the message and later
+ * than it; the last such edit is the text; a redaction wins over any edit, whenever it arrived. So every Puddle works out the
+ * same view from the same events, whatever order they came in. */
+typedef struct {
+    char id[65];
+    char sender[PUDDLE_USER_ID_LEN + 1];
+    int64_t ts, rts;
+    char *body;          /* the current text; NULL if deleted */
+    char ref[65];        /* the message this replies to, "" if none */
+    int edited;
+    int64_t edited_ts;
+    int deleted;
+} puddle_view_msg;
+
+int puddle_chat_view(const puddle_event *events, size_t n, puddle_view_msg **out, size_t *count);
+void puddle_view_free(puddle_view_msg *v, size_t count);   /* an array from puddle_chat_view */
+void puddle_view_clear(puddle_view_msg *v);                /* one message you hold on its own */
 
 /* Read a message event, strictly: type "message", an id for chat and sender, a sane ts (years 2000-2100), an
  * acceptable body, a reply reference that is an event id if present. 0 (and *why NULL), or -1 with a reason code in *why. */
