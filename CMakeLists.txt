@@ -34,6 +34,9 @@ find_package(OpenSSL 3.0 REQUIRED)
 find_package(Threads REQUIRED)
 
 add_compile_options(-Wall -Wextra)
+# Paths are built as "<data_dir>/<name>" in PUDDLE_PATH_MAX buffers; data_dir is capped at
+# PUDDLE_DATA_DIR_MAX when the config is read, so gcc's worst-case truncation warnings are noise.
+add_compile_options(-Wno-format-truncation)
 
 # glibc hides nftw()/FTW_*/memmem() unless asked; macOS exposes them by default.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

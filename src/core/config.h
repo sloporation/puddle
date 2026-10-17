@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 #define PUDDLE_PATH_MAX 1024
+#define PUDDLE_DATA_DIR_MAX (PUDDLE_PATH_MAX - 128) /* leaves room for the names Puddle creates under it */
 #define PUDDLE_MAX_PROFILE_FILES 8
 
 typedef struct {
