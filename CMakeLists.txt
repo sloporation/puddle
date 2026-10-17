@@ -35,6 +35,11 @@ find_package(Threads REQUIRED)
 
 add_compile_options(-Wall -Wextra)
 
+# glibc hides nftw()/FTW_*/memmem() unless asked; macOS exposes them by default.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_compile_definitions(_GNU_SOURCE)
+endif()
+
 # --- core: config, TLS, HTTP, listener (plain C, shared by both targets) -----
 add_library(puddle_core STATIC
   src/core/access.c
