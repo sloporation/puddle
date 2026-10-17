@@ -26,7 +26,7 @@ typedef struct {
 static void deliveries_load(deliveries *d, const puddle_ctx *ctx, const char *peer)
 {
     memset(d, 0, sizeof *d);
-    snprintf(d->peer, sizeof d->peer, "%s", peer);
+    snprintf(d->peer, sizeof d->peer, "%.*s", PUDDLE_USER_ID_LEN, peer);
     if (ctx->outbox && puddle_outbox_list(ctx->outbox, &d->items, &d->n) != 0) {
         d->items = NULL;
         d->n = 0;

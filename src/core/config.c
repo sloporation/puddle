@@ -363,6 +363,10 @@ int puddle_config_load(puddle_config *cfg, const char *path, char *err, size_t e
                 bad(err, errlen, path, v, "data_dir must be a folder path");
                 goto fail;
             }
+            if (strlen(cfg->data_dir) > PUDDLE_DATA_DIR_MAX) {
+                bad(err, errlen, path, v, "data_dir path is too long");
+                goto fail;
+            }
         } else if (strcmp(key, "profiles") == 0) {
             if (ynode_is_null(v))
                 continue;

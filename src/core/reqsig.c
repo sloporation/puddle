@@ -231,7 +231,7 @@ static void purge(puddle_replay *r, int64_t now)
 static puddle_authn remember(puddle_replay *r, const char *sender, const char *nonce, int64_t now)
 {
     char key[100];
-    snprintf(key, sizeof key, "%s:%s", sender, nonce);
+    snprintf(key, sizeof key, "%.*s:%.31s", PUDDLE_USER_ID_LEN, sender, nonce); /* ids are 52 chars, nonces fit 32 bytes */
     puddle_authn rc = PUDDLE_AUTHN_OK;
     pthread_mutex_lock(&r->mu);
     size_t i = hash_key(key) & (r->cap - 1);
