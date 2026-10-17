@@ -39,16 +39,25 @@ static void deliveries_free(deliveries *d)
 }
 
 /* the delivery of the message `id`: the envelope's own "id" member, not the id of something that mentions it (an edit) */
+static int delivery_rank(const puddle_ob_item *it)
+{
+    return it->state == PUDDLE_OB_FAILED ? 3 : it->state == PUDDLE_OB_HELD ? 2 : it->attempts ? 1 : 0;
+}
+
+/* With no peer named (a group), the message went to several, and the worst of what became of it is what is reported. */
 static const puddle_ob_item *delivery_of(const deliveries *d, const char *id)
 {
     char needle[PUDDLE_ID_HEX + 16];
     snprintf(needle, sizeof needle, "\"id\":\"%s\"", id);
+    const puddle_ob_item *worst = NULL;
     for (size_t i = 0; i < d->n; i++) {
         const puddle_ob_item *it = &d->items[i];
-        if (!strcmp(it->kind, "events") && !strcmp(it->peer, d->peer) && it->body && strstr(it->body, needle))
-            return it;
+        if (strcmp(it->kind, "events") != 0 || (d->peer[0] && strcmp(it->peer, d->peer) != 0) || !it->body || !strstr(it->body, needle))
+            continue;
+        if (!worst || delivery_rank(it) > delivery_rank(worst))
+            worst = it;
     }
-    return NULL;
+    return worst;
 }
 
 static void view_json(puddle_jw *w, const puddle_view_msg *m, const char *chat, const char *me, const deliveries *d)
@@ -361,48 +370,31 @@ static int delete_dm(const puddle_call *c, puddle_jw *w)
 
 /* ---- owner: read ---- */
 
-static int list_dm(const puddle_call *c, puddle_jw *w)
+/* A page of a chat, as the owner's app reads it: `limit` messages ending `offset` from the newest, oldest first. `delivery_peer` names who a
+ * direct message went to ("" for a group). `extra` may add more members to the answer, given the events the page was worked out from. */
+int puddle_chat_page(const puddle_call *c, puddle_jw *w, const char *chat, const char *me, const char *delivery_peer, size_t limit, size_t offset,
+                     puddle_page_extra extra, void *extra_user)
 {
-    const char *keys[3] = { "user", "limit", "offset" };
-    char v[3][PUDDLE_QUERY_VALUE_MAX], me[PUDDLE_USER_ID_LEN + 1], chat[PUDDLE_USER_ID_LEN + 1], err[300];
-    if (puddle_query_parse(c->req->target, keys, 3, v) != 0 || !puddle_id_valid(v[0]))
-        return puddle_fail(w, 400, "bad_request");
-    size_t limit = DEFAULT_PAGE, offset = 0;
-    for (int k = 1; k <= 2; k++) {
-        if (!v[k][0])
-            continue;
-        size_t n = 0;
-        if (strlen(v[k]) > 9)
-            return puddle_fail(w, 400, "bad_request");
-        for (const char *p = v[k]; *p; p++) {
-            if (*p < '0' || *p > '9')
-                return puddle_fail(w, 400, "bad_request");
-            n = n * 10 + (size_t)(*p - '0');
-        }
-        if (k == 1 ? (n < 1 || n > MAX_PAGE) : n > 1000000)
-            return puddle_fail(w, 400, "bad_request");
-        if (k == 1) limit = n; else offset = n;
-    }
-    puddle_identity_id(c->ctx->identity, me);
-    puddle_dm_chat_id(me, v[0], chat);
-
+    char err[300];
     /* Events, not messages, are what the store counts, and edits and redactions are events too: take a window of the newest
      * and widen it until it holds enough messages (or all there is). What was done to a message is newer than it, so
      * it is in the window whenever the message is. */
     size_t want = offset + limit + 1, n = want * 2 + 16;
     puddle_view_msg *view = NULL;
     size_t m = 0;
+    puddle_event_list tail;
     for (;;) {
-        puddle_event_list tail;
         if (puddle_store_tail(c->ctx->store, chat, n, &tail, err, sizeof err) != 0)
             return puddle_fail(w, 500, "internal");
         int full = tail.count >= n;
         int rc = puddle_chat_view(tail.items, tail.count, &view, &m);
-        puddle_event_list_free(&tail);
-        if (rc != 0)
+        if (rc != 0) {
+            puddle_event_list_free(&tail);
             return puddle_fail(w, 500, "internal");
+        }
         if (m >= want || !full || n > (1u << 22))
             break;
+        puddle_event_list_free(&tail);
         puddle_view_free(view, m);
         n *= 8;
     }
@@ -419,7 +411,7 @@ static int list_dm(const puddle_call *c, puddle_jw *w)
     puddle_jw_key(w, "messages");
     puddle_jw_array(w);
     deliveries d;
-    deliveries_load(&d, c->ctx, v[0]);
+    deliveries_load(&d, c->ctx, delivery_peer);
     for (size_t i = start; i < end; i++)
         view_json(w, &view[i], chat, me, &d);
     deliveries_free(&d);
@@ -429,9 +421,69 @@ static int list_dm(const puddle_call *c, puddle_jw *w)
         puddle_jw_uint(w, offset + (end - start));
     else
         puddle_jw_null(w);
+    if (extra) {
+        /* what happened since the oldest message shown; when the page reaches back to the start of the chat, all of it */
+        int64_t since = 0;
+        if (start > 0)
+            since = start < end ? view[start].ts : INT64_MAX;
+        extra(extra_user, w, tail.items, tail.count, since);
+    }
     puddle_jw_end_object(w);
+    puddle_event_list_free(&tail);
     puddle_view_free(view, m);
     return 200;
+}
+
+void puddle_message_json(const puddle_call *c, puddle_jw *w, const puddle_view_msg *m, const char *chat, const char *me, const char *delivery_peer)
+{
+    deliveries d;
+    deliveries_load(&d, c->ctx, delivery_peer);
+    view_json(w, m, chat, me, &d);
+    deliveries_free(&d);
+}
+
+int puddle_chat_find(const puddle_call *c, const char *chat, const char *target, puddle_view_msg *out)
+{
+    return find_in_chat(c, chat, target, out);
+}
+
+/* the paging every list takes: `limit` (1 to `max`) and `offset`, plain digits. 0, or -1 if they are not. */
+int puddle_page_params(const char *limit_text, const char *offset_text, size_t max_limit, size_t *limit, size_t *offset)
+{
+    const char *texts[2] = { limit_text, offset_text };
+    for (int k = 0; k < 2; k++) {
+        if (!texts[k] || !texts[k][0])
+            continue;
+        size_t n = 0;
+        if (strlen(texts[k]) > 9)
+            return -1;
+        for (const char *p = texts[k]; *p; p++) {
+            if (*p < '0' || *p > '9')
+                return -1;
+            n = n * 10 + (size_t)(*p - '0');
+        }
+        if (k == 0 ? (n < 1 || n > max_limit) : n > 1000000)
+            return -1;
+        if (k == 0)
+            *limit = n;
+        else
+            *offset = n;
+    }
+    return 0;
+}
+
+static int list_dm(const puddle_call *c, puddle_jw *w)
+{
+    const char *keys[3] = { "user", "limit", "offset" };
+    char v[3][PUDDLE_QUERY_VALUE_MAX], me[PUDDLE_USER_ID_LEN + 1], chat[PUDDLE_USER_ID_LEN + 1];
+    if (puddle_query_parse(c->req->target, keys, 3, v) != 0 || !puddle_id_valid(v[0]))
+        return puddle_fail(w, 400, "bad_request");
+    size_t limit = DEFAULT_PAGE, offset = 0;
+    if (puddle_page_params(v[1], v[2], MAX_PAGE, &limit, &offset) != 0)
+        return puddle_fail(w, 400, "bad_request");
+    puddle_identity_id(c->ctx->identity, me);
+    puddle_dm_chat_id(me, v[0], chat);
+    return puddle_chat_page(c, w, chat, me, v[0], limit, offset, NULL, NULL);
 }
 
 /* ---- owner: which conversations, and what has been read ---- */
@@ -455,7 +507,11 @@ static void preview_of(const char *body, char *out, size_t cap)
 }
 
 typedef struct {
-    char user[PUDDLE_USER_ID_LEN + 1];
+    char user[PUDDLE_USER_ID_LEN + 1]; /* who it is with, or the group's id for a group */
+    int group;
+    char name[PUDDLE_GROUP_NAME_MAX_BYTES + 1];
+    int nmembers;
+    int has_last;
     puddle_stream_state state;
     int64_t last_ts;
     char preview[512];
@@ -501,9 +557,16 @@ static int list_conversations(const puddle_call *c, puddle_jw *w)
     size_t n_streams;
     if (puddle_streams_list(c->ctx->streams, &all, &n_streams) != 0)
         return puddle_fail(w, 500, "internal");
-    conversation *convs = calloc(n_streams ? n_streams : 1, sizeof *convs);
+    puddle_group *groups = NULL;
+    size_t n_groups = 0;
+    if (c->ctx->groups && puddle_groups_list(c->ctx->groups, &groups, &n_groups) != 0) {
+        groups = NULL;
+        n_groups = 0;
+    }
+    conversation *convs = calloc(n_streams + n_groups ? n_streams + n_groups : 1, sizeof *convs);
     if (!convs) {
         puddle_stream_list_free(all, n_streams);
+        puddle_group_list_free(groups, n_groups);
         return puddle_fail(w, 500, "internal");
     }
     size_t n = 0;
@@ -519,6 +582,7 @@ static int list_conversations(const puddle_call *c, puddle_jw *w)
             if (m) {
                 conversation *cv = &convs[n++];
                 memcpy(cv->user, all[i].id, sizeof cv->user);
+                cv->has_last = 1;
                 cv->state = all[i].state;
                 const puddle_view_msg *last = &view[m - 1];
                 cv->last_ts = last->ts;
@@ -536,6 +600,42 @@ static int list_conversations(const puddle_call *c, puddle_jw *w)
         puddle_event_list_free(&tail);
     }
     puddle_stream_list_free(all, n_streams);
+    /* the groups we are in, whether or not anything has been said yet */
+    for (size_t gi = 0; gi < n_groups; gi++) {
+        const puddle_group *g = &groups[gi];
+        if (g->my != PUDDLE_GROUP_IN)
+            continue;
+        conversation *cv = &convs[n++];
+        char err[200];
+        memcpy(cv->user, g->id, sizeof cv->user);
+        cv->group = 1;
+        snprintf(cv->name, sizeof cv->name, "%s", g->name);
+        cv->nmembers = (int)puddle_group_count(g, PUDDLE_GM_MEMBER);
+        cv->last_ts = g->created_ms; /* a new group sorts by when it was made */
+        puddle_event_list tail;
+        if (puddle_store_tail(c->ctx->store, g->id, 200, &tail, err, sizeof err) != 0)
+            continue;
+        puddle_view_msg *view;
+        size_t m;
+        if (tail.count && puddle_chat_view(tail.items, tail.count, &view, &m) == 0) {
+            if (m) {
+                const puddle_view_msg *last = &view[m - 1];
+                cv->has_last = 1;
+                cv->last_ts = last->ts;
+                snprintf(cv->last_id, sizeof cv->last_id, "%s", last->id);
+                snprintf(cv->last_sender, sizeof cv->last_sender, "%s", last->sender);
+                cv->deleted = last->deleted;
+                preview_of(last->body ? last->body : "", cv->preview, sizeof cv->preview);
+                int64_t marker = puddle_streams_read_marker(c->ctx->streams, g->id);
+                for (size_t k = 0; k < m; k++)
+                    if (strcmp(view[k].sender, me) != 0 && !view[k].deleted && view[k].rts > marker && cv->unread < 99)
+                        cv->unread++;
+            }
+            puddle_view_free(view, m);
+        }
+        puddle_event_list_free(&tail);
+    }
+    puddle_group_list_free(groups, n_groups);
     qsort(convs, n, sizeof *convs, cmp_conv);
 
     puddle_jw_object(w);
@@ -545,19 +645,29 @@ static int list_conversations(const puddle_call *c, puddle_jw *w)
     for (; i < n && shown < limit && w->len + 1500 <= w->cap; i++, shown++) {
         const conversation *cv = &convs[i];
         puddle_jw_object(w);
-        puddle_jw_str(w, "user", cv->user);
-        puddle_jw_str(w, "stream", puddle_stream_state_name(cv->state));
-        puddle_jw_key(w, "last");
-        puddle_jw_object(w);
-        puddle_jw_str(w, "id", cv->last_id);
-        puddle_jw_str(w, "sender", cv->last_sender);
-        puddle_jw_num(w, "ts", cv->last_ts);
-        puddle_jw_flag(w, "outgoing", strcmp(cv->last_sender, me) == 0);
-        if (cv->deleted)
-            puddle_jw_flag(w, "deleted", 1);
-        else
-            puddle_jw_str(w, "preview", cv->preview);
-        puddle_jw_end_object(w);
+        puddle_jw_str(w, "kind", cv->group ? "group" : "dm");
+        if (cv->group) {
+            puddle_jw_str(w, "group", cv->user);
+            puddle_jw_str(w, "name", cv->name);
+            puddle_jw_num(w, "members", cv->nmembers);
+            puddle_jw_num(w, "sort_ts", cv->last_ts);
+        } else {
+            puddle_jw_str(w, "user", cv->user);
+            puddle_jw_str(w, "stream", puddle_stream_state_name(cv->state));
+        }
+        if (cv->has_last) {
+            puddle_jw_key(w, "last");
+            puddle_jw_object(w);
+            puddle_jw_str(w, "id", cv->last_id);
+            puddle_jw_str(w, "sender", cv->last_sender);
+            puddle_jw_num(w, "ts", cv->last_ts);
+            puddle_jw_flag(w, "outgoing", strcmp(cv->last_sender, me) == 0);
+            if (cv->deleted)
+                puddle_jw_flag(w, "deleted", 1);
+            else
+                puddle_jw_str(w, "preview", cv->preview);
+            puddle_jw_end_object(w);
+        }
         puddle_jw_num(w, "unread", cv->unread);
         puddle_jw_end_object(w);
     }
@@ -579,8 +689,10 @@ static int mark_read(const puddle_call *c, puddle_jw *w)
     const char *b = c->body_len ? (const char *)c->body : "{}";
     size_t bl = c->body_len ? c->body_len : 2;
     char user[128], err[200];
-    if (!puddle_json_valid_object(b, bl) || puddle_json_member(b, bl, "user", &v) != 0 || puddle_json_string(v, user, sizeof user) != 0 ||
-        !puddle_id_valid(user))
+    /* a direct message is named by the person, a group by its id; the marker is kept the same way for both */
+    if (!puddle_json_valid_object(b, bl) ||
+        (puddle_json_member(b, bl, "user", &v) != 0 && puddle_json_member(b, bl, "group", &v) != 0) ||
+        puddle_json_string(v, user, sizeof user) != 0 || !puddle_id_valid(user))
         return puddle_fail(w, 400, "bad_request");
     if (puddle_streams_set_read_marker(c->ctx->streams, user, puddle_call_now_ms(c), err, sizeof err) != 0)
         return puddle_fail(w, 500, "internal");
@@ -627,10 +739,11 @@ static void reject(puddle_jw *w, const char *id, const char *reason)
     puddle_jw_end_object(w);
 }
 
-/* One event from the peer `sender`: the reason it is refused, or NULL if it was stored (and `dup` says whether it
- * was already there). */
-static const char *take_event(puddle_ctx *ctx, const char *sender, const unsigned char sender_pub[32],
-                              const char *sender_kid, const char *chat, puddle_span ev, char id_out[PUDDLE_ID_HEX + 1], int *dup)
+/* One delivered event, taken as the policy says. The envelope, the id (a hash of the exact bytes) and the signature are the same for
+ * every chat; what makes an event acceptable in this chat, and what is done with it, is the policy's. Returns the reason it is
+ * refused, or NULL if it was taken (`dup` says whether it was already there). */
+const char *puddle_take_signed(const puddle_event_policy *pol, const unsigned char sender_pub[32], const char *sender_kid, puddle_span ev,
+                               char id_out[PUDDLE_ID_HEX + 1], int *dup)
 {
     puddle_span v;
     char claimed[PUDDLE_ID_HEX + 1], sigtext[PUDDLE_SIG_TEXT_MAX + 4];
@@ -650,8 +763,6 @@ static const char *take_event(puddle_ctx *ctx, const char *sender, const unsigne
     }
     size_t tl = strlen(text);
     const char *reason = NULL;
-    puddle_message m;
-    memset(&m, 0, sizeof m);
     char hash[65];
     unsigned char sig[64], pub[32];
     char kid[65];
@@ -669,16 +780,8 @@ static const char *take_event(puddle_ctx *ctx, const char *sender, const unsigne
         reason = "bad_signature";
         goto out;
     }
-    if (puddle_chat_event_parse(text, tl, &m, &reason) != 0) 
+    if ((reason = pol->judge(pol->user, text, tl)) != NULL)
         goto out;
-    if (strcmp(m.chat, chat) != 0) {
-        reason = "wrong_chat";
-        goto out;
-    }
-    if (strcmp(m.sender, sender) != 0) {
-        reason = "wrong_sender";
-        goto out;
-    }
     /* Only the key they use now. A retired key is what a stolen phone leaves behind; a message it signs after the
      * owner has changed keys is exactly what changing keys is meant to stop. */
     if (strcmp(kid, sender_kid) != 0) {
@@ -690,27 +793,125 @@ static const char *take_event(puddle_ctx *ctx, const char *sender, const unsigne
         reason = "bad_signature";
         goto out;
     }
-    {
-        char err[300];
-        int ar = puddle_store_append(ctx->store, chat, text, tl, sigtext, puddle_ctx_now_ms(ctx), id_out, err, sizeof err);
-        if (ar < 0) {
-            reason = "storage_error";
-            puddle_log(PUDDLE_LOG_WARN, "cannot store a message from %.12s…: %s", sender, err);
-        }
-        else
-            *dup = ar == PUDDLE_APPEND_DUPLICATE;
-    }
+    reason = pol->commit(pol->user, text, tl, sigtext, id_out, dup);
 out:
-    puddle_message_free(&m);
     free(text);
     return reason;
+}
+
+/* the policy of a direct message: a message, edit or redaction in the chat these two share, from the one who sent it */
+typedef struct {
+    puddle_ctx *ctx;
+    const char *sender;
+    const char *chat;
+} dm_policy;
+
+static const char *dm_judge(void *user, const char *text, size_t tl)
+{
+    dm_policy *p = user;
+    puddle_message m;
+    const char *reason = NULL;
+    if (puddle_chat_event_parse(text, tl, &m, &reason) != 0)
+        return reason;
+    if (strcmp(m.chat, p->chat) != 0)
+        reason = "wrong_chat";
+    else if (strcmp(m.sender, p->sender) != 0)
+        reason = "wrong_sender";
+    puddle_message_free(&m);
+    return reason;
+}
+
+const char *puddle_store_delivered(puddle_ctx *ctx, const char *chat, const char *sender, const char *text, size_t tl, const char *sigtext,
+                                   char id_out[PUDDLE_ID_HEX + 1], int *dup)
+{
+    char err[300];
+    int ar = puddle_store_append(ctx->store, chat, text, tl, sigtext, puddle_ctx_now_ms(ctx), id_out, err, sizeof err);
+    if (ar < 0) {
+        puddle_log(PUDDLE_LOG_WARN, "cannot store a message from %.12s…: %s", sender, err);
+        return "storage_error";
+    }
+    *dup = ar == PUDDLE_APPEND_DUPLICATE;
+    return NULL;
+}
+
+static const char *dm_commit(void *user, const char *text, size_t tl, const char *sigtext, char id_out[PUDDLE_ID_HEX + 1], int *dup)
+{
+    dm_policy *p = user;
+    return puddle_store_delivered(p->ctx, p->chat, p->sender, text, tl, sigtext, id_out, dup);
+}
+
+/* Take every event of a delivery under `pol` and answer with what became of each. A delivery that is too long is refused whole rather
+ * than half taken. `evs` is the "events" array. */
+int puddle_process_delivery(const puddle_call *c, puddle_jw *w, puddle_span evs, const puddle_event_policy *pol, const unsigned char sender_pub[32],
+                            const char *sender_kid)
+{
+    puddle_span ev;
+    /* first pass: count, so a delivery that is too long is refused whole rather than half taken */
+    size_t cursor = 0, count = 0;
+    int r;
+    while ((r = puddle_json_array_next(evs, &cursor, &ev)) == 1)
+        if (++count > PUDDLE_DELIVERY_MAX_EVENTS)
+            return puddle_fail(w, 400, "too_many_events");
+    if (r < 0)
+        return puddle_fail(w, 400, "bad_request");
+
+    char (*acc)[PUDDLE_ID_HEX + 1] = calloc(count ? count : 1, sizeof *acc);
+    char (*dup)[PUDDLE_ID_HEX + 1] = calloc(count ? count : 1, sizeof *dup);
+    char (*rej_id)[PUDDLE_ID_HEX + 1] = calloc(count ? count : 1, sizeof *rej_id);
+    const char **rej_why = calloc(count ? count : 1, sizeof *rej_why);
+    if (!acc || !dup || !rej_id || !rej_why) {
+        free(acc); free(dup); free(rej_id); free(rej_why);
+        return puddle_fail(w, 500, "internal");
+    }
+    size_t na = 0, nd = 0, nr = 0;
+    cursor = 0;
+    while (puddle_json_array_next(evs, &cursor, &ev) == 1) {
+        char id[PUDDLE_ID_HEX + 1];
+        int is_dup;
+        const char *why = puddle_take_signed(pol, sender_pub, sender_kid, ev, id, &is_dup);
+        if (why) {
+            snprintf(rej_id[nr], sizeof rej_id[nr], "%s", id);
+            rej_why[nr++] = why;
+        } else if (is_dup) {
+            snprintf(dup[nd++], sizeof dup[0], "%s", id);
+        } else {
+            snprintf(acc[na++], sizeof acc[0], "%s", id);
+        }
+    }
+    puddle_jw_object(w);
+    puddle_jw_key(w, "accepted");
+    puddle_jw_array(w);
+    for (size_t i = 0; i < na; i++) puddle_jw_string(w, acc[i]);
+    puddle_jw_end_array(w);
+    puddle_jw_key(w, "duplicate");
+    puddle_jw_array(w);
+    for (size_t i = 0; i < nd; i++) puddle_jw_string(w, dup[i]);
+    puddle_jw_end_array(w);
+    puddle_jw_key(w, "rejected");
+    puddle_jw_array(w);
+    for (size_t i = 0; i < nr; i++) reject(w, rej_id[i], rej_why[i]);
+    puddle_jw_end_array(w);
+    puddle_jw_end_object(w);
+    free(acc); free(dup); free(rej_id); free(rej_why);
+    if (na)
+        puddle_log(PUDDLE_LOG_INFO, "%zu message%s from %.12s…", na, na == 1 ? "" : "s", c->sender);
+    return 200;
 }
 
 static int events_post(const puddle_call *c, puddle_jw *w)
 {
     const char *b = (const char *)c->body;
-    puddle_span chat_v, evs, ev;
+    puddle_span chat_v, evs;
     char chat[PUDDLE_USER_ID_LEN + 1], me[PUDDLE_USER_ID_LEN + 1], want[PUDDLE_USER_ID_LEN + 1];
+
+    /* a delivery for a group chat is judged by the group's rules */
+    if (puddle_json_valid_object(b, c->body_len) && puddle_json_member(b, c->body_len, "chat", &chat_v) == 0 &&
+        puddle_json_string(chat_v, chat, sizeof chat) == 0) {
+        puddle_identity_id(c->ctx->identity, me);
+        puddle_dm_chat_id(me, c->sender, want);
+        if (strcmp(chat, want) != 0 && puddle_id_valid(chat))
+            return puddle_group_events_post(c, w, chat);
+    }
 
     /* the sender is a known peer (their key is how the request was checked), but may not have an open stream */
     puddle_stream st;
@@ -740,56 +941,9 @@ static int events_post(const puddle_call *c, puddle_jw *w)
         return puddle_fail(w, 500, "internal");
     puddle_key_id(head.sign_pub, kid);
 
-    /* first pass: count, so a delivery that is too long is refused whole rather than half taken */
-    size_t cursor = 0, count = 0;
-    int r;
-    while ((r = puddle_json_array_next(evs, &cursor, &ev)) == 1)
-        if (++count > PUDDLE_DELIVERY_MAX_EVENTS)
-            return puddle_fail(w, 400, "too_many_events");
-    if (r < 0)
-        return puddle_fail(w, 400, "bad_request");
-
-    char (*acc)[PUDDLE_ID_HEX + 1] = calloc(count ? count : 1, sizeof *acc);
-    char (*dup)[PUDDLE_ID_HEX + 1] = calloc(count ? count : 1, sizeof *dup);
-    char (*rej_id)[PUDDLE_ID_HEX + 1] = calloc(count ? count : 1, sizeof *rej_id);
-    const char **rej_why = calloc(count ? count : 1, sizeof *rej_why);
-    if (!acc || !dup || !rej_id || !rej_why) {
-        free(acc); free(dup); free(rej_id); free(rej_why);
-        return puddle_fail(w, 500, "internal");
-    }
-    size_t na = 0, nd = 0, nr = 0;
-    cursor = 0;
-    while (puddle_json_array_next(evs, &cursor, &ev) == 1) {
-        char id[PUDDLE_ID_HEX + 1];
-        int is_dup;
-        const char *why = take_event(c->ctx, c->sender, head.sign_pub, kid, chat, ev, id, &is_dup);
-        if (why) {
-            snprintf(rej_id[nr], sizeof rej_id[nr], "%s", id);
-            rej_why[nr++] = why;
-        } else if (is_dup) {
-            snprintf(dup[nd++], sizeof dup[0], "%s", id);
-        } else {
-            snprintf(acc[na++], sizeof acc[0], "%s", id);
-        }
-    }
-    puddle_jw_object(w);
-    puddle_jw_key(w, "accepted");
-    puddle_jw_array(w);
-    for (size_t i = 0; i < na; i++) puddle_jw_string(w, acc[i]);
-    puddle_jw_end_array(w);
-    puddle_jw_key(w, "duplicate");
-    puddle_jw_array(w);
-    for (size_t i = 0; i < nd; i++) puddle_jw_string(w, dup[i]);
-    puddle_jw_end_array(w);
-    puddle_jw_key(w, "rejected");
-    puddle_jw_array(w);
-    for (size_t i = 0; i < nr; i++) reject(w, rej_id[i], rej_why[i]);
-    puddle_jw_end_array(w);
-    puddle_jw_end_object(w);
-    free(acc); free(dup); free(rej_id); free(rej_why);
-    if (na)
-        puddle_log(PUDDLE_LOG_INFO, "%zu message%s from %.12s…", na, na == 1 ? "" : "s", c->sender);
-    return 200;
+    dm_policy dp = { c->ctx, c->sender, chat };
+    puddle_event_policy pol = { dm_judge, dm_commit, &dp };
+    return puddle_process_delivery(c, w, evs, &pol, head.sign_pub, kid);
 }
 
 const puddle_route puddle_message_routes[] = {

@@ -17,7 +17,8 @@ Item {
     readonly property color sideColor: Qt.darker(palette.window, 1.04)
 
     function openFriends() { chats.close(); page = "friends"; showContent = true }
-    function openChat(id) { chats.open(id); page = "chat"; showContent = true }
+    function openGroups() { chats.close(); page = "groups"; showContent = true }
+    function openChat(id, kind) { chats.open(id, kind || "dm"); page = "chat"; showContent = true }
     function openLog() { chats.close(); page = "log"; showContent = true }
     function addFriend() { addPopup.open() }
     function goBack() { showContent = false }
@@ -32,6 +33,7 @@ Item {
     Connections {
         target: shell.chats
         function onFailed(what) { toast.show(what) }
+        function onGroupCreated(id) { shell.openChat(id, "group") }
     }
 
     // The window cannot reach its own Puddle: say so, rather than showing stale lists as if they were current.
@@ -87,7 +89,7 @@ Item {
                     ToolTip.text: qsTr("Friends")
                     // the unread mark, like Discord's red badge
                     Rectangle {
-                        visible: shell.chats.unreadTotal + shell.chats.incomingRequests > 0
+                        visible: shell.chats.unreadTotal + shell.chats.incomingRequests + shell.chats.incomingGroupInvites > 0
                         anchors.right: parent.right; anchors.bottom: parent.bottom
                         anchors.rightMargin: -4; anchors.bottomMargin: -4
                         width: Math.max(18, badge.implicitWidth + 8); height: 18; radius: 9
@@ -96,7 +98,7 @@ Item {
                         Label {
                             id: badge
                             anchors.centerIn: parent
-                            text: shell.chats.unreadTotal + shell.chats.incomingRequests
+                            text: shell.chats.unreadTotal + shell.chats.incomingRequests + shell.chats.incomingGroupInvites
                             color: "white"; font.pixelSize: 10; font.bold: true
                         }
                     }
@@ -152,6 +154,32 @@ Item {
                     onClicked: shell.openFriends()
                 }
 
+                ItemDelegate {
+                    id: groupsButton
+                    objectName: "groupsButton"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.rightMargin: 8
+                    highlighted: shell.page === "groups" && (shell.wide || shell.showContent)
+                    Accessible.name: qsTr("Groups")
+                    background: Rectangle {
+                        radius: 6
+                        color: groupsButton.highlighted ? Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.14)
+                               : groupsButton.hovered ? Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.07) : "transparent"
+                    }
+                    contentItem: RowLayout {
+                        spacing: 12
+                        Label { text: "💬"; font.pixelSize: 18 }
+                        Label { text: qsTr("Groups"); Layout.fillWidth: true; font.bold: true }
+                        Rectangle {
+                            visible: shell.chats.incomingGroupInvites > 0
+                            width: 20; height: 20; radius: 10; color: "#d9453d"
+                            Label { anchors.centerIn: parent; text: shell.chats.incomingGroupInvites; color: "white"; font.pixelSize: 11; font.bold: true }
+                        }
+                    }
+                    onClicked: shell.openGroups()
+                }
+
                 Label {
                     Layout.margins: 16
                     Layout.bottomMargin: 4
@@ -176,7 +204,8 @@ Item {
                         required property var model
                         width: ListView.view.width
                         height: 52
-                        highlighted: shell.page === "chat" && shell.chats.current === model.user
+                        highlighted: shell.page === "chat" && shell.chats.current === model.id
+                        readonly property bool isGroup: model.kind === "group"
                         background: Rectangle {
                             radius: 6
                             color: dm.highlighted ? Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.14)
@@ -185,7 +214,7 @@ Item {
                         Accessible.name: model.name + (model.unread > 0 ? qsTr(", %n unread", "", model.unread) : "")
                         contentItem: RowLayout {
                             spacing: 12
-                            Avatar { chats: shell.chats; name: dm.model.name; hash: dm.model.avatar; tint: dm.model.color; size: 32 }
+                            Avatar { chats: shell.chats; name: dm.model.name; hash: dm.model.avatar || ""; tint: dm.model.color || ""; size: 32 }
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 0
@@ -200,8 +229,9 @@ Item {
                                     elide: Text.ElideRight
                                     font.pixelSize: 11
                                     opacity: 0.6
-                                    text: dm.model.last.deleted ? qsTr("Message deleted")
-                                          : (dm.model.last.outgoing ? qsTr("You: ") : "") + dm.model.last.preview
+                                    text: !dm.model.last ? (dm.isGroup ? (dm.model.members === 1 ? qsTr("1 member") : qsTr("%1 members").arg(dm.model.members)) : "")
+                                          : dm.model.last.deleted ? qsTr("Message deleted")
+                                          : (dm.isGroup ? dm.model.lastBy + ": " : (dm.model.last.outgoing ? qsTr("You: ") : "")) + dm.model.last.preview
                                 }
                             }
                             Rectangle {
@@ -210,7 +240,7 @@ Item {
                                 Label { id: unreadLabel; anchors.centerIn: parent; text: dm.model.unread; color: "white"; font.pixelSize: 10; font.bold: true }
                             }
                         }
-                        onClicked: shell.openChat(model.user)
+                        onClicked: shell.openChat(model.id, model.kind)
                     }
                     Label {
                         anchors.centerIn: parent
@@ -281,6 +311,16 @@ Item {
                 onOpenChat: id => shell.openChat(id)
                 onBack: shell.goBack()
             }
+            GroupsPage {
+                objectName: "groupsPage"
+                anchors.fill: parent
+                visible: shell.page === "groups"
+                chats: shell.chats
+                narrow: !shell.wide
+                onNewGroup: newGroup.open()
+                onOpenGroup: id => shell.openChat(id, "group")
+                onBack: shell.goBack()
+            }
             LogPage {
                 anchors.fill: parent
                 visible: shell.page === "log"
@@ -295,11 +335,14 @@ Item {
                 chats: shell.chats
                 narrow: !shell.wide
                 onBack: shell.goBack()
+                onShowGroup: groupPopup.open()
             }
         }
     }
 
     AddFriendPopup { id: addPopup; chats: shell.chats; backend: shell.backend }
+    NewGroupPopup { id: newGroup; chats: shell.chats }
+    GroupPopup { id: groupPopup; objectName: "groupPopup"; chats: shell.chats }
 
     Shortcut { sequences: [StandardKey.New]; onActivated: shell.addFriend() }
     // Alt+Up / Alt+Down walk through the conversations, as in Discord
@@ -310,7 +353,7 @@ Item {
         for (let k = 0; k < n; k++)
             if (chats.current === dmUser(k)) i = k
         i = i < 0 ? (delta > 0 ? 0 : n - 1) : Math.max(0, Math.min(n - 1, i + delta))
-        openChat(dmUser(i))
+        openChat(dmUser(i), chats.kindAt(i))
     }
     function dmUser(row) { return chats.userAt(row) }
     Shortcut { sequences: ["Alt+Up"]; onActivated: shell.step(-1) }

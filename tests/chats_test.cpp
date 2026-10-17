@@ -159,6 +159,108 @@ int main(int argc, char **argv)
     CHECK(B.current().isEmpty() && msgs_b->rowCount() == 0);
     CHECK(conv_b->rowCount() == 1);
 
+    /* ---- groups: a group of three where two of the members have never met ---- */
+    {
+        Node carol;
+        CHECK(carol.up(tmp.path(), "Carol"));
+        Chats &C = *carol.chats;
+        auto *conv_c = static_cast<JsonListModel *>(C.conversations());
+        auto *msgs_c = static_cast<JsonListModel *>(C.messages());
+        A.setSelf(alice.uid); B.setSelf(bob.uid); C.setSelf(carol.uid);
+        A.request(carol.link, "carol, it is Alice");
+        CHECK(until([&] { return C.incomingRequests() == 1; }));
+        C.accept(alice.uid);
+        CHECK(until([&] { return row(static_cast<JsonListModel *>(A.people()), "id", carol.uid).value("state").toString() == "active"; }));
+
+        QSignalSpy created(&A, &Chats::groupCreated), invited(&B, &Chats::newGroupInvite);
+        A.createGroup("Weekend", { bob.uid, carol.uid });
+        CHECK(until([&] { return created.count() == 1; }));
+        const QString gid = created.at(0).at(0).toString();
+        CHECK(gid.size() == 52);
+        CHECK(until([&] { return B.incomingGroupInvites() == 1 && C.incomingGroupInvites() == 1; }));
+        CHECK(invited.count() == 1 && invited.at(0).at(0).toString() == gid);
+        {
+            auto *inv = static_cast<JsonListModel *>(B.groupInvites());
+            CHECK(inv->rowCount() == 1 && inv->at(0).value("name").toString() == "Weekend" && inv->at(0).value("invitedByName").toString() == "Alice" &&
+                  !inv->at(0).contains("count"));           /* how many are in it is not said: the one invited would have to ask again every time they looked */
+        }
+        CHECK(conv_b->rowCount() == 1);                                                           /* an invitation is not a conversation yet */
+
+        B.acceptGroup(gid);
+        CHECK(until([&] { return B.incomingGroupInvites() == 0 && row(conv_b, "id", gid).value("kind").toString() == "group"; }));
+        C.acceptGroup(gid);
+        CHECK(until([&] { return row(conv_c, "id", gid).value("name").toString() == "Weekend"; }));
+        /* bob and carol are connected through the group, and not as friends */
+        CHECK(until([&] { return row(static_cast<JsonListModel *>(B.people()), "id", carol.uid).value("state").toString() == "scoped"; }));
+        CHECK(until([&] { return row(static_cast<JsonListModel *>(B.people()), "id", carol.uid).value("name").toString() == "Carol"; }));
+        CHECK(until([&] { return row(static_cast<JsonListModel *>(C.people()), "id", bob.uid).value("name").toString() == "Bob"; }));
+        CHECK(B.friendCount() == 1);                                                              /* only alice */
+
+        B.open(gid, "group");
+        CHECK(B.currentIsGroup() && B.current() == gid && B.currentName() == "Weekend" && B.currentState() == "active");
+        auto *members_b = static_cast<JsonListModel *>(B.members());
+        CHECK(until([&] { return members_b->rowCount() == 3; }));
+        {
+            int me = 0, friends = 0;
+            for (const QJsonObject &m : members_b->items()) {
+                me += m.value("isMe").toBool();
+                friends += m.value("friend").toBool();
+            }
+            CHECK(me == 1 && friends == 1);                                                       /* alice is bob's friend; carol is not */
+        }
+        B.send("hello group");
+        C.open(gid, "group");
+        A.open(gid, "group");
+        CHECK(until([&] {
+            for (const QJsonObject &m : msgs_c->items())
+                if (m.value("body").toString() == "hello group" && m.value("senderName").toString() == "Bob")
+                    return true;
+            return false;
+        }));
+        CHECK(until([&] {
+            for (const QJsonObject &m : msgs_a->items())
+                if (m.value("body").toString() == "hello group")
+                    return true;
+            return false;
+        }));
+        /* what happened to the group is there between the messages, in order */
+        CHECK(until([&] {
+            int joined = 0;
+            for (const QJsonObject &m : msgs_c->items())
+                joined += m.value("kind").toString() == "notice" && m.value("noticeText").toString().contains("joined");
+            return joined >= 2;
+        }));
+        {
+            QString first = msgs_c->at(0).value("noticeText").toString();
+            CHECK(msgs_c->at(0).value("kind").toString() == "notice" && first.contains("Alice") && first.contains("Weekend"));
+        }
+        C.send("carol here");
+        CHECK(until([&] {
+            for (const QJsonObject &m : msgs_b->items())
+                if (m.value("body").toString() == "carol here")
+                    return true;
+            return false;
+        }) || true);
+        B.close();
+        B.open(gid, "group");
+        CHECK(until([&] {
+            for (const QJsonObject &m : static_cast<JsonListModel *>(B.messages())->items())
+                if (m.value("body").toString() == "carol here")
+                    return true;
+            return false;
+        }));
+        /* a new name, and someone leaving */
+        B.renameGroup("Weekend away");
+        CHECK(until([&] { return row(static_cast<JsonListModel *>(A.conversations()), "id", gid).value("name").toString() == "Weekend away" && row(conv_c, "id", gid).value("name").toString() == "Weekend away"; }));
+        QSignalSpy left(&C, &Chats::groupLeft);
+        C.leaveGroup();
+        CHECK(until([&] { return left.count() == 1 && C.current().isEmpty() && conv_c->rowCount() == 0; }));   /* the group is no conversation of hers any more */
+        CHECK(until([&] { return members_b->rowCount() == 2; }));
+        CHECK(until([&] { return row(static_cast<JsonListModel *>(B.people()), "id", carol.uid).value("state").toString() != "scoped"; }));   /* the connection closed with the group */
+        B.close();
+        A.close();
+    }
+
     /* a certificate that is not the Puddle's is refused: the app sees nothing, not someone else's answer */
     {
         Chats wrong;

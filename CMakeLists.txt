@@ -60,6 +60,9 @@ add_library(puddle_core STATIC
   src/core/profile.c
   src/core/profiles_api.c
   src/core/ratelimit.c
+  src/core/group.c
+  src/core/groupapi.c
+  src/core/groupflow.c
   src/core/link.c
   src/core/router.c
   src/core/routes.c
@@ -104,7 +107,7 @@ if(PUDDLE_BUILD_GUI)
       URI Puddle
       VERSION 1.0
       QML_FILES src/gui/Main.qml src/gui/Setup.qml src/gui/Shell.qml src/gui/Avatar.qml src/gui/PersonRow.qml
-        src/gui/ChatPage.qml src/gui/FriendsPage.qml src/gui/AddFriendPopup.qml src/gui/LogPage.qml
+        src/gui/ChatPage.qml src/gui/GroupsPage.qml src/gui/NewGroupPopup.qml src/gui/GroupInviteRow.qml src/gui/GroupPopup.qml src/gui/FriendsPage.qml src/gui/AddFriendPopup.qml src/gui/LogPage.qml
       RESOURCES src/gui/puddle.png)
     target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network)
     if(APPLE)
@@ -159,7 +162,7 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link streams ratelimit access owner_streams client outbox inbound open_request flow message messages keysync wireprofile profiles e2e)
+foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link group groupapi groupowner streams ratelimit access owner_streams client outbox inbound open_request flow message messages keysync wireprofile profiles e2e group_e2e)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)

@@ -39,8 +39,8 @@ Losing it logs people out and resets read markers; it never loses messages.
 
 ## Chat ids
 
-- **Group:** the id of its `chat.create` event (content-addressed, so ids can't collide and
-  every member derives the same one).
+- **Group:** `base32(SHA-256("group\n" creator "\n" ts "\n" nonce))`, written into its `chat.create` event, which every member can check
+  (the event cannot contain its own hash). See `docs/groups.md`.
 - **DM:** `base32(SHA-256("dm" || sort(userA, userB)))`. Both sides compute it independently, no
   coordination needed.
 
@@ -85,7 +85,7 @@ One JSON object per line, UTF-8, terminated by `\n`:
 | `body`   | text (encrypted), for `message` / `edit` / `chat.rename` |
 | `ref`    | target event id, for `edit`, `redact`, replies |
 
-A **group** chat's first record is `chat.create` (initial members), so it is self-describing; name, membership,
+A **group** chat's first record is `chat.create` (its name and a nonce; the id is made from its creator, time and nonce), so it is self-describing; name, membership,
 edits and redactions are derived by replaying it. A **direct message** chat has no `chat.create`: its id already
 names both people, so there is nothing for it to say.
 

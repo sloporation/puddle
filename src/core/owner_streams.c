@@ -138,7 +138,7 @@ static int list_streams(const puddle_call *c, puddle_jw *w)
         return puddle_fail(w, 500, "internal");
     size_t k = 0;
     for (size_t i = 0; i < n; i++)
-        if (!state_name[0] || all[i].state == want) {
+        if (!all[i].scoped_req && (!state_name[0] || all[i].state == want)) { /* a group request of ours is not someone to show */
             if (k != i) {
                 puddle_stream tmp = all[k];
                 all[k] = all[i];

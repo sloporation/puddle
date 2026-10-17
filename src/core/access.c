@@ -2,8 +2,10 @@
 
 #include "client.h"
 #include "encoding.h"
+#include "message.h"
 #include "wireprofile.h"
 #include "flow.h"
+#include "groupflow.h"
 #include "profiles_api.h"
 #include "log.h"
 
@@ -101,6 +103,9 @@ typedef struct {
     char invite[PUDDLE_INVITE_TOKEN_LEN + 1];
     char ticket[33];
     int has_scope;
+    char scope_group[PUDDLE_USER_ID_LEN + 1]; /* a group-only request: the group, and our own member.join proving we were invited */
+    char join_event[600];
+    char join_sig[180];
 } request;
 
 static void request_free(request *r) { puddle_peer_info_free(&r->peer); }
@@ -200,6 +205,13 @@ static int parse_request(const unsigned char *body, size_t len, request *r)
     if (rc < 0)
         goto bad;
     r->has_scope = rc == 0;
+    if (r->has_scope) {
+        puddle_span jv;
+        if (string_member(v, "group", r->scope_group, sizeof r->scope_group) != 0 || !puddle_id_valid(r->scope_group) ||
+            puddle_json_member(v.p, v.len, "join", &jv) != 0 || string_member(jv, "event", r->join_event, sizeof r->join_event) != 0 ||
+            string_member(jv, "sig", r->join_sig, sizeof r->join_sig) != 0)
+            goto bad;
+    }
     return 0;
 bad:
     request_free(r);
@@ -258,6 +270,123 @@ static int apply_request(void *user, puddle_stream *st, int exists)
     return 0;
 }
 
+/* ---- a group-only connection ---- */
+
+typedef struct {
+    const request *r;
+    int64_t now;
+} scoping;
+
+static int apply_scoped(void *user, puddle_stream *st, int exists)
+{
+    scoping *a = user;
+    if (!exists) {
+        st->created_ms = a->now;
+        st->state = PUDDLE_STREAM_SCOPED;
+    } else if (st->state == PUDDLE_STREAM_CLOSED || st->state == PUDDLE_STREAM_SCOPED || (st->state == PUDDLE_STREAM_PENDING_OUT && st->scoped_req)) {
+        st->state = PUDDLE_STREAM_SCOPED; /* anything else they are to us (a friend, or asking to be) stays as it is */
+        st->scoped_req = 0;               /* and if we had asked them for the same, this is the answer */
+    }
+    st->group_ok = 1;
+    st->owed = PUDDLE_OWED_SCOPED; /* the yes has to be told to them */
+    st->updated_ms = a->now;
+    if (st->naddr == 0 || !st->chain) { /* what we hold of a stranger is what they sent */
+        st->addr_seq = 0;
+        st->naddr = 0;
+        puddle_stream_add_address(st, a->r->peer.address);
+        if (puddle_stream_set_chain(st, a->r->peer.chain, a->r->peer.chain_len) != 0 ||
+            puddle_stream_set_profile(st, a->r->peer.profile, strlen(a->r->peer.profile)) != 0)
+            return -1;
+    } else {
+        puddle_stream_add_address(st, a->r->peer.address);
+    }
+    return 0;
+}
+
+typedef struct {
+    puddle_gevent ev;
+    const char *why;
+} joining;
+
+static int join_fn(void *user, puddle_group *g, int exists)
+{
+    joining *j = user;
+    if (!exists || g->my != PUDDLE_GROUP_IN) {
+        j->why = "not_in_group";
+        return 3;
+    }
+    int rc = puddle_group_apply(g, &j->ev, &j->why);
+    if (rc < 0)
+        return 3;
+    if (rc > 0)
+        return 1; /* they were in already */
+    g->updated_ms = j->ev.ts;
+    return 0;
+}
+
+/* Someone asks for a connection that is only for a group we are both in (or are about to be): their own member.join, signed, is the
+ * proof that someone in the group invited them. Whatever the outcome the answer is the usual empty 202. */
+static void scoped_request(puddle_ctx *ctx, const request *r, int64_t now)
+{
+    const char *id = r->peer.id;
+    char me[PUDDLE_USER_ID_LEN + 1], err[300], eid[65];
+    puddle_identity_id(ctx->identity, me);
+    if (!ctx->groups || !ctx->store || !strcmp(id, me)) {
+        refuse("not a group request", id);
+        return;
+    }
+    /* the join is theirs: the right chat, from them, and signed by the key in the chain they sent */
+    joining j;
+    const char *why;
+    if (puddle_group_event_parse(r->join_event, strlen(r->join_event), &j.ev, &why) != 0 || j.ev.type != PUDDLE_GE_JOIN ||
+        strcmp(j.ev.chat, r->scope_group) != 0 || strcmp(j.ev.sender, id) != 0) {
+        refuse("the join is not theirs", id);
+        return;
+    }
+    {
+        puddle_chain_head head;
+        char kid[65], want[65];
+        unsigned char sig[64];
+        if (puddle_chain_verify(r->peer.chain, r->peer.chain_len, id, &head, err, sizeof err) != 0 || puddle_event_sig_parse(r->join_sig, kid, sig) != 0) {
+            refuse("the join is not signed", id);
+            return;
+        }
+        puddle_key_id(head.sign_pub, want);
+        if (strcmp(kid, want) != 0 || !puddle_event_verify(head.sign_pub, r->join_event, strlen(r->join_event), sig)) {
+            refuse("the join is not signed by them", id);
+            return;
+        }
+    }
+    if (puddle_streams_size(ctx->streams) >= (ctx->max_peers ? ctx->max_peers : PUDDLE_MAX_PEERS)) {
+        puddle_stream have;
+        int known = puddle_streams_get(ctx->streams, id, &have) == 0;
+        if (known)
+            puddle_stream_free(&have);
+        if (!known) {
+            refuse("too many people on record", id);
+            return;
+        }
+    }
+    int gr = puddle_groups_update(ctx->groups, r->scope_group, join_fn, &j, err, sizeof err);
+    if (gr == 3 || gr < 0) {
+        refuse(gr == 3 && j.why ? j.why : "unknown group", id);
+        return;
+    }
+    if (gr == 0) {
+        puddle_store_append(ctx->store, r->scope_group, r->join_event, strlen(r->join_event), r->join_sig, now, eid, err, sizeof err);
+        puddle_log(PUDDLE_LOG_INFO, "%.12s… joined group %.12s…", id, r->scope_group);
+    }
+    scoping s = { r, now };
+    int urc = puddle_streams_update(ctx->streams, id, apply_scoped, &s, err, sizeof err);
+    if (urc == 0) {
+        puddle_flow_owe(ctx, id, PUDDLE_OWED_SCOPED);
+        puddle_media_want(ctx, id);
+        puddle_group_reconcile(ctx); /* now we can tell them that we are in the group too */
+    } else {
+        puddle_log(PUDDLE_LOG_WARN, "a group connection from %.12s… could not be recorded", id);
+    }
+}
+
 int puddle_access_post(const puddle_call *call, puddle_jw *w)
 {
     (void)w; /* the answer is always empty */
@@ -270,16 +399,16 @@ int puddle_access_post(const puddle_call *call, puddle_jw *w)
     puddle_stream rec;
     int have = -1;
 
-    if (r.has_scope) {
-        refuse("group-only connections are not supported yet", id);
-        goto done;
-    }
     if (puddle_streams_is_blocked(ctx->streams, id)) {
         refuse("blocked", id);
         goto done;
     }
     if (ctx->access_limit && !puddle_keyed_hit(ctx->access_limit, id, now)) {
         refuse("too many requests from them", id);
+        goto done;
+    }
+    if (r.has_scope) {
+        scoped_request(ctx, &r, now);
         goto done;
     }
 
