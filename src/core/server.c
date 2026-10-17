@@ -388,6 +388,24 @@ static void handle_request(puddle_server *srv, SSL *ssl, const char *peer)
         puddle_log(PUDDLE_LOG_INFO, "%s %s %s [%s] -> %d", peer, info.method, info.path, info.auth, info.status);
 }
 
+/* Closing a socket that still holds unread bytes (a body we refused to read) makes the kernel send a reset, which
+ * can destroy the answer before the client reads it. Say we are done, then swallow what is left, briefly. */
+static void linger_close(int fd)
+{
+    shutdown(fd, SHUT_WR);
+    char junk[1024];
+    size_t total = 0;
+    for (int i = 0; i < 20 && total < 65536; i++) {
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        if (poll(&p, 1, 50) <= 0)
+            break;
+        ssize_t n = read(fd, junk, sizeof junk);
+        if (n <= 0)
+            break;
+        total += (size_t)n;
+    }
+}
+
 static void *conn_main(void *arg)
 {
     conn *c = arg;
@@ -398,6 +416,7 @@ static void *conn_main(void *arg)
         if (SSL_accept(ssl) == 1) {
             handle_request(s, ssl, c->peer);
             SSL_shutdown(ssl);
+            linger_close(c->fd);
         } else {
             /* expected whenever a client rejects the self-signed cert */
             puddle_log(PUDDLE_LOG_INFO, "%s TLS handshake failed", c->peer);
