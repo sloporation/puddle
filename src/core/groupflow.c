@@ -704,7 +704,7 @@ void puddle_group_reconcile(puddle_ctx *ctx)
                 continue;
             puddle_stream st;
             int have = puddle_streams_get(ctx->streams, m->id, &st);
-            int resend = have == 0 && st.state == PUDDLE_STREAM_PENDING_OUT && st.scoped_req && now - st.updated_ms > 10 * 60 * 1000;
+            int resend = have == 0 && st.state == PUDDLE_STREAM_PENDING_OUT && st.scoped_req && now - st.updated_ms > 3 * 60 * 1000;
             int waiting = have == 0 && (st.state == PUDDLE_STREAM_PENDING_OUT || st.state == PUDDLE_STREAM_PENDING_IN) && !resend;
             if (have == 0)
                 puddle_stream_free(&st);
@@ -745,7 +745,7 @@ void puddle_group_reconcile(puddle_ctx *ctx)
             int shared = 0;
             for (size_t k = 0; k < gn && !shared; k++) {
                 const puddle_gmember *m = puddle_group_member(&gl[k], sl[i].id);
-                shared = gl[k].my == PUDDLE_GROUP_IN && m && m->state != PUDDLE_GM_LEFT; /* one who is invited and has not said yes to us yet may already have to somebody else */
+                shared = (gl[k].my == PUDDLE_GROUP_IN || gl[k].my == PUDDLE_GROUP_INVITED) && m && m->state != PUDDLE_GM_LEFT; /* a group we are invited to counts: whoever said yes first may have connected to us already */
             }
             if (shared)
                 continue;
