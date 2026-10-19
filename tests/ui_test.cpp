@@ -353,7 +353,7 @@ int main(int argc, char **argv)
         CHECK(until([&] { return made.count() == 1; }));
         const QString gid = made.at(0).at(0).toString();
         CHECK(until([&] { return A.currentIsGroup() && A.current() == gid && find("composer") != nullptr; }, 5000));   /* the window opens it */
-        CHECK(A.currentName() == "Weekend" && A.currentState() == "active");
+        CHECK(until([&] { return A.currentName() == "Weekend" && A.currentState() == "active"; }, 5000));   /* name and state arrive after the switch */
         CHECK(until([&] { return find("groupNotice") != nullptr; }, 5000));                       /* "You made the group “Weekend”" */
         CHECK(find("groupNotice")->property("text").toString().contains("Weekend") && find("groupNotice")->property("text").toString().contains("You"));
 

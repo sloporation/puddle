@@ -167,7 +167,7 @@ int puddle_media_want(puddle_ctx *ctx, const char *peer)
         if (puddle_media_have(ctx->config->data_dir, refs[i].hash))
             continue;
         char path[160], err[200];
-        snprintf(path, sizeof path, "/stream/v1/media?hash=%s", refs[i].hash);
+        snprintf(path, sizeof path, "/stream/v1/media?hash=%.64s", refs[i].hash);
         int waiting = 0;
         for (size_t k = 0; k < ni; k++)
             if (items[k].state != PUDDLE_OB_FAILED && !strcmp(items[k].peer, peer) && !strcmp(items[k].path, path))
