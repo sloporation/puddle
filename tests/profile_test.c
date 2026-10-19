@@ -195,7 +195,8 @@ static void test_images_are_forgiving(void)
     puts_file("notimage.txt", "hello");
     char fake[8] = { (char)0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
     put("huge.png", fake, sizeof fake);
-    truncate(at("huge.png"), (off_t)PUDDLE_IMAGE_MAX_BYTES + 1); /* sparse, 25 MiB + 1 */
+    if (truncate(at("huge.png"), (off_t)PUDDLE_IMAGE_MAX_BYTES + 1) != 0) /* sparse, 25 MiB + 1 */
+        perror("truncate");
     put("empty.png", "", 0);
 
     puddle_profiles p; char err[300];
