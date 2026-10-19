@@ -94,6 +94,10 @@ void puddle_event_free(puddle_event *e)
         return;
     free(e->event);
     free(e->sig);
+    if (e->plain) {
+        memset(e->plain, 0, strlen(e->plain));
+        free(e->plain);
+    }
     memset(e, 0, sizeof *e);
 }
 
@@ -118,7 +122,7 @@ void puddle_chunk_list_free(puddle_chunk_list *l)
 }
 
 static int event_init(puddle_event *e, const char *id, int64_t ts, int64_t rts, const char *event,
-                      size_t event_len, const char *sig)
+                      size_t event_len, const char *sig, const char *plain)
 {
     memset(e, 0, sizeof *e);
     memcpy(e->id, id, PUDDLE_ID_HEX + 1);
@@ -126,7 +130,8 @@ static int event_init(puddle_event *e, const char *id, int64_t ts, int64_t rts, 
     e->rts = rts;
     e->event = malloc(event_len + 1);
     e->sig = strdup(sig ? sig : "");
-    if (!e->event || !e->sig) {
+    e->plain = plain ? strdup(plain) : NULL;
+    if (!e->event || !e->sig || (plain && !e->plain)) {
         puddle_event_free(e);
         return -1;
     }
@@ -138,7 +143,7 @@ static int event_init(puddle_event *e, const char *id, int64_t ts, int64_t rts, 
 
 static int event_copy(puddle_event *dst, const puddle_event *src)
 {
-    return event_init(dst, src->id, src->ts, src->rts, src->event, src->event_len, src->sig);
+    return event_init(dst, src->id, src->ts, src->rts, src->event, src->event_len, src->sig, src->plain);
 }
 
 static int event_cmp(const puddle_event *a, const puddle_event *b)
@@ -266,6 +271,7 @@ typedef struct {
     size_t event_len;
     char sig[MAX_SIG + 1];
     char chat[MAX_CHAT_ID + 1];
+    char *plain;       /* malloc'd, or NULL: the opened text of a sealed event (outside the hashed bytes) */
 } record;
 
 /* The two fields every event must carry: "chat" and "ts". */
@@ -283,10 +289,12 @@ static int event_meta(const char *ev, size_t len, int64_t *ts, char chat_out[MAX
     return 0;
 }
 
-/* {"id":"<hex>","rts":N,"event":{...},"sig":"..."}; verifies that id is the hash of the event bytes */
+/* {"id":"<hex>","rts":N,"event":{...},"sig":"...","plain":"..."}; verifies that id is the hash of the event bytes.
+ * `plain` is optional and not part of what is hashed or signed; the caller frees r->plain. */
 static int parse_record(const char *line, size_t len, record *r)
 {
     puddle_span v;
+    r->plain = NULL;
     if (!puddle_json_valid_object(line, len))
         return -1;
     if (puddle_json_member(line, len, "id", &v) != 0 ||
@@ -307,6 +315,15 @@ static int parse_record(const char *line, size_t len, record *r)
         r->sig[0] = '\0';
     } else {
         return -1;
+    }
+
+    rc = puddle_json_member(line, len, "plain", &v);
+    if (rc < 0)
+        return -1;
+    if (rc == 0) {
+        r->plain = malloc(v.len + 1);
+        if (!r->plain || puddle_json_string(v, r->plain, v.len + 1) != 0)
+            return -1;
     }
 
     char hash[PUDDLE_ID_HEX + 1];
@@ -459,10 +476,13 @@ static int read_day_file(chat *c, const char *path, const char *day, int repair)
         if (parse_record(line, len, &r) != 0 || day_of_ts(r.ts, rday) != 0 ||
             strcmp(rday, day) != 0 || strcmp(r.chat, c->id) != 0) {
             puddle_log(PUDDLE_LOG_WARN, "store: skipping bad record in %s at byte %zu", path, offset);
+            free(r.plain);
             continue;
         }
         puddle_event *e = malloc(sizeof *e);
-        if (!e || event_init(e, r.id, r.ts, r.rts, r.event, r.event_len, r.sig) != 0) {
+        int made = e && event_init(e, r.id, r.ts, r.rts, r.event, r.event_len, r.sig, r.plain) == 0;
+        free(r.plain);
+        if (!made) {
             free(e);
             rc = -1;
             break;
@@ -633,7 +653,7 @@ static int write_all(int fd, const char *p, size_t n)
 }
 
 static int append_locked(puddle_store *s, const char *chat_id, const char *event, size_t event_len,
-                         const char *sig, int64_t rts_ms, char id_out[PUDDLE_ID_HEX + 1],
+                         const char *sig, const char *plain, int64_t rts_ms, char id_out[PUDDLE_ID_HEX + 1],
                          char *err, size_t errlen)
 {
     int64_t ts;
@@ -664,16 +684,48 @@ static int append_locked(puddle_store *s, const char *chat_id, const char *event
         rts_ms = now_ms();
     const char *sg = sig ? sig : "";
 
-    size_t cap = event_len + strlen(sg) + 128;
+    /* the opened text, as a JSON member to put after the signature; it is not part of what the id and signature cover */
+    size_t plain_cap = plain ? strlen(plain) * 6 + 32 : 0;
+    char *pj = plain ? malloc(plain_cap) : NULL;
+    size_t pjl = 0;
+    if (plain) {
+        puddle_jw w;
+        if (!pj) {
+            seterr(err, errlen, "out of memory");
+            return -1;
+        }
+        puddle_jw_init(&w, pj, plain_cap);
+        puddle_jw_object(&w);
+        puddle_jw_str(&w, "plain", plain);
+        puddle_jw_end_object(&w);
+        pjl = puddle_jw_finish(&w);
+        if (pjl < 3) {
+            free(pj);
+            seterr(err, errlen, "cannot encode the opened text");
+            return -1;
+        }
+    }
+
+    size_t cap = event_len + strlen(sg) + pjl + 128;
     char *line = malloc(cap);
     if (!line) {
+        free(pj);
         seterr(err, errlen, "out of memory");
         return -1;
     }
     int n = snprintf(line, cap, "{\"id\":\"%s\",\"rts\":%lld,\"event\":", id, (long long)rts_ms);
     memcpy(line + n, event, event_len);
     n += (int)event_len;
-    n += snprintf(line + n, cap - (size_t)n, ",\"sig\":\"%s\"}\n", sg);
+    n += snprintf(line + n, cap - (size_t)n, ",\"sig\":\"%s\"", sg);
+    if (pjl) { /* "{"plain":"..."}" -> ,"plain":"..." */
+        line[n++] = ',';
+        memcpy(line + n, pj + 1, pjl - 2);
+        n += (int)pjl - 2;
+        memset(pj, 0, plain_cap);
+    }
+    free(pj);
+    line[n++] = '}';
+    line[n++] = '\n';
 
     char dir[PUDDLE_PATH_MAX], path[PUDDLE_PATH_MAX], chats_dir[PUDDLE_PATH_MAX];
     struct stat st;
@@ -714,7 +766,7 @@ static int append_locked(puddle_store *s, const char *chat_id, const char *event
         puddle_fsync_dir(chats_dir);
 
     puddle_event *e = malloc(sizeof *e);
-    if (!e || event_init(e, id, ts, rts_ms, event, event_len, sg) != 0) {
+    if (!e || event_init(e, id, ts, rts_ms, event, event_len, sg, plain) != 0) {
         free(e);
         seterr(err, errlen, "out of memory (event is on disk; it will load next time)");
         return -1;
@@ -726,9 +778,9 @@ static int append_locked(puddle_store *s, const char *chat_id, const char *event
     return PUDDLE_APPEND_NEW;
 }
 
-int puddle_store_append(puddle_store *s, const char *chat_id, const char *event, size_t event_len,
-                        const char *sig, int64_t rts_ms, char id_out[PUDDLE_ID_HEX + 1],
-                        char *err, size_t errlen)
+int puddle_store_append_plain(puddle_store *s, const char *chat_id, const char *event, size_t event_len,
+                              const char *sig, const char *plain, int64_t rts_ms, char id_out[PUDDLE_ID_HEX + 1],
+                              char *err, size_t errlen)
 {
     if (!valid_chat_id(chat_id)) {
         seterr(err, errlen, "invalid chat id");
@@ -755,9 +807,16 @@ int puddle_store_append(puddle_store *s, const char *chat_id, const char *event,
         }
     }
     pthread_mutex_lock(&s->mu);
-    int rc = append_locked(s, chat_id, event, event_len, sig, rts_ms, id_out, err, errlen);
+    int rc = append_locked(s, chat_id, event, event_len, sig, plain, rts_ms, id_out, err, errlen);
     pthread_mutex_unlock(&s->mu);
     return rc;
+}
+
+int puddle_store_append(puddle_store *s, const char *chat_id, const char *event, size_t event_len,
+                        const char *sig, int64_t rts_ms, char id_out[PUDDLE_ID_HEX + 1],
+                        char *err, size_t errlen)
+{
+    return puddle_store_append_plain(s, chat_id, event, event_len, sig, NULL, rts_ms, id_out, err, errlen);
 }
 
 static int copy_tail(chat *c, size_t n, puddle_event_list *out)

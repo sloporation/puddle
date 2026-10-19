@@ -225,6 +225,14 @@ paths:
         `bad_signature`, `unknown_key` (signed by a key that is not the sender's current one),
         `unsupported_type`, `wrong_chat`, `wrong_sender` (the event names someone other than the sender),
         `bad_time` (not between the years 2000 and 2100), `bad_body`, `storage_error`.
+
+        **Message and edit text is encrypted** (docs/identity.md, "Encryption"): the event has `"encrypted": true`
+        and its `body` is the base64 of a blob only the chat's members' encryption keys can open. Its shape is
+        otherwise that of a plain event (see `ChatEvent`). Two more reasons follow from that: `not_encrypted` (a
+        message or edit with its text in the clear is refused in a chat that requires encryption, which is every
+        direct message and group) and `undecryptable` (it is not sealed to our current key, or was changed, or its
+        context does not match). The second is what a sender sees if it sealed to a key the recipient has since
+        replaced; the owner sends it again.
       requestBody:
         required: true
         content:
@@ -475,7 +483,7 @@ components:
         id: { $ref: "#/components/schemas/EventId" }
         event:
           type: string
-          description: The event's exact JSON text. `id` is the SHA-256 of these bytes.
+          description: The event's exact JSON text (a `ChatEvent`). `id` is the SHA-256 of these bytes.
         sig:
           type: string
           description: |
@@ -483,6 +491,35 @@ components:
             signature is Ed25519 over `puddle-event-v1\n` followed by the event's bytes. The key id is outside
             the signed bytes, so a Puddle that has changed keys can sign the same event again without
             changing its id.
+
+    ChatEvent:
+      type: object
+      description: |
+        What the `event` text of a `SignedEvent` holds for a chat event: a compact JSON object with these fields in this
+        order. Only `message`, `edit` and `redact` are chat events; group membership events have their own shapes.
+        Public channels, when they exist, will use the same event without `encrypted`.
+      required: [type, chat, sender, ts]
+      properties:
+        type: { type: string, enum: [message, edit, redact] }
+        chat: { $ref: "#/components/schemas/ChatId" }
+        sender: { type: string, description: The sender's user id. Must be the stream's peer. }
+        ts: { type: integer, format: int64, description: "UTC milliseconds, between the years 2000 and 2100. Strictly increasing per sender." }
+        body:
+          type: string
+          description: |
+            Required for `message` and `edit`, forbidden for `redact`. The text (1 to 4000 characters, valid UTF-8, no
+            control characters but newline and tab), or, when `encrypted` is true, the base64 of the encrypted text.
+        encrypted:
+          type: boolean
+          enum: [true]
+          description: |
+            Present only as `true`, after `body`. Absent means `body` is plain text; there is no `false`. The blob is
+            bound to this event's `type`, `chat`, `sender`, `ts` and `ref`, so it cannot be lifted into another event.
+        ref:
+          type: string
+          description: |
+            An event id. For a `message`, optional: the message it replies to. For an `edit` or `redact`, required: the
+            message it changes or takes back, which must be the sender's own and earlier.
 
     Delivery:
       type: object

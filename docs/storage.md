@@ -59,7 +59,7 @@ The order of a chat is by (`ts`, `id`), computed identically on every server.
 
 One JSON object per line, UTF-8, terminated by `\n`:
 
-    {"id":"<64 hex>","rts":1760000000000,"event":{...},"sig":"<base64>"}
+    {"id":"<64 hex>","rts":1760000000000,"event":{...},"sig":"<base64>","plain":"<text>"}
 
 - `event`: the signed, federated part. Written once, never changed. It must be one compact JSON
   object (no line breaks, at most 1 MiB) with a string `chat` equal to the chat it is filed under
@@ -70,8 +70,11 @@ One JSON object per line, UTF-8, terminated by `\n`:
   `puddle-event-v1\n` followed by those same bytes. The key id is outside the bytes, so signing the same event with a
   new key changes neither its id nor the bytes. A receiver of live events accepts only the sender's current key.
 - `rts`: when *this* server received it. Outside the hash and signature, so it differs per server.
-- An event is stored **exactly as signed**. Once encryption is on, that means message bodies are
-  ciphertext on disk.
+- `plain` (optional): for a sealed message or edit, the text this Puddle opened it to. Outside the hash and the signature,
+  like `rts`, and local to this Puddle: it is never sent on. It is what a reader shows, and it is why history survives the
+  encryption key being replaced. A record without one (an event from before sealing, or one that was never a message) simply has none.
+- An event is stored **exactly as signed**. For a message or edit that means the encrypted `body`, not the words; the words are
+  in `plain`.
 - File order inside a day file is arrival order on this server.
 
 ### Event (draft, edit freely)
@@ -82,7 +85,8 @@ One JSON object per line, UTF-8, terminated by `\n`:
 | `chat`   | chat id |
 | `sender` | user id (identity.md) |
 | `ts`     | sender's time, UTC ms |
-| `body`   | text (encrypted), for `message` / `edit` / `chat.rename` |
+| `body`   | text, for `message` / `edit` / `chat.rename`. With `encrypted` it is the base64 of the sealed text (identity.md, "Encryption") |
+| `encrypted` | `true` when `body` is encrypted; absent otherwise. For `message` / `edit` |
 | `ref`    | target event id, for `edit`, `redact`, replies |
 
 A **group** chat's first record is `chat.create` (its name and a nonce; the id is made from its creator, time and nonce), so it is self-describing; name, membership,
@@ -105,7 +109,7 @@ Deleting is a request to hide, not an erase: Puddles that copied the text can ke
 
 A direct message is `{"type":"message","chat":<dm id>,"sender":<id>,"ts":<ms>,"body":<text>}` with an optional
 `"ref"` (the id of the message replied to), fields in that order, no spaces. The body is 1 to 4000 characters
-of valid UTF-8 with no control characters but newline and tab. An event is at most 16 KiB. `ts` is made
+of valid UTF-8 with no control characters but newline and tab. An event is at most 32 KiB (a body sealed for a whole group is larger than the text). `ts` is made
 strictly increasing per Puddle, so two messages sent in the same millisecond are never the same bytes (which
 would make them one message).
 
@@ -129,8 +133,7 @@ would make them one message).
   - "Last N" reads whole day files, newest first, until it has N events, without loading the chat
     (day files are small). Used for chat list previews and tailing.
   - Loaded chats sit in an LRU cache (64 chats for now; bounding by bytes comes later).
-- **Search.** In memory, after the chat is loaded. Bodies are ciphertext on disk once encryption
-  lands, so grep on the files will not see message text.
+- **Search.** In memory, after the chat is loaded, over the opened text (`plain`).
 
 ## Index (for federation)
 

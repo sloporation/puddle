@@ -716,6 +716,24 @@ int puddle_streams_get(puddle_streams *s, const char *id_in, puddle_stream *out)
     return rc == 0 ? 0 : 1;
 }
 
+int puddle_streams_enc_key(puddle_streams *s, const char *id_in, unsigned char out[32])
+{
+    puddle_stream st;
+    if (puddle_streams_get(s, id_in, &st) != 0)
+        return -1;
+    int rc = -1;
+    if (st.chain) {
+        puddle_chain_head head;
+        char err[200];
+        if (puddle_chain_verify(st.chain, st.chain_len, st.id, &head, err, sizeof err) == 0) {
+            memcpy(out, head.enc_pub, 32);
+            rc = 0;
+        }
+    }
+    puddle_stream_free(&st);
+    return rc;
+}
+
 /* caller holds the lock */
 static int put_locked(puddle_streams *s, const puddle_stream *st, char *err, size_t errlen)
 {

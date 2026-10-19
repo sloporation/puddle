@@ -13,7 +13,7 @@ certificate pinning), the retrying outbox, direct messages with edit and delete,
 pictures over a stream, and the Qt app (Friends, conversations, chat, delivery state). 32 test suites, including two Puddles
 talking over TLS and the window driven by real clicks and keys.
 
-Group chats (phase 5) are built. Not built: Ponds, the phone client, encryption at rest. See "Later" below and `discuss-later.md`.
+Group chats (phase 5) are built, and message text is sealed between Puddles (phase 6). Not built: Ponds, the phone client, encryption at rest. See "Later" below and `discuss-later.md`.
 
 ## Order, and why
 
@@ -485,10 +485,28 @@ now travels directly (`told`); events about the group go to the invited too, or 
 
 *Commit point.*
 
+## Phase 6: Sealing message text
+
+- [x] **6.1 Seal and open.** `src/core/seal.c`: a body encrypted once with a random key and that key wrapped to each recipient's X25519
+  key (ephemeral X25519, HKDF-SHA256, ChaCha20-Poly1305: HPKE base mode from OpenSSL 3.0 parts). Bound to a caller context, so it cannot
+  be moved to another chat, sender, time or reply target, and a recipient cannot be added, dropped or swapped. Known answers are not
+  pinned against an independent implementation yet.
+- [x] **6.2 On events.** Messages and edits carry `"encrypted":true` with the sealed text as `body` (absent = plain, so public channels can use the same event); the sender seals to itself and the peer (DMs) or to itself and
+  every member it has an open stream with (groups). A Puddle refuses a message or edit sent in the clear (`not_encrypted`) or one it cannot
+  open (`undecryptable`). The receiver keeps the opened text beside the signed event (`plain`), so history stays readable when the
+  encryption key is rolled and no old key is kept. The event limit went from 16 to 32 KiB so a 4000-character message of 4-byte
+  characters still fits. Tests: `seal_test`, `message_test` (sealing, binding, view), `store_test` (`plain` persists, is not in the id),
+  `messages_test` (refusals, rolling), and `e2e_test` (neither log's signed event holds the words).
+- [ ] **6.3 Checking keys now and then.** See `discuss-later.md` #7.
+- [ ] **6.4 Group names and other group events.** See `discuss-later.md` #8.
+
+Not part of this phase: the phone client. A phone is given the same encryption key, so it opens what the Puddle can (`discuss-later.md` #6).
+
+*Commit point.*
+
 ## Later, not planned in detail
 
-Removing a member, a display name for the group-only connection, Ponds, encrypting message
-bodies, encrypting data at rest, the phone client and device pairing. Parked questions are in
+Removing a member, a display name for the group-only connection, Ponds, encrypting data at rest, the phone client and device pairing. Parked questions are in
 `discuss-later.md`.
 
 ## Decisions

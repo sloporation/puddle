@@ -346,6 +346,31 @@ static void test_concurrent(void)
     puddle_store_close(g_shared);
 }
 
+static void test_plain(void)
+{
+    char err[300], id[PUDDLE_ID_HEX + 1], id2[PUDDLE_ID_HEX + 1];
+    puddle_store *s = puddle_store_open(dir_for("plain"), err, sizeof err);
+    CHECK(s != NULL);
+    const char *ev = "{\"type\":\"message\",\"chat\":\"p1\",\"ts\":1760000000000,\"body\":\"AAAA\",\"encrypted\":true}";
+    const char *text = "caf\xC3\xA9 \"quoted\" \\ back\nnew line \xF0\x9F\x99\x82";
+    CHECK(puddle_store_append_plain(s, "p1", ev, strlen(ev), "k:sig", text, 0, id, err, sizeof err) == PUDDLE_APPEND_NEW);
+    CHECK(puddle_store_append(s, "p1", ev, strlen(ev), "k:sig", 0, id2, err, sizeof err) == PUDDLE_APPEND_DUPLICATE && !strcmp(id, id2));   /* the id is the event's alone */
+    puddle_event_list l;
+    CHECK(puddle_store_tail(s, "p1", 10, &l, err, sizeof err) == 0 && l.count == 1 && l.items[0].plain && !strcmp(l.items[0].plain, text));
+    puddle_event_list_free(&l);
+    const char *ev2 = "{\"type\":\"message\",\"chat\":\"p1\",\"ts\":1760000000001,\"body\":\"BBBB\",\"encrypted\":true}";
+    CHECK(puddle_store_append(s, "p1", ev2, strlen(ev2), NULL, 0, id2, err, sizeof err) == PUDDLE_APPEND_NEW);   /* an event with none */
+    puddle_store_close(s);
+
+    s = puddle_store_open(dir_for("plain"), err, sizeof err);                                          /* and it reloads from disk */
+    puddle_event e;
+    CHECK(puddle_store_get(s, "p1", id, &e, err, sizeof err) == 0 && e.plain && !strcmp(e.plain, text) && !strcmp(e.event, ev));
+    puddle_event_free(&e);
+    CHECK(puddle_store_get(s, "p1", id2, &e, err, sizeof err) == 0 && e.plain == NULL);
+    puddle_event_free(&e);
+    puddle_store_close(s);
+}
+
 int main(void)
 {
     const char *base = getenv("TMPDIR");
@@ -361,6 +386,7 @@ int main(void)
     test_validation();
     test_many_chats();
     test_concurrent();
+    test_plain();
 
     cleanup();
     return failures ? 1 : 0;

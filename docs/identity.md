@@ -146,9 +146,26 @@ later without changing the API, which never exposes keys.
 
 - Only `body` is encrypted. Envelope fields (`type`, `chat`, `sender`, `ts`, `ref`) stay readable so
   Puddles can route, bucket and dedupe.
-- Use a standard construction rather than a custom one: HPKE (RFC 9180, needs OpenSSL 3.2+, our
-  minimum is 3.0) or libsodium sealed boxes. This is a decision on dependencies, not on design.
-- For a first demo, bodies may travel unencrypted over TLS until this is built.
+- **Built.** Messages and edits to a peer have `"encrypted":true` after `body`, and `body` holds the base64 of the sealed blob
+  (`message.c`). Absent, `encrypted` means plain text, so a public channel's event is the same event without the flag and a bot reads
+  both the same way. Everything else about the event is unchanged, so the id and the signature still cover exactly the bytes sent. A
+  Puddle refuses a message or edit with its text in the clear in a chat that requires encryption (`not_encrypted`) or one it cannot open (`undecryptable`). A redaction has no text and is not sealed. Group names and
+  other group events are not sealed yet.
+- **Stored opened.** The receiver opens a sealed event once, on arrival, and keeps the text in the record beside the signed event
+  (`plain`, outside what the id and signature cover; `docs/storage.md`). The sender keeps the text it wrote the same way. So what
+  is on disk is the signed sealed event (still verifiable, still what is passed on) plus the readable text. The consequence: after a roll, history
+  is still readable with no old key kept, and re-sealing is never needed. The cost is that the text is on disk in the clear until
+  chats are encrypted at rest (`discuss-later.md` #3).
+- **Rolling.** The old encryption key is deleted with the old signing key, and peers are told as before (`keysync.c`). A message
+  sealed to the old key that is still in flight when the roll happens cannot be opened: the receiver answers `undecryptable` and the
+  owner sends it again. (Sealing again in the outbox would change the bytes and so the id that edits point at.)
+- **The sealing itself (`src/core/seal.c`).** A body is encrypted once with a random key
+  (ChaCha20-Poly1305), and that key is wrapped to each recipient's X25519 key (an ephemeral key, X25519, HKDF-SHA256,
+  ChaCha20-Poly1305: HPKE's base mode, from parts OpenSSL 3.0 has, so no new dependency and no version problem). One sealed blob
+  therefore serves a whole group with the same bytes for everyone, so the event keeps one id and one signature. The
+  sender is listed as a recipient too, so it can read its own history. The header and a caller-supplied context (chat,
+  sender, time) are authenticated, so a body cannot be moved into another chat or message, nor a recipient added, dropped
+  or swapped. Blob format and details are in `seal.h`. The private key never leaves the identity (`puddle_identity_dh`).
 
 ## Threat model
 
@@ -165,3 +182,4 @@ other member's address.
   events signed by a retired key as invalid after a rotation they have seen, or only before it?
 - Removing a member from a group (leaving is each member's own; nobody can remove another, for now).
 - Per-device keys instead of key transfer (see Devices).
+- Checking that we still hold the right key for a peer, now and then (see discuss-later.md #7).

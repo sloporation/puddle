@@ -21,6 +21,7 @@ typedef struct {
     char *event;       /* the exact event JSON, NUL-terminated */
     size_t event_len;
     char *sig;         /* may be empty */
+    char *plain;       /* the opened text of a sealed event (docs/storage.md), or NULL; not signed, local to this Puddle */
 } puddle_event;
 
 typedef struct {
@@ -61,6 +62,13 @@ enum { PUDDLE_APPEND_NEW = 0, PUDDLE_APPEND_DUPLICATE = 1 };
 int puddle_store_append(puddle_store *s, const char *chat_id, const char *event, size_t event_len,
                         const char *sig, int64_t rts_ms, char id_out[PUDDLE_ID_HEX + 1],
                         char *err, size_t errlen);
+
+/* As puddle_store_append, for a sealed event: `plain` is the text it opened to, kept beside the record (outside the hashed and
+ * signed bytes, like `rts`) so history stays readable after the keys that opened it are gone. NULL means none. A duplicate is not
+ * written again, so the first copy's `plain` stands. */
+int puddle_store_append_plain(puddle_store *s, const char *chat_id, const char *event, size_t event_len,
+                              const char *sig, const char *plain, int64_t rts_ms, char id_out[PUDDLE_ID_HEX + 1],
+                              char *err, size_t errlen);
 
 /* The last `n` events of a chat in chat order (ts, then id), oldest first. Reads only the newest
  * day files; does not load the whole chat. An unknown chat gives an empty list. 0 or -1. */

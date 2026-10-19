@@ -35,6 +35,11 @@ int puddle_group_rename(puddle_ctx *ctx, const char *gid, const char *name, cons
  * queued for anyone. */
 int puddle_group_send_event(puddle_ctx *ctx, const char *gid, const char *event, size_t len, char id[65], int *sent, const char **code);
 
+/* A message of ours to the group (or, with `is_edit`, an edit of the message `ref`), sealed to every member we have an open stream with and to
+ * ourselves; the text is kept beside the signed event. Same answers as puddle_group_send_event. */
+int puddle_group_send_text(puddle_ctx *ctx, const char *gid, int is_edit, int64_t ts, const char *text, size_t tl, const char *ref,
+                           char id[65], int *sent, const char **code);
+
 /* Is there an open (friend or group-only), unblocked stream with `peer`? */
 int puddle_group_open_with(puddle_ctx *ctx, const char *peer);
 

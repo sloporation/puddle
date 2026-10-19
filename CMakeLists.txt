@@ -65,6 +65,7 @@ add_library(puddle_core STATIC
   src/core/groupflow.c
   src/core/link.c
   src/core/router.c
+  src/core/seal.c
   src/core/routes.c
   src/core/reqsig.c
   src/core/serve.c
@@ -162,7 +163,7 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link group groupapi groupowner streams ratelimit access owner_streams client outbox inbound open_request flow message messages keysync wireprofile profiles e2e group_e2e)
+foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link group groupapi groupowner streams ratelimit access owner_streams client outbox inbound open_request flow message seal messages keysync wireprofile profiles e2e group_e2e)
   add_executable(${t}_test tests/${t}_test.c)
   target_link_libraries(${t}_test PRIVATE puddle_core)
   add_test(NAME ${t} COMMAND ${t}_test)

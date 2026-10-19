@@ -98,6 +98,8 @@ void puddle_streams_close(puddle_streams *s);
 
 /* 0 found (a copy: free it with puddle_stream_free), 1 no such peer, -1 `id` is not a valid user id. */
 int puddle_streams_get(puddle_streams *s, const char *id, puddle_stream *out);
+/* The encryption key in the verified chain we hold for `id`: what messages to them are sealed to. 0, or -1 if we hold no chain for them. */
+int puddle_streams_enc_key(puddle_streams *s, const char *id, unsigned char out[32]);
 
 /* Store a record (new or replacing). Its chain, if any, must verify and belong to `st->id`. Not allowed for a
  * blocked id. Returns 0, or -1 with a reason in `err`. */

@@ -10,6 +10,7 @@
  * same event again with the new one without changing its id. */
 
 #include "identity.h"
+#include "seal.h"
 #include "store.h"
 
 #include <stddef.h>
@@ -20,7 +21,7 @@ extern "C" {
 #endif
 
 #define PUDDLE_MESSAGE_MAX_CHARS 4000
-#define PUDDLE_EVENT_MAX_BYTES (16 * 1024)
+#define PUDDLE_EVENT_MAX_BYTES (32 * 1024) /* a sealed 4000-character body of 4-byte characters, for a 50-member group, is about 26 KB */
 #define PUDDLE_DELIVERY_MAX_EVENTS 100
 #define PUDDLE_DELIVERY_MAX_BYTES (256 * 1024)
 #define PUDDLE_SIG_TEXT_MAX 180
@@ -67,7 +68,9 @@ typedef struct {
     char chat[PUDDLE_USER_ID_LEN + 1];
     char sender[PUDDLE_USER_ID_LEN + 1];
     int64_t ts;
-    char *body;      /* malloc'd, NUL-terminated; NULL for a redaction */
+    char *body;      /* malloc'd, NUL-terminated; NULL for a redaction, and for an encrypted event (see `sealed`) */
+    unsigned char *sealed; /* malloc'd: the decoded `body` of a message or edit with `"encrypted":true`; else NULL */
+    size_t sealed_len;
     char ref[65];    /* "" if none */
 } puddle_message;
 
@@ -75,6 +78,29 @@ typedef struct {
  * carry a body, a redaction must name its target and carry nothing else. 0, or -1 with a reason code in *why
  * (`unsupported_type` for any other type). */
 int puddle_chat_event_parse(const char *event, size_t len, puddle_message *m, const char **why);
+
+/* ---- sealed events (docs/identity.md, "Encryption") ----
+ *
+ * What goes to another Puddle has the same shape as a plain event, with `"encrypted":true` after `body`, and `body` holding the base64 of
+ * a seal.h blob instead of the text. Absent, `encrypted` means plain text, so an event in a public channel is the same event without the flag.
+ * The blob is bound to the event's type, chat, sender, time and `ref`, so it cannot be lifted into another event. Everything
+ * else about the event is as before: the same fields, the same id (SHA-256 of the bytes) and the same signature. A plain `body`
+ * still parses (older history is stored that way) but a Puddle accepts only sealed ones from a peer. */
+
+/* The context a sealed body is bound to. `ref` may be NULL or "". */
+size_t puddle_message_aad(const char *type, const char *chat, const char *sender, int64_t ts, const char *ref, char *out, size_t cap);
+
+/* As puddle_message_build and puddle_edit_build, with the body sealed to the `n` keys in `recipients` (ours must be among them
+ * so we can read our own history, though we keep the plain text anyway). 0 if it does not fit in `cap` or the body is not
+ * acceptable, as for the plain builders. */
+size_t puddle_message_build_sealed(const char *chat, const char *sender, int64_t ts, const char *body, size_t body_len, const char *ref,
+                                   const unsigned char (*recipients)[32], size_t n, char *out, size_t cap);
+size_t puddle_edit_build_sealed(const char *chat, const char *sender, int64_t ts, const char *target, const char *body, size_t body_len,
+                                const unsigned char (*recipients)[32], size_t n, char *out, size_t cap);
+
+/* Open the sealed body of a parsed message or edit with our key. On success *text is the body (malloc'd, NUL-terminated),
+ * checked as a body must be. 0, or -1 if it was not sealed to us, was changed, or does not hold an acceptable body. */
+int puddle_message_open(puddle_identity *me, const puddle_message *m, char **text);
 
 /* Build an edit or a redaction of the message `target`, as puddle_message_build builds a message. */
 size_t puddle_edit_build(const char *chat, const char *sender, int64_t ts, const char *target, const char *body, size_t body_len,

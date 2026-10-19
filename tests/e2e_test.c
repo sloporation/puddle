@@ -1,6 +1,7 @@
 /* Two (and more) real Puddles in one process, talking over real TLS on loopback: asking for a stream, accepting
  * and declining, invites, blocks, closing, a changed certificate, and what a stranger is told. Each Puddle is the
  * real server with its own data directory; the "owner" calls are real HTTPS calls with the owner token. */
+#include "message.h"
 #include "access.h"
 #include "json.h"
 #include "client.h"
@@ -383,6 +384,19 @@ int main(void)
             if (!arrived) usleep(50000);
         }
         CHECK(arrived && json_has("\"outgoing\":false") && json_has(bob.uid));                  /* it came in, from Bob */
+        {
+            /* what crossed the wire and sits in both logs is sealed: the signed event never holds the words, each side keeps the text it read */
+            char chat[PUDDLE_USER_ID_LEN + 1], serr[200];
+            puddle_event_list l;
+            puddle_dm_chat_id(alice.uid, bob.uid, chat);
+            puddle_server *both[2] = { alice.srv, bob.srv };
+            for (int i = 0; i < 2; i++) {
+                CHECK(puddle_store_tail(puddle_server_store(both[i]), chat, 10, &l, serr, sizeof serr) == 0 && l.count == 1);
+                CHECK(l.count == 1 && !strstr(l.items[0].event, "hello Alice") && strstr(l.items[0].event, "\"encrypted\":true") &&
+                      l.items[0].plain && !strcmp(l.items[0].plain, "hello Alice, it's Bob"));
+                puddle_event_list_free(&l);
+            }
+        }
         snprintf(body2, sizeof body2, "{\"to\":\"%s\",\"body\":\"hi Bob \\u2014 caf\\u00e9 \\ud83d\\ude42\"}", bob.uid);
         CHECK(post(&alice, "/api/v1/dm/send", body2) == 201);
         char msg_id[80] = "";

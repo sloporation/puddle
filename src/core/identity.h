@@ -103,6 +103,10 @@ void puddle_identity_public(puddle_identity *id, unsigned char sign_pub[32], uns
 /* Ed25519 signature (64 bytes) by the current signing key. 0 or -1. */
 int puddle_identity_sign(puddle_identity *id, const void *data, size_t len, unsigned char sig[64]);
 
+/* X25519 between this identity's current encryption key and `peer_pub`; the private half never leaves the
+ * identity. Fails (-1) for a low-order `peer_pub` that gives an all-zero secret. Used by seal.h. */
+int puddle_identity_dh(puddle_identity *id, const unsigned char peer_pub[32], unsigned char shared[32]);
+
 /* The whole chain as text (one record per line), for sending to a peer. malloc'd; NULL on error. */
 char *puddle_identity_chain(puddle_identity *id, size_t *len);
 

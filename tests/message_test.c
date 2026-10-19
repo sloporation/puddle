@@ -284,6 +284,98 @@ int main(void)
         CHECK(puddle_event_sig_parse(t, kid, s) == -1);                                                /* no signature */
     }
 
+    /* ---- sealed events ---- */
+    {
+        unsigned char ka[32], kb[32];
+        puddle_identity_public(alice, NULL, ka, NULL);
+        puddle_identity_public(bob, NULL, kb, NULL);
+        unsigned char both[2][32];
+        memcpy(both[0], ka, 32); memcpy(both[1], kb, 32);
+        char ev[PUDDLE_EVENT_MAX_BYTES], t[PUDDLE_EVENT_MAX_BYTES];
+        puddle_message m;
+        const char *why;
+        char *text;
+        size_t el = puddle_message_build_sealed(c1, ua, T, "secret \"words\"\nline two", 23, NULL, (const unsigned char (*)[32])both, 2, ev, sizeof ev);
+        CHECK(el > 0 && !strstr(ev, "secret") && strstr(ev, "\"encrypted\":true") && strstr(ev, "\"body\":\""));
+        CHECK(puddle_chat_event_parse(ev, el, &m, &why) == 0 && m.type == PUDDLE_EV_MESSAGE && m.sealed && !m.body && !strcmp(m.sender, ua));
+        CHECK(puddle_message_open(bob, &m, &text) == 0 && !strcmp(text, "secret \"words\"\nline two"));
+        free(text);
+        CHECK(puddle_message_open(alice, &m, &text) == 0 && !strcmp(text, "secret \"words\"\nline two"));   /* the sender can read it too */
+        free(text);
+        puddle_message_free(&m);
+
+        /* bound to the event it was made for: another time, sender, chat or reply target does not open */
+        const char *keys[] = { "\"ts\":", "\"sender\":\"", "\"chat\":\"" };
+        for (int k = 0; k < 3; k++) {
+            snprintf(t, sizeof t, "%s", ev);
+            char *at = strstr(t, keys[k]) + strlen(keys[k]);
+            *at = (*at == '1') ? '2' : (*at == 'a') ? 'b' : '1';
+            if (puddle_chat_event_parse(t, strlen(t), &m, &why) == 0) {
+                CHECK(puddle_message_open(bob, &m, &text) == -1);
+                puddle_message_free(&m);
+            }
+        }
+        el = puddle_message_build_sealed(c1, ua, T, "reply", 5, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", (const unsigned char (*)[32])both, 2, ev, sizeof ev);
+        CHECK(el > 0 && puddle_chat_event_parse(ev, el, &m, &why) == 0 && !strcmp(m.ref, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+        CHECK(puddle_message_open(bob, &m, &text) == 0);
+        free(text);
+        puddle_message_free(&m);
+        snprintf(t, sizeof t, "%s", ev);
+        {
+            char *r = strstr(t, "\"ref\":\"") + 7;
+            *r = (*r == '0') ? '1' : '0';
+            CHECK(puddle_chat_event_parse(t, strlen(t), &m, &why) == 0 && puddle_message_open(bob, &m, &text) == -1);
+            puddle_message_free(&m);
+        }
+
+        /* an edit is sealed the same way, and cannot be read as a message */
+        char target[65];
+        puddle_sha256_hex("target", 6, target);
+        el = puddle_edit_build_sealed(c1, ua, T + 5, target, "new text", 8, (const unsigned char (*)[32])both, 2, ev, sizeof ev);
+        CHECK(el > 0 && puddle_chat_event_parse(ev, el, &m, &why) == 0 && m.type == PUDDLE_EV_EDIT && !strcmp(m.ref, target));
+        CHECK(puddle_message_open(bob, &m, &text) == 0 && !strcmp(text, "new text"));
+        free(text);
+        puddle_message_free(&m);
+        {
+            char swapped[PUDDLE_EVENT_MAX_BYTES];
+            const char *e = strstr(ev, "\"edit\"");
+            snprintf(swapped, sizeof swapped, "%.*s\"message\"%s", (int)(e - ev), ev, e + 6);
+            CHECK(puddle_chat_event_parse(swapped, strlen(swapped), &m, &why) == 0 && puddle_message_open(bob, &m, &text) == -1);
+            puddle_message_free(&m);
+        }
+
+        /* shape: the text is either plain or sealed, never both; a redaction carries neither; bad base64 and empty blobs are refused */
+        snprintf(t, sizeof t, "{\"type\":\"message\",\"chat\":\"%s\",\"sender\":\"%s\",\"ts\":%lld,\"body\":\"AAAA\",\"encrypted\":false}", c1, ua, (long long)T);
+        CHECK(puddle_chat_event_parse(t, strlen(t), &m, &why) == -1);
+        snprintf(t, sizeof t, "{\"type\":\"redact\",\"chat\":\"%s\",\"sender\":\"%s\",\"ts\":%lld,\"encrypted\":true,\"ref\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}", c1, ua, (long long)T);
+        CHECK(puddle_chat_event_parse(t, strlen(t), &m, &why) == -1);
+        snprintf(t, sizeof t, "{\"type\":\"message\",\"chat\":\"%s\",\"sender\":\"%s\",\"ts\":%lld,\"body\":\"!!!!\",\"encrypted\":true}", c1, ua, (long long)T);
+        CHECK(puddle_chat_event_parse(t, strlen(t), &m, &why) == -1 && !strcmp(why, "bad_body"));
+        snprintf(t, sizeof t, "{\"type\":\"message\",\"chat\":\"%s\",\"sender\":\"%s\",\"ts\":%lld,\"body\":\"\",\"encrypted\":true}", c1, ua, (long long)T);
+        CHECK(puddle_chat_event_parse(t, strlen(t), &m, &why) == -1 && !strcmp(why, "bad_body"));
+        CHECK(puddle_message_open(bob, &(puddle_message){ .type = PUDDLE_EV_MESSAGE }, &text) == -1);   /* nothing to open */
+        CHECK(puddle_message_build_sealed(c1, ua, T, "", 0, NULL, (const unsigned char (*)[32])both, 2, ev, sizeof ev) == 0);
+        CHECK(puddle_message_build_sealed(c1, ua, T, "x", 1, NULL, (const unsigned char (*)[32])both, 0, ev, sizeof ev) == 0);
+        CHECK(puddle_message_build_sealed(c1, ua, T, "x", 1, NULL, (const unsigned char (*)[32])both, 2, ev, 100) == 0);   /* does not fit */
+
+        /* the view of sealed events takes their text from `plain`, which only the Puddle that opened them has */
+        {
+            puddle_event evs[3];
+            memset(evs, 0, sizeof evs);
+            size_t l1 = puddle_message_build_sealed(c1, ua, T + 10, "one", 3, NULL, (const unsigned char (*)[32])both, 2, ev, sizeof ev);
+            evs[0].event = strdup(ev); evs[0].event_len = l1; puddle_sha256_hex(ev, l1, evs[0].id); evs[0].plain = strdup("one");
+            size_t l2 = puddle_edit_build_sealed(c1, ua, T + 20, evs[0].id, "one, edited", 11, (const unsigned char (*)[32])both, 2, ev, sizeof ev);
+            evs[1].event = strdup(ev); evs[1].event_len = l2; puddle_sha256_hex(ev, l2, evs[1].id); evs[1].plain = strdup("one, edited");
+            size_t l3 = puddle_message_build_sealed(c1, ub, T + 30, "two", 3, NULL, (const unsigned char (*)[32])both, 2, ev, sizeof ev);
+            evs[2].event = strdup(ev); evs[2].event_len = l3; puddle_sha256_hex(ev, l3, evs[2].id);   /* no plain: nothing to show */
+            puddle_view_msg *v;
+            size_t cnt;
+            CHECK(puddle_chat_view(evs, 3, &v, &cnt) == 0 && cnt == 1 && !strcmp(v[0].body, "one, edited") && v[0].edited);
+            puddle_view_free(v, cnt);
+            for (int i = 0; i < 3; i++) free(evs[i].event), free(evs[i].plain);
+        }
+    }
+
     puddle_identity_close(alice);
     puddle_identity_close(bob);
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);

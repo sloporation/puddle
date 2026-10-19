@@ -100,14 +100,14 @@ static int fanout(puddle_ctx *ctx, const puddle_group *g, const char *me, const 
 
 /* Sign `event`, keep it in our log of the group, and send it to the members (and, for what concerns the group itself, to those invited
  * who have not answered yet: they need to know who is in it). */
-static int emit(puddle_ctx *ctx, const puddle_group *g, const char *event, size_t el, const char *skip, int to_invited, char id[65],
+static int emit(puddle_ctx *ctx, const puddle_group *g, const char *event, size_t el, const char *plain, const char *skip, int to_invited, char id[65],
                 char sig[PUDDLE_SIG_TEXT_MAX], int *sent, const char **code)
 {
     char me[PUDDLE_USER_ID_LEN + 1], err[300];
     puddle_identity_id(ctx->identity, me);
     if (puddle_event_sign(ctx->identity, event, el, sig) != 0)
         return fail(code, 500, "internal");
-    if (puddle_store_append(ctx->store, g->id, event, el, sig, 0, id, err, sizeof err) < 0)
+    if (puddle_store_append_plain(ctx->store, g->id, event, el, sig, plain, 0, id, err, sizeof err) < 0)
         return fail(code, 500, "internal");
     int failed;
     *sent = fanout(ctx, g, me, id, event, el, sig, skip, to_invited, &failed);
@@ -307,7 +307,7 @@ int puddle_group_invite(puddle_ctx *ctx, const char *gid, const char *invitee, c
             goto done;
         }
         int sent;
-        rc = emit(ctx, &g, ev, el, invitee, 1, id, sig, &sent, code); /* the others hear; the invitee gets the invitation itself */
+        rc = emit(ctx, &g, ev, el, NULL, invitee, 1, id, sig, &sent, code); /* the others hear; the invitee gets the invitation itself */
         if (rc != 0 && strcmp(*code, "not_queued") != 0)
             goto done;
         int member_rc = rc;
@@ -428,14 +428,14 @@ static int leave_group(puddle_ctx *ctx, const char *gid, puddle_group_my from, p
                 one.members = &copy;
                 one.nmembers = 1;
                 int sent;
-                rc = emit(ctx, &one, ev, el, NULL, 1, id, sig, &sent, code);
+                rc = emit(ctx, &one, ev, el, NULL, NULL, 1, id, sig, &sent, code);
             } else {
                 if (puddle_event_sign(ctx->identity, ev, el, sig) == 0)
                     puddle_store_append(ctx->store, g.id, ev, el, sig, 0, id, err, sizeof err);
             }
         } else {
             int sent;
-            rc = emit(ctx, &g, ev, el, NULL, 1, id, sig, &sent, code);
+            rc = emit(ctx, &g, ev, el, NULL, NULL, 1, id, sig, &sent, code);
         }
         if (rc != 0 && strcmp(*code, "not_queued") != 0)
             goto done;
@@ -495,7 +495,7 @@ int puddle_group_rename(puddle_ctx *ctx, const char *gid, const char *name, cons
             goto done;
         }
         int sent;
-        rc = emit(ctx, &g, ev, el, NULL, 1, id, sig, &sent, code);
+        rc = emit(ctx, &g, ev, el, NULL, NULL, 1, id, sig, &sent, code);
         if (rc != 0 && strcmp(*code, "not_queued") != 0)
             goto done;
         rc = 0;
@@ -516,7 +516,44 @@ int puddle_group_send_event(puddle_ctx *ctx, const char *gid, const char *event,
     if (g.my != PUDDLE_GROUP_IN)
         rc = fail(code, 409, "not_in_group");
     else
-        rc = emit(ctx, &g, event, len, NULL, 0, id, sig, sent, code);
+        rc = emit(ctx, &g, event, len, NULL, NULL, 0, id, sig, sent, code);
+    puddle_group_free(&g);
+    return rc;
+}
+
+/* Send a message (or, with `is_edit`, an edit of the message `ref`) to the group, sealed to every member we have an open stream with (and to
+ * ourselves). The text is kept beside the signed event. Members we have no stream with are not sent it and cannot read it. */
+int puddle_group_send_text(puddle_ctx *ctx, const char *gid, int is_edit, int64_t ts, const char *text, size_t tl, const char *ref,
+                           char id[65], int *sent, const char **code)
+{
+    puddle_group g;
+    int status;
+    char sig[PUDDLE_SIG_TEXT_MAX], me[PUDDLE_USER_ID_LEN + 1];
+    if (load(ctx, gid, &g, code, &status) != 0)
+        return status;
+    int rc;
+    if (g.my != PUDDLE_GROUP_IN) {
+        rc = fail(code, 409, "not_in_group");
+    } else {
+        unsigned char keys[PUDDLE_GROUP_MAX_MEMBERS + 1][32];
+        size_t nkeys = 0;
+        puddle_identity_id(ctx->identity, me);
+        puddle_identity_public(ctx->identity, NULL, keys[nkeys++], NULL);
+        for (size_t i = 0; i < g.nmembers && nkeys < sizeof keys / sizeof keys[0]; i++)
+            if (g.members[i].state == PUDDLE_GM_MEMBER && strcmp(g.members[i].id, me) != 0 && puddle_group_open_with(ctx, g.members[i].id) &&
+                puddle_streams_enc_key(ctx->streams, g.members[i].id, keys[nkeys]) == 0)
+                nkeys++;
+        char event[PUDDLE_EVENT_MAX_BYTES];
+        size_t el = is_edit ? puddle_edit_build_sealed(gid, me, ts, ref, text, tl, (const unsigned char (*)[32])keys, nkeys, event, sizeof event)
+                            : puddle_message_build_sealed(gid, me, ts, text, tl, ref, (const unsigned char (*)[32])keys, nkeys, event, sizeof event);
+        if (!el) {
+            rc = fail(code, 400, "bad_request");
+        } else {
+            char *plain = strndup(text, tl);
+            rc = plain ? emit(ctx, &g, event, el, plain, NULL, 0, id, sig, sent, code) : fail(code, 500, "internal");
+            free(plain);
+        }
+    }
     puddle_group_free(&g);
     return rc;
 }

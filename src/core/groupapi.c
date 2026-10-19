@@ -570,16 +570,11 @@ static int send_route(const puddle_call *c, puddle_jw *w)
         free(text);
         return st;
     }
-    char event[PUDDLE_EVENT_MAX_BYTES], id[65];
+    char id[65];
     int64_t ts = puddle_event_next_ts(puddle_call_now_ms(c));
-    size_t el = puddle_message_build(gid, me, ts, text, tl, ref, event, sizeof event);
-    if (!el) {
-        free(text);
-        return puddle_fail(w, 400, "bad_request");
-    }
     const char *code;
     int sent;
-    st = puddle_group_send_event(c->ctx, gid, event, el, id, &sent, &code);
+    st = puddle_group_send_text(c->ctx, gid, 0, ts, text, tl, ref, id, &sent, &code);
     if (st) {
         free(text);
         if (!strcmp(code, "not_queued")) {
@@ -659,13 +654,12 @@ static int edit_route(const puddle_call *c, puddle_jw *w)
         puddle_view_clear(&t);
         return puddle_fail(w, 409, "deleted");
     }
-    char event[PUDDLE_EVENT_MAX_BYTES], id[65];
+    char id[65];
     int64_t now = puddle_call_now_ms(c);
     int64_t ts = puddle_event_next_ts(now > t.ts ? now : t.ts + 1);
-    size_t el = puddle_edit_build(gid, me, ts, t.id, text, strlen(text), event, sizeof event);
     const char *code;
     int sent;
-    st = el ? puddle_group_send_event(c->ctx, gid, event, el, id, &sent, &code) : (code = "bad_request", 400);
+    st = puddle_group_send_text(c->ctx, gid, 1, ts, text, strlen(text), t.id, id, &sent, &code);
     if (st == 0) {
         free(t.body);
         t.body = text;

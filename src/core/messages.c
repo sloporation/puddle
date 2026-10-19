@@ -99,12 +99,12 @@ static void view_json(puddle_jw *w, const puddle_view_msg *m, const char *chat, 
 /* Sign `event`, keep it in our chat and queue it for `to`. 0 on success (the id is in `id`), else the status with the error
  * written. If it is kept but cannot be queued, that is said (`not_queued`) rather than hidden. */
 static int commit_event(const puddle_call *c, puddle_jw *w, const char *to, const char *chat, const char *event, size_t el,
-                        char id[PUDDLE_ID_HEX + 1])
+                        const char *plain, char id[PUDDLE_ID_HEX + 1])
 {
     char sig[PUDDLE_SIG_TEXT_MAX], err[300];
     if (puddle_event_sign(c->ctx->identity, event, el, sig) != 0)
         return puddle_fail(w, 500, "internal");
-    if (puddle_store_append(c->ctx->store, chat, event, el, sig, 0, id, err, sizeof err) < 0)
+    if (puddle_store_append_plain(c->ctx->store, chat, event, el, sig, plain, 0, id, err, sizeof err) < 0)
         return puddle_fail(w, 500, "internal");
 
     /* the delivery: {"chat":..,"events":[{"id","event","sig"}]} */
@@ -138,6 +138,16 @@ static int commit_event(const puddle_call *c, puddle_jw *w, const char *to, cons
         puddle_jw_end_object(w);
         return 500;
     }
+    return 0;
+}
+
+/* The keys a direct message to `to` is sealed to: ours, so we can read our own history, then theirs. 0, or the status with the
+ * error written when we hold no chain for them. */
+static int dm_recipients(const puddle_call *c, puddle_jw *w, const char *to, unsigned char keys[2][32])
+{
+    puddle_identity_public(c->ctx->identity, NULL, keys[0], NULL);
+    if (puddle_streams_enc_key(c->ctx->streams, to, keys[1]) != 0)
+        return puddle_fail(w, 403, "no_stream");
     return 0;
 }
 
@@ -196,14 +206,20 @@ static int send_dm(const puddle_call *c, puddle_jw *w)
     }
     puddle_dm_chat_id(me, to, chat);
 
+    unsigned char keys[2][32];
+    int st = dm_recipients(c, w, to, keys);
+    if (st) {
+        free(text);
+        return st;
+    }
     char event[PUDDLE_EVENT_MAX_BYTES], id[PUDDLE_ID_HEX + 1];
     int64_t ts = puddle_event_next_ts(puddle_call_now_ms(c));
-    size_t el = puddle_message_build(chat, me, ts, text, tl, ref, event, sizeof event);
+    size_t el = puddle_message_build_sealed(chat, me, ts, text, tl, ref, (const unsigned char (*)[32])keys, 2, event, sizeof event);
     if (!el) {
         free(text);
         return puddle_fail(w, 400, "bad_request"); /* a reply reference that is not an id, or a message too large to send */
     }
-    int st = commit_event(c, w, to, chat, event, el, id);
+    st = commit_event(c, w, to, chat, event, el, text, id);
     if (st) {
         free(text);
         return st;
@@ -324,15 +340,22 @@ static int edit_dm(const puddle_call *c, puddle_jw *w)
         puddle_view_clear(&t);
         return puddle_fail(w, 409, "deleted");
     }
+    unsigned char keys[2][32];
+    st = dm_recipients(c, w, to, keys);
+    if (st) {
+        free(text);
+        puddle_view_clear(&t);
+        return st;
+    }
     char event[PUDDLE_EVENT_MAX_BYTES], id[PUDDLE_ID_HEX + 1];
     int64_t ts = puddle_event_next_ts(puddle_call_now_ms(c) > t.ts ? puddle_call_now_ms(c) : t.ts + 1); /* an edit has to be later than what it edits */
-    size_t el = puddle_edit_build(chat, me, ts, t.id, text, strlen(text), event, sizeof event);
+    size_t el = puddle_edit_build_sealed(chat, me, ts, t.id, text, strlen(text), (const unsigned char (*)[32])keys, 2, event, sizeof event);
     if (!el) {
         free(text);
         puddle_view_clear(&t);
         return puddle_fail(w, 400, "bad_request");
     }
-    st = commit_event(c, w, to, chat, event, el, id);
+    st = commit_event(c, w, to, chat, event, el, text, id);
     if (!st) {
         free(t.body);
         t.body = text;
@@ -364,7 +387,7 @@ static int delete_dm(const puddle_call *c, puddle_jw *w)
     puddle_view_clear(&t);
     if (!el)
         return puddle_fail(w, 500, "internal");
-    st = commit_event(c, w, to, chat, event, el, id);
+    st = commit_event(c, w, to, chat, event, el, NULL, id);
     return st ? st : 204;
 }
 
@@ -825,7 +848,26 @@ const char *puddle_store_delivered(puddle_ctx *ctx, const char *chat, const char
                                    char id_out[PUDDLE_ID_HEX + 1], int *dup)
 {
     char err[300];
-    int ar = puddle_store_append(ctx->store, chat, text, tl, sigtext, puddle_ctx_now_ms(ctx), id_out, err, sizeof err);
+    /* A message or an edit from a peer must be sealed, and sealed to us: we keep the text it opens to beside the signed event, so
+     * history stays readable after our keys roll. Anything else (group events, redactions) is stored as it came. */
+    puddle_message m;
+    const char *why;
+    char *plain = NULL;
+    if (puddle_chat_event_parse(text, tl, &m, &why) == 0) {
+        if (m.type != PUDDLE_EV_REDACT && !m.sealed) {
+            puddle_message_free(&m);
+            return "not_encrypted";
+        }
+        int bad = m.sealed && puddle_message_open(ctx->identity, &m, &plain) != 0;
+        puddle_message_free(&m);
+        if (bad)
+            return "undecryptable";
+    }
+    int ar = puddle_store_append_plain(ctx->store, chat, text, tl, sigtext, plain, puddle_ctx_now_ms(ctx), id_out, err, sizeof err);
+    if (plain) {
+        memset(plain, 0, strlen(plain));
+        free(plain);
+    }
     if (ar < 0) {
         puddle_log(PUDDLE_LOG_WARN, "cannot store a message from %.12s…: %s", sender, err);
         return "storage_error";

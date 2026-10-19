@@ -23,6 +23,15 @@ static int64_t now_cb(void) { return clock_now; }
 
 typedef struct { puddle_identity *id; char uid[PUDDLE_USER_ID_LEN + 1]; char phrase[PUDDLE_PHRASE_LEN + 1]; } person;
 static person me, alice, carol;
+/* a message or edit the way a peer sends it: sealed to us */
+static size_t sealed_for_me(const char *type, const char *chat, const char *sender, int64_t ts, const char *ref_or_target, const char *body, char *out, size_t cap)
+{
+    unsigned char k[1][32];
+    puddle_identity_public(me.id, NULL, k[0], NULL);
+    return !strcmp(type, "edit") ? puddle_edit_build_sealed(chat, sender, ts, ref_or_target, body, strlen(body), (const unsigned char (*)[32])k, 1, out, cap)
+                                 : puddle_message_build_sealed(chat, sender, ts, body, strlen(body), ref_or_target, (const unsigned char (*)[32])k, 1, out, cap);
+}
+
 static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
@@ -125,7 +134,7 @@ static env make_env(person *signer, person *claimed_sender, const char *chat, in
 {
     env e;
     char ev[PUDDLE_EVENT_MAX_BYTES + 100];
-    size_t el = puddle_message_build(chat, claimed_sender->uid, ts, body, strlen(body), ref, ev, sizeof ev);
+    size_t el = sealed_for_me("message", chat, claimed_sender->uid, ts, ref, body, ev, sizeof ev);
     if (!el) { fprintf(stderr, "cannot build\n"); exit(2); }
     e.event = strdup(ev);
     puddle_sha256_hex(ev, el, e.id);
@@ -247,7 +256,7 @@ int main(void)
         es[n].id[0] = es[n].id[0] == 'a' ? 'b' : 'a';
         n++;
         es[n] = make_env(&alice, &alice, chat_a, T0 + 24, "tampered body", NULL);               /* 4 bytes changed after signing */
-        { char *p = strstr(es[n].event, "tampered body"); p[0] = 'T'; puddle_sha256_hex(es[n].event, strlen(es[n].event), es[n].id); }
+        { char *p = strstr(es[n].event, "\"body\":\"") + 8 + 100; p[0] = p[0] == 'A' ? 'B' : 'A'; puddle_sha256_hex(es[n].event, strlen(es[n].event), es[n].id); }
         n++;
         es[n++] = make_env(&carol, &alice, chat_a, T0 + 25, "forged", NULL);                    /* 5 signed by someone else */
         es[n++] = make_env(&alice, &alice, chat_a, T0 + 26, "x", NULL);                         /* 6 good (placeholder replaced below) */
@@ -757,9 +766,9 @@ int main(void)
             char ev[PUDDLE_EVENT_MAX_BYTES];
             env es[4];
             /* Dina edits and takes back her own, and also tries it on one of ours */
-            size_t el = puddle_edit_build(chat_d, dina.uid, T0 + 900100, theirs.id, "theirs 0, edited", 16, ev, sizeof ev);
+            size_t el = sealed_for_me("edit", chat_d, dina.uid, T0 + 900100, theirs.id, "theirs 0, edited", ev, sizeof ev);
             es[0] = env_of(&dina, ev);
-            el = puddle_edit_build(chat_d, dina.uid, T0 + 900101, mine[2], "she rewrites ours", 17, ev, sizeof ev);
+            el = sealed_for_me("edit", chat_d, dina.uid, T0 + 900101, mine[2], "she rewrites ours", ev, sizeof ev);
             es[1] = env_of(&dina, ev);
             el = puddle_redact_build(chat_d, dina.uid, T0 + 900102, mine[2], ev, sizeof ev);
             es[2] = env_of(&dina, ev);
@@ -778,7 +787,7 @@ int main(void)
             CHECK(!strstr(body_of(rr), "she rewrites ours") && strstr(body_of(rr), "mine 2, more 59"));                      /* her edit of ours does not */
             CHECK(count_in(body_of(rr), "\"deleted\":true") == 2);                                                        /* ours (mine 0) and her own (theirs 1) */
             /* she cannot, though, say it as someone else */
-            el = puddle_edit_build(chat_d, me.uid, T0 + 900200, mine[2], "as the owner", 12, ev, sizeof ev);
+            el = sealed_for_me("edit", chat_d, me.uid, T0 + 900200, mine[2], "as the owner", ev, sizeof ev);
             env bad = env_of(&dina, ev);
             dl = delivery(chat_d, &bad, 1);
             clock_now += 1000;
@@ -951,6 +960,96 @@ int main(void)
         free(d1.event); free(d2.event); free(d3.event);
         ctx.outbox = ob;
         puddle_outbox_close(ob2);
+    }
+
+    /* ---- sealed bodies ---- */
+    {
+        char url[300], plainev[PUDDLE_EVENT_MAX_BYTES], tmp[PUDDLE_EVENT_MAX_BYTES];
+        snprintf(url, sizeof url, "/api/v1/dm/messages?user=%s", alice.uid);
+        set_peer(&alice, PUDDLE_STREAM_ACTIVE);
+        size_t before = stored(chat_a);
+
+        /* a peer's message with its text in the clear is refused: nothing from a peer travels unsealed */
+        size_t pl = puddle_message_build(chat_a, alice.uid, T0 + 700000, "in the clear", 12, NULL, plainev, sizeof plainev);
+        CHECK(pl > 0);
+        env pe = env_of(&alice, plainev);
+        b = delivery(chat_a, &pe, 1);
+        clock_now += 1000;
+        r = peer_post(&alice, b);
+        CHECK(r->status == 200 && strstr(body_of(r), "not_encrypted") && stored(chat_a) == before);
+        free(b); free(pe.event);
+
+        /* sealed to someone else: it is signed and addressed to us, but we cannot open it */
+        unsigned char ck[1][32], mk[1][32];
+        puddle_identity_public(carol.id, NULL, ck[0], NULL);
+        puddle_identity_public(me.id, NULL, mk[0], NULL);
+        size_t el = puddle_message_build_sealed(chat_a, alice.uid, T0 + 700001, "not for you", 11, NULL, (const unsigned char (*)[32])ck, 1, plainev, sizeof plainev);
+        CHECK(el > 0);
+        env se = env_of(&alice, plainev);
+        b = delivery(chat_a, &se, 1);
+        clock_now += 1000;
+        r = peer_post(&alice, b);
+        CHECK(r->status == 200 && strstr(body_of(r), "undecryptable") && stored(chat_a) == before);
+        free(b); free(se.event);
+
+        /* sealed to us, but moved to another time: the blob is bound to the event it was made for */
+        el = puddle_message_build_sealed(chat_a, alice.uid, T0 + 700002, "bound", 5, NULL, (const unsigned char (*)[32])mk, 1, plainev, sizeof plainev);
+        CHECK(el > 0);
+        {
+            char *at = strstr(plainev, "\"ts\":");
+            CHECK(at != NULL);
+            snprintf(tmp, sizeof tmp, "%.*s\"ts\":%lld%s", (int)(at - plainev), plainev, (long long)(T0 + 700003), strchr(at, ',') );
+            env me2 = env_of(&alice, tmp);
+            b = delivery(chat_a, &me2, 1);
+            clock_now += 1000;
+            r = peer_post(&alice, b);
+            CHECK(r->status == 200 && strstr(body_of(r), "undecryptable") && stored(chat_a) == before);
+            free(b); free(me2.event);
+        }
+
+        /* sealed to us: taken, and the log holds the sealed event with the text beside it */
+        env good = make_env(&alice, &alice, chat_a, T0 + 700004, "sealed hello", NULL);
+        b = delivery(chat_a, &good, 1);
+        clock_now += 1000;
+        r = peer_post(&alice, b);
+        CHECK(r->status == 200 && strstr(body_of(r), "\"accepted\":[\"") && stored(chat_a) == before + 1);
+        free(b);
+        {
+            puddle_event ev;
+            CHECK(puddle_store_get(store, chat_a, good.id, &ev, err, sizeof err) == 0);
+            CHECK(!strstr(ev.event, "sealed hello") && strstr(ev.event, "\"encrypted\":true"));
+            CHECK(ev.plain && !strcmp(ev.plain, "sealed hello") && !strcmp(ev.event, good.event));
+            puddle_event_free(&ev);
+        }
+        r = owner("GET", url, NULL);
+        CHECK(r->status == 200 && strstr(body_of(r), "sealed hello"));
+
+        /* it survives a restart of the store: the text is in the record, not only in memory */
+        puddle_store_close(store);
+        store = puddle_store_open(data, err, sizeof err);
+        ctx.store = store;
+        r = owner("GET", url, NULL);
+        CHECK(r->status == 200 && strstr(body_of(r), "sealed hello"));
+
+        /* our keys roll: what was sealed to the old key can no longer be opened, but what we already hold still reads */
+        env old = make_env(&alice, &alice, chat_a, T0 + 700005, "sealed to the old key", NULL);   /* made while she still had our old key */
+        roll(&me);
+        clock_now += 1000;
+        b = delivery(chat_a, &old, 1);
+        r = peer_post(&alice, b);
+        CHECK(r->status == 200 && strstr(body_of(r), "undecryptable"));
+        free(b);
+        r = owner("GET", url, NULL);
+        CHECK(r->status == 200 && strstr(body_of(r), "sealed hello"));                              /* history is not lost */
+        env fresh = make_env(&alice, &alice, chat_a, T0 + 700006, "sealed to the new key", NULL);
+        b = delivery(chat_a, &fresh, 1);
+        clock_now += 1000;
+        r = peer_post(&alice, b);
+        CHECK(r->status == 200 && strstr(body_of(r), "\"accepted\":[\""));
+        free(b);
+        r = owner("GET", url, NULL);
+        CHECK(strstr(body_of(r), "sealed to the new key") && strstr(body_of(r), "sealed hello"));
+        free(good.event); free(old.event); free(fresh.event);
     }
 
     puddle_outbox_close(ob);

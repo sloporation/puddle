@@ -191,6 +191,9 @@ void puddle_message_free(puddle_message *m)
 {
     free(m->body);
     m->body = NULL;
+    free(m->sealed);
+    m->sealed = NULL;
+    m->sealed_len = 0;
 }
 
 static int member_str(const char *e, size_t n, const char *key, char *out, size_t cap)
@@ -229,11 +232,25 @@ int puddle_chat_event_parse(const char *event, size_t len, puddle_message *m, co
         return -1;
     }
     int has_body = puddle_json_member(event, len, "body", &v);
-    if (has_body < 0)
+    puddle_span ev_v;
+    int has_enc = puddle_json_member(event, len, "encrypted", &ev_v);
+    /* `encrypted` is either absent (plain text) or the literal true; there is no second way to write "plain" */
+    if (has_body < 0 || has_enc < 0 || (has_enc == 0 && !(ev_v.len == 4 && memcmp(ev_v.p, "true", 4) == 0)))
         return -1;
     if (m->type == PUDDLE_EV_REDACT) {
-        if (has_body == 0) /* a redaction carries nothing: no text to smuggle in under cover of "deleting" */
+        if (has_body == 0 || has_enc == 0) /* a redaction carries nothing: no text to smuggle in under cover of "deleting" */
             return -1;
+    } else if (has_enc == 0) {
+        if (has_body != 0 || v.len < 2 || v.p[0] != '"')
+            goto bad_body;
+        char *b64 = malloc(v.len + 1);
+        m->sealed = b64 ? malloc(v.len) : NULL;
+        if (!m->sealed || puddle_json_string(v, b64, v.len + 1) != 0 || puddle_base64_decode(b64, m->sealed, v.len, &m->sealed_len) != 0 ||
+            m->sealed_len == 0) {
+            free(b64);
+            goto bad_body;
+        }
+        free(b64);
     } else {
         if (has_body != 0 || v.len < 2 || v.p[0] != '"')
             goto bad_body;
@@ -305,6 +322,83 @@ size_t puddle_redact_build(const char *chat, const char *sender, int64_t ts, con
     return puddle_jw_finish(&w);
 }
 
+/* ---- sealed events ---- */
+
+size_t puddle_message_aad(const char *type, const char *chat, const char *sender, int64_t ts, const char *ref, char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "puddle-body-v1|%s|%s|%s|%lld|%s", type, chat, sender, (long long)ts, ref ? ref : "");
+    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
+}
+
+static size_t build_sealed(const char *type, const char *chat, const char *sender, int64_t ts, const char *body, size_t body_len,
+                           const char *ref, const unsigned char (*recipients)[32], size_t n, char *out, size_t cap)
+{
+    char aad[400];
+    size_t al = puddle_message_aad(type, chat, sender, ts, ref, aad, sizeof aad);
+    size_t blob_cap = PUDDLE_SEAL_OVERHEAD(n) + body_len, blob_len = 0;
+    unsigned char *blob = al && n >= 1 && n <= PUDDLE_SEAL_MAX_RECIPIENTS ? malloc(blob_cap) : NULL;
+    char *b64 = blob ? malloc(blob_cap * 2 + 8) : NULL;
+    size_t r = 0;
+    if (b64 && puddle_seal(recipients, n, aad, al, body, body_len, blob, blob_cap, &blob_len) == 0 &&
+        puddle_base64_encode(blob, blob_len, b64, blob_cap * 2 + 8)) {
+        puddle_jw w;
+        puddle_jw_init(&w, out, cap);
+        puddle_jw_object(&w);
+        puddle_jw_str(&w, "type", type);
+        puddle_jw_str(&w, "chat", chat);
+        puddle_jw_str(&w, "sender", sender);
+        puddle_jw_num(&w, "ts", ts);
+        puddle_jw_str(&w, "body", b64);
+        puddle_jw_key(&w, "encrypted");
+        puddle_jw_bool(&w, 1);
+        if (ref && *ref)
+            puddle_jw_str(&w, "ref", ref);
+        puddle_jw_end_object(&w);
+        r = puddle_jw_finish(&w);
+    }
+    free(blob);
+    free(b64);
+    return r;
+}
+
+size_t puddle_message_build_sealed(const char *chat, const char *sender, int64_t ts, const char *body, size_t body_len, const char *ref,
+                                   const unsigned char (*recipients)[32], size_t n, char *out, size_t cap)
+{
+    if (!puddle_message_body_ok(body, body_len) || (ref && *ref && !is_event_id(ref)))
+        return 0;
+    return build_sealed("message", chat, sender, ts, body, body_len, ref, recipients, n, out, cap);
+}
+
+size_t puddle_edit_build_sealed(const char *chat, const char *sender, int64_t ts, const char *target, const char *body, size_t body_len,
+                                const unsigned char (*recipients)[32], size_t n, char *out, size_t cap)
+{
+    if (!puddle_message_body_ok(body, body_len) || !is_event_id(target))
+        return 0;
+    return build_sealed("edit", chat, sender, ts, body, body_len, target, recipients, n, out, cap);
+}
+
+int puddle_message_open(puddle_identity *me, const puddle_message *m, char **text)
+{
+    *text = NULL;
+    if (!m->sealed || (m->type != PUDDLE_EV_MESSAGE && m->type != PUDDLE_EV_EDIT))
+        return -1;
+    char aad[400];
+    size_t al = puddle_message_aad(m->type == PUDDLE_EV_MESSAGE ? "message" : "edit", m->chat, m->sender, m->ts, m->ref, aad, sizeof aad);
+    char *t = al ? malloc(m->sealed_len + 1) : NULL;
+    size_t tl = 0;
+    if (!t || puddle_open(me, aad, al, m->sealed, m->sealed_len, (unsigned char *)t, m->sealed_len, &tl) != 0) {
+        free(t);
+        return -1;
+    }
+    t[tl] = '\0';
+    if (strlen(t) != tl || !puddle_message_body_ok(t, tl)) {
+        free(t);
+        return -1;
+    }
+    *text = t;
+    return 0;
+}
+
 /* ---- the view ---- */
 
 typedef struct {
@@ -350,12 +444,21 @@ int puddle_chat_view(const puddle_event *events, size_t n, puddle_view_msg **out
             snprintf(v[m].ref, sizeof v[m].ref, "%s", ev.ref);
             v[m].ts = ev.ts;
             v[m].rts = events[i].rts;
-            v[m].body = ev.body;
-            ev.body = NULL;
+            if (ev.sealed) { /* the text it opened to when it came in; without it there is nothing to show */
+                if (!events[i].plain)
+                    goto skip_message;
+                v[m].body = strdup(events[i].plain);
+                if (!v[m].body)
+                    goto skip_message;
+            } else {
+                v[m].body = ev.body;
+                ev.body = NULL;
+            }
             snprintf(idx[m].id, sizeof idx[m].id, "%s", events[i].id);
             idx[m].index = m;
             m++;
         }
+skip_message:
         puddle_message_free(&ev);
     }
     qsort(idx, m, sizeof *idx, cmp_idx);
@@ -376,11 +479,15 @@ int puddle_chat_view(const puddle_event *events, size_t n, puddle_view_msg **out
                         free(t->body);
                         t->body = NULL;
                     } else if (!t->deleted) {
-                        free(t->body);
-                        t->body = ev.body;
-                        ev.body = NULL;
-                        t->edited = 1;
-                        t->edited_ts = ev.ts;
+                        char *nb = ev.sealed ? (events[i].plain ? strdup(events[i].plain) : NULL) : ev.body;
+                        if (nb) {
+                            free(t->body);
+                            t->body = nb;
+                            if (!ev.sealed)
+                                ev.body = NULL;
+                            t->edited = 1;
+                            t->edited_ts = ev.ts;
+                        }
                     }
                 }
             }

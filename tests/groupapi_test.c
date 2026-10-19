@@ -25,6 +25,15 @@ static int64_t now_cb(void) { return clock_now; }
 
 typedef struct { puddle_identity *id; char uid[PUDDLE_USER_ID_LEN + 1]; } person;
 static person me, alice, bob, carol, dave, erin, ivy, jon;
+/* a message or edit the way a peer sends it: sealed to us */
+static size_t sealed_for_me(const char *type, const char *chat, const char *sender, int64_t ts, const char *ref_or_target, const char *body, char *out, size_t cap)
+{
+    unsigned char k[1][32];
+    puddle_identity_public(me.id, NULL, k[0], NULL);
+    return !strcmp(type, "edit") ? puddle_edit_build_sealed(chat, sender, ts, ref_or_target, body, strlen(body), (const unsigned char (*)[32])k, 1, out, cap)
+                                 : puddle_message_build_sealed(chat, sender, ts, body, strlen(body), ref_or_target, (const unsigned char (*)[32])k, 1, out, cap);
+}
+
 static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
@@ -542,26 +551,26 @@ int main(void)
         size_t n0 = stored(g2);
         /* a member's message */
         clock_now += 1000;
-        CHECK(puddle_message_build(g2, alice.uid, clock_now, "hi from alice", 13, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", g2, alice.uid, clock_now, NULL, "hi from alice", ev, sizeof ev) > 0);
         reply *r = deliver_one(&alice, g2, &alice, ev);
         CHECK(r->status == 200 && has_text(r, "\"accepted\":[\"") && stored(g2) == n0 + 1);
         r = deliver_one(&alice, g2, &alice, ev);                                                 /* the same again */
         CHECK(r->status == 200 && has_text(r, "\"duplicate\":[\"") && stored(g2) == n0 + 1);
         /* a friend who is not in the group */
-        CHECK(puddle_message_build(g2, carol.uid, clock_now, "let me in", 9, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", g2, carol.uid, clock_now, NULL, "let me in", ev, sizeof ev) > 0);
         r = deliver_one(&carol, g2, &carol, ev);
         CHECK(r->status == 200 && has_text(r, "not_a_member") && stored(g2) == n0 + 1);
         CHECK(puddle_group_rename_build(g2, carol.uid, clock_now, "Mine", ev, sizeof ev) > 0);
         r = deliver_one(&carol, g2, &carol, ev);
         CHECK(has_text(r, "not_a_member"));
         /* one member speaking for another, or in another chat */
-        CHECK(puddle_message_build(g2, bob.uid, clock_now, "as bob", 6, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", g2, bob.uid, clock_now, NULL, "as bob", ev, sizeof ev) > 0);
         r = deliver_one(&alice, g2, &alice, ev);
         CHECK(has_text(r, "wrong_sender"));
         CHECK(puddle_group_rename_build(g2, bob.uid, clock_now, "Bobs", ev, sizeof ev) > 0);                      /* a membership event in someone else's name */
         r = deliver_one(&alice, g2, &alice, ev);
         CHECK(has_text(r, "wrong_sender"));
-        CHECK(puddle_message_build(g1, alice.uid, clock_now, "wrong chat", 10, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", g1, alice.uid, clock_now, NULL, "wrong chat", ev, sizeof ev) > 0);
         r = deliver_one(&alice, g2, &alice, ev);
         CHECK(has_text(r, "wrong_chat"));
         /* a group is not made by an event */
@@ -574,11 +583,11 @@ int main(void)
             CHECK(has_text(r, "wrong_chat") || has_text(r, "use_invite"));
         }
         /* nothing about this group is known here */
-        CHECK(puddle_message_build("eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", alice.uid, clock_now, "x", 1, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", "eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", alice.uid, clock_now, NULL, "x", ev, sizeof ev) > 0);
         r = deliver_one(&alice, "eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &alice, ev);
         CHECK(r->status == 400);
         /* a bad signature: carol signs what alice "sent" */
-        CHECK(puddle_message_build(g2, alice.uid, clock_now + 5, "forged", 6, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", g2, alice.uid, clock_now + 5, NULL, "forged", ev, sizeof ev) > 0);
         r = deliver_one(&alice, g2, &carol, ev);
         CHECK(has_text(r, "unknown_key") || has_text(r, "bad_signature"));
         /* membership: alice invites dave, dave (a group-only peer) says yes, then speaks */
@@ -586,21 +595,21 @@ int main(void)
         CHECK(puddle_group_invite_build(g2, alice.uid, clock_now, dave.uid, ev, sizeof ev) > 0);
         r = deliver_one(&alice, g2, &alice, ev);
         CHECK(has_text(r, "\"accepted\":[\"") && in_state(g2, dave.uid, PUDDLE_GM_INVITED));
-        CHECK(puddle_message_build(g2, dave.uid, clock_now + 1, "too early", 9, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", g2, dave.uid, clock_now + 1, NULL, "too early", ev, sizeof ev) > 0);
         r = deliver_one(&dave, g2, &dave, ev);
         CHECK(has_text(r, "not_a_member"));
         clock_now += 2000;
         CHECK(puddle_group_join_build(g2, dave.uid, clock_now, ev, sizeof ev) > 0);
         r = deliver_one(&dave, g2, &dave, ev);
         CHECK(has_text(r, "\"accepted\":[\"") && in_state(g2, dave.uid, PUDDLE_GM_MEMBER));
-        CHECK(puddle_message_build(g2, dave.uid, clock_now + 1, "hello from dave", 15, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", g2, dave.uid, clock_now + 1, NULL, "hello from dave", ev, sizeof ev) > 0);
         r = deliver_one(&dave, g2, &dave, ev);
         CHECK(has_text(r, "\"accepted\":[\""));
         /* a group-only peer reaches the group and nothing else */
         {
             char dm[53], dmev[800];
             puddle_dm_chat_id(me.uid, dave.uid, dm);
-            CHECK(puddle_message_build(dm, dave.uid, clock_now + 2, "a private word", 14, NULL, dmev, sizeof dmev) > 0);
+            CHECK(sealed_for_me("message", dm, dave.uid, clock_now + 2, NULL, "a private word", dmev, sizeof dmev) > 0);
             r = deliver_one(&dave, dm, &dave, dmev);
             CHECK(r->status == 403);
         }
@@ -617,7 +626,7 @@ int main(void)
         CHECK(puddle_group_leave_build(g2, alice.uid, clock_now, ev, sizeof ev) > 0);
         r = deliver_one(&alice, g2, &alice, ev);
         CHECK(has_text(r, "\"accepted\":[\"") && in_state(g2, alice.uid, PUDDLE_GM_LEFT));
-        CHECK(puddle_message_build(g2, alice.uid, clock_now + 1, "still here?", 11, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", g2, alice.uid, clock_now + 1, NULL, "still here?", ev, sizeof ev) > 0);
         r = deliver_one(&alice, g2, &alice, ev);
         CHECK(has_text(r, "not_a_member"));
         /* old news is not applied again */
@@ -632,7 +641,7 @@ int main(void)
         CHECK(post_as(&bob, "/stream/v1/group/invite", pk)->status == 202);
         free(pk);
         clock_now += 100;
-        CHECK(puddle_message_build(tmp, bob.uid, clock_now, "are you coming", 14, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", tmp, bob.uid, clock_now, NULL, "are you coming", ev, sizeof ev) > 0);
         reply *r = deliver_one(&bob, tmp, &bob, ev);
         CHECK(has_text(r, "not_in_group"));
         CHECK(puddle_group_leave_build(tmp, bob.uid, clock_now + 10, ev, sizeof ev) > 0);
@@ -755,7 +764,7 @@ int main(void)
             CHECK(puddle_stream_carries_groups(&st));
             puddle_stream_free(&st);
             char ev[800];
-            CHECK(puddle_message_build(g6, dave.uid, clock_now + 10, "still here", 10, NULL, ev, sizeof ev) > 0);
+            CHECK(sealed_for_me("message", g6, dave.uid, clock_now + 10, NULL, "still here", ev, sizeof ev) > 0);
             CHECK(has_text(deliver_one(&dave, g6, &dave, ev), "\"accepted\":[\""));
         }
     }

@@ -25,6 +25,15 @@ static int64_t now_cb(void) { return clock_now; }
 
 typedef struct { puddle_identity *id; char uid[PUDDLE_USER_ID_LEN + 1]; } person;
 static person me, alice, bob, carol, dave, erin;
+/* a message or edit the way a peer sends it: sealed to us */
+static size_t sealed_for_me(const char *type, const char *chat, const char *sender, int64_t ts, const char *ref_or_target, const char *body, char *out, size_t cap)
+{
+    unsigned char k[1][32];
+    puddle_identity_public(me.id, NULL, k[0], NULL);
+    return !strcmp(type, "edit") ? puddle_edit_build_sealed(chat, sender, ts, ref_or_target, body, strlen(body), (const unsigned char (*)[32])k, 1, out, cap)
+                                 : puddle_message_build_sealed(chat, sender, ts, body, strlen(body), ref_or_target, (const unsigned char (*)[32])k, 1, out, cap);
+}
+
 static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
@@ -263,7 +272,7 @@ int main(void)
     {
         char ev[800];
         clock_now += 1000;
-        CHECK(puddle_message_build(gid, alice.uid, clock_now, "hi from alice", 13, NULL, ev, sizeof ev) > 0);
+        CHECK(sealed_for_me("message", gid, alice.uid, clock_now, NULL, "hi from alice", ev, sizeof ev) > 0);
         CHECK(has_text(deliver_one(&alice, gid, &alice, ev), "\"accepted\":[\""));
     }
     snprintf(url, sizeof url, "/api/v1/gm/messages?group=%s", gid);

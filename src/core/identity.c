@@ -1143,6 +1143,25 @@ int puddle_identity_sign(puddle_identity *id, const void *data, size_t len, unsi
     return rc;
 }
 
+int puddle_identity_dh(puddle_identity *id, const unsigned char peer_pub[32], unsigned char shared[32])
+{
+    EVP_PKEY *mine = NULL, *theirs = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    size_t n = 32;
+    int ok = 0;
+    pthread_mutex_lock(&id->mu);
+    mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, id->enc.priv, 32);
+    pthread_mutex_unlock(&id->mu);
+    theirs = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, peer_pub, 32);
+    ctx = mine && theirs ? EVP_PKEY_CTX_new(mine, NULL) : NULL;
+    ok = ctx && EVP_PKEY_derive_init(ctx) == 1 && EVP_PKEY_derive_set_peer(ctx, theirs) == 1 &&
+         EVP_PKEY_derive(ctx, shared, &n) == 1 && n == 32;
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(theirs);
+    EVP_PKEY_free(mine);
+    return ok ? 0 : -1;
+}
+
 char *puddle_identity_chain(puddle_identity *id, size_t *len)
 {
     pthread_mutex_lock(&id->mu);
