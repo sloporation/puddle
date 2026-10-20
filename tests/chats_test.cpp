@@ -63,10 +63,16 @@ int main(int argc, char **argv)
     CHECK(req.value("name").toString() == "Alice" || req.value("name").toString() == alice.uid.left(8)); /* the name arrives with the profile */
     CHECK(newRequest.count() == 1 && newRequest.at(0).at(0).toString() == alice.uid);
     {
+        /* Alice's list is refreshed on a timer, so wait for her outgoing request to show instead of looking once */
         QJsonObject out;
-        for (const QJsonObject &o : people_a->items())
-            if (o.value("state").toString() == "pending_out")
-                out = o;
+        auto find_out = [&] {
+            out = QJsonObject();
+            for (const QJsonObject &o : people_a->items())
+                if (o.value("state").toString() == "pending_out")
+                    out = o;
+            return !out.isEmpty();
+        };
+        CHECK(until(find_out));
         CHECK(!out.isEmpty() && out.value("provisional").toBool() && out.value("name").toString() == bob.link && out.value("id").toString() != bob.uid);
     }
 
@@ -240,7 +246,7 @@ int main(int argc, char **argv)
                 if (m.value("body").toString() == "carol here")
                     return true;
             return false;
-        }) || true);
+        }));
         B.close();
         B.open(gid, "group");
         CHECK(until([&] {
