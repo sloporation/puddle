@@ -96,7 +96,10 @@ public:
     // Friends to pick from, for the "+" dialog. With no text, the most recent ones; with text, those with it in their name, the ones whose name
     // starts with it first, then the rest, each in order of recent activity. At most `limit`. Each is { id, name, avatar, color }.
     Q_INVOKABLE QVariantList findFriends(const QString &text, int limit) const;
-    Q_INVOKABLE int friendMatches(const QString &filter) const; // how many friends have `filter` (any case) in their name; all of them if empty
+    Q_INVOKABLE int friendMatches(const QString &filter) const;
+    // What we know of a person we have a stream with, for their profile in the side panel: { name, blurb, about, pronouns, state, since, address, certChanged }.
+    // Empty if there is no such stream.
+    Q_INVOKABLE QVariantMap person(const QString &userId) const; // how many friends have `filter` (any case) in their name; all of them if empty
     Q_INVOKABLE bool isGroupMember(const QString &userId) const { for (const QJsonObject &m : members_.items()) if (m.value("id").toString() == userId) return true; return false; }
     Q_INVOKABLE void createGroup(const QString &name, const QStringList &friends);
     Q_INVOKABLE void inviteToGroup(const QString &userId);   // into the open group
@@ -189,6 +192,10 @@ private:
     qint64 olderNext_ = -1;                 // the offset of the next page back; -1 when there is none
     bool loadedOlder_ = false, loadingOlder_ = false;
     void renderMessages();
+    bool bridging_ = false; // more arrived since the last look than one page holds: reading back until what is new joins up with what is held
+    void bridgeGap(const QString &user, std::shared_ptr<QSet<QString>> held, qint64 offset, int pages);
+    // A message of ours that is still being delivered, further back than the newest page, is read again (its page is) until the state is fresh.
+    void refreshBack(const QString &user, double oldestTs, qint64 offset, int pages);
     static constexpr int kMessagePage = 50;
     int pageSize_ = 100;
     bool connected_ = true; // until a request fails, so the banner does not flash at start-up

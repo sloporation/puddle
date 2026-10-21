@@ -22,6 +22,9 @@ Item {
     readonly property bool isInvite: convKind === "invite"
     readonly property bool isSent: convKind === "sent"
 
+    // the rename dialog on its own, for a button that is not a menu item
+    function rename(id, name) { renameDialog.start(id, name) }
+
     // `conv` is { id, kind, name }; the menu appears at (x, y) in `parentItem`
     function openFor(parentItem, x, y, conv) {
         convId = conv.id

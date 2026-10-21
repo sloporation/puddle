@@ -11,10 +11,13 @@ Pane {
 
     required property var chats
     property bool narrow: false
-    signal back()
-    signal showGroup()
+    property bool sidebarShown: true    // the conversations card is open
+    signal toggleSidebar()
+    property bool contextShown: false   // the side panel is open
+    signal toggleContext()
 
     padding: 0
+    background: null   // the conversation sits straight on the window's canvas
 
     readonly property var messages: chats.messages
     readonly property bool canSend: chats.currentState === "active"
@@ -38,6 +41,14 @@ Pane {
     }
     function dividerLabel(ts) {
         return new Date(ts).toLocaleDateString(Qt.locale(), Locale.LongFormat)
+    }
+    // In a group the delivery reported is the worst of what became of it for each member, so "not delivered yet" means someone is away: say that,
+    // not that "the group" cannot be reached. A first try gets a few seconds before it is called waiting.
+    property real nowMs: Date.now()
+    Timer { interval: 2000; running: page.visible && page.chats.currentIsGroup; repeat: true; onTriggered: page.nowMs = Date.now() }
+    function waitingOnGroup(m) {
+        if (!page.chats.currentIsGroup) return false
+        return m.deliveryState === "retrying" || (m.deliveryState === "queued" && page.nowMs - m.ts > 6000)
     }
     function startReply(m) {
         replyId = m.id; replyName = m.senderName; replyText = m.body ? m.body.replace(/\s+/g, " ").slice(0, 100) : ""
@@ -90,22 +101,19 @@ Pane {
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
                 spacing: 10
-                ToolButton { objectName: "chatBack"; visible: page.narrow; icon.source: Theme.icon("chevron-left"); icon.width: Theme.iconSize; icon.height: Theme.iconSize; display: AbstractButton.IconOnly; Accessible.name: qsTr("Back"); onClicked: page.back() }
+                PanelToggle { objectName: "sidebarButton"; glyph: "layout-sidebar"; label: qsTr("Conversations"); active: page.sidebarShown; onClicked: page.toggleSidebar() }
                 Avatar { chats: page.chats; name: page.chats.currentName; hash: page.chats.currentAvatar; tint: page.chats.currentColor; size: 28 }
                 Label { text: page.chats.currentName; font.bold: true; font.pixelSize: 16; elide: Text.ElideRight; Layout.fillWidth: true }
-                ToolButton {
-                    objectName: "membersButton"
-                    visible: page.chats.currentIsGroup
-                    text: page.chats.members.count
-                    icon.source: Theme.icon("users")
-                    icon.width: Theme.iconSize
-                    icon.height: Theme.iconSize
-                    Accessible.name: qsTr("Members")
-                    ToolTip.text: qsTr("Members and settings"); ToolTip.visible: hovered
-                    onClicked: page.showGroup()
+                PanelToggle {
+                    objectName: "contextButton"
+                    visible: page.chats.current !== ""
+                    glyph: "layout-sidebar-right"
+                    label: page.chats.currentIsGroup ? qsTr("Members") : qsTr("Profile")
+                    active: page.contextShown
+                    onClicked: page.toggleContext()
                 }
             }
-            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: palette.mid; opacity: 0.5 }
+            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.hairline }
         }
 
         // the messages
@@ -295,7 +303,8 @@ Pane {
                                     font.pixelSize: 11
                                     color: msg.model.deliveryState === "failed" ? Theme.danger : msg.model.deliveryState === "held" ? Theme.warning : palette.text
                                     opacity: msg.model.deliveryState === "failed" || msg.model.deliveryState === "held" ? 1 : 0.6
-                                    text: msg.model.deliveryState === "queued" ? qsTr("Sending…")
+                                    text: page.waitingOnGroup(msg.model) ? qsTr("Waiting for group members to come online. It will be delivered when they do.")
+                                          : msg.model.deliveryState === "queued" ? qsTr("Sending…")
                                           : msg.model.deliveryState === "retrying" ? qsTr("%1 can't be reached right now. Trying again at %2.").arg(page.chats.currentName).arg(page.clock(new Date(msg.model.deliveryNext)))
                                           : msg.model.deliveryState === "failed" ? qsTr("Not delivered: %1").arg(msg.model.deliveryReason || qsTr("unknown reason"))
                                           : msg.model.deliveryState === "held" ? qsTr("Not sent: %1's certificate changed.").arg(page.chats.currentName)
@@ -352,7 +361,7 @@ Pane {
                     spacing: 0
                     Rectangle {
                         width: tools.implicitWidth + 4; height: 30; radius: Theme.radius
-                        color: palette.window; border.color: palette.mid
+                        color: Theme.card; border.color: Theme.hairline
                         Row {
                             id: tools
                             anchors.centerIn: parent
@@ -424,18 +433,27 @@ Pane {
             }
         }
 
-        // the box
+        // the box: one line is a pill; it grows with the text. The send button sits in its bottom right corner, the same distance from the top, the
+        // bottom and the right edge as the text is from the top and bottom.
         Rectangle {
+            id: box
+            readonly property int pad: 6          // from the edge to the button
+            readonly property int buttonSize: 32
             Layout.fillWidth: true
             Layout.margins: 16
             Layout.topMargin: 8
-            implicitHeight: Math.min(input.implicitHeight, 160) + 4
-            radius: Theme.radiusLarge
-            color: Qt.darker(palette.window, 1.06)
+            implicitHeight: Math.min(Math.max(input.implicitHeight, buttonSize + 2 * pad), 160)
+            radius: Theme.buttonRadius
+            color: Theme.card
+            border.width: 1
+            border.color: input.activeFocus ? Theme.accent : Theme.hairline
             opacity: page.canSend ? 1 : 0.6
 
             ScrollView {
+                id: scroller
                 anchors.fill: parent
+                anchors.margins: 1
+                clip: true
                 TextArea {
                     id: input
                     objectName: "composer"
@@ -445,8 +463,15 @@ Pane {
                                      : qsTr("You can write once %1 has accepted.").arg(page.chats.currentName)
                     wrapMode: TextArea.Wrap
                     selectByMouse: true
+                    color: Theme.text
+                    // the same above and below a single line as beside the button; the text keeps clear of the button on the right
+                    leftPadding: 16
+                    rightPadding: box.pad * 2 + box.buttonSize + 10
+                    topPadding: Math.max(6, Math.round((box.buttonSize + 2 * box.pad - fontMetrics.height) / 2))
+                    bottomPadding: topPadding
                     onTextChanged: if (length > 4000) remove(4000, length)
                     background: null
+                    FontMetrics { id: fontMetrics; font: input.font }
                     FieldMenu {}
                     Accessible.name: qsTr("Message")
                     Keys.onPressed: event => {
@@ -461,6 +486,38 @@ Pane {
                             event.accepted = true
                         }
                     }
+                }
+            }
+
+            Rectangle {
+                id: sendButton
+                objectName: "sendButton"
+                readonly property bool ready: page.canSend && input.text.trim() !== ""
+                // a long message brings a scroll bar to the right edge (as in Discord): the button makes room for it
+                readonly property bool scrolls: input.implicitHeight > scroller.height
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: box.pad
+                anchors.rightMargin: box.pad + (scrolls ? 10 : 0)
+                Behavior on anchors.rightMargin { NumberAnimation { duration: 100 } }
+                width: box.buttonSize
+                height: box.buttonSize
+                radius: width / 2
+                color: !ready ? Theme.tint(Theme.text, Theme.hover) : sendTap.pressed ? Theme.primaryPressed : Theme.primary
+                Behavior on color { ColorAnimation { duration: 90 } }
+                activeFocusOnTab: ready
+                Accessible.role: Accessible.Button
+                Accessible.name: qsTr("Send")
+                Accessible.onPressAction: page.send()
+                Keys.onSpacePressed: page.send()
+                Keys.onReturnPressed: page.send()
+                Icon { anchors.centerIn: parent; glyph: "arrow-up"; size: 18; color: sendButton.ready ? "white" : Theme.tint(Theme.text, 0.4) }
+                Rectangle { anchors.fill: parent; anchors.margins: -3; radius: width / 2; color: "transparent"; border.width: 2; border.color: Theme.accent; visible: sendButton.activeFocus }
+                HoverHandler { cursorShape: sendButton.ready ? Qt.PointingHandCursor : Qt.ArrowCursor }
+                TapHandler {
+                    id: sendTap
+                    enabled: sendButton.ready
+                    onTapped: { page.send(); input.forceActiveFocus() }
                 }
             }
         }

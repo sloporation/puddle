@@ -14,20 +14,25 @@ src/gui/
   qml/              the screens, by what they are about
     Main.qml          the window itself: first-run, errors, the tray, notifications
     setup/            first-run screen (recovery phrase)
-    shell/            Shell: the rail, the sidebar and the page beside it
+    shell/            Shell: a canvas with the page on it and two floating cards: the rail and sidebar at the left, the context panel at the right.
+                      A little circle at the top of the page folds each card away (Ctrl/Cmd+B, Ctrl/Cmd+U)
                       Sidebar, SidebarRow: the one list of friends and groups, with what waits for an answer pinned at the top
                       HomePage: what shows when nothing is open
+                      ContextBar: the panel at the right of an open conversation: members of a group, or a person's profile and what can be done about them.
+                      Beside the conversation when the window is at least Theme.contextBreakpoint wide, a drawer over it when not
     chat/             ChatPage: one conversation
-    groups/           GroupPopup: the members box of an open group (moves to the context bar)
-    dialogs/          NewConversationDialog: the "+": message one friend or start a group, or add a friend by address
+    dialogs/          NewConversationDialog: the "+": message one friend or start a group, or add a friend by address; also asks more friends into a group
     settings/         the settings page (activity log, developer mode, who is blocked) and PersonRow, the blocked-person row
-    components/       small things used everywhere: Avatar, Icon, ContextTrigger (right-click), FieldMenu (text box menu),
+    components/       small things used everywhere: Card (a floating panel), PanelToggle (the fold-away circle), Avatar, Icon, ContextTrigger (right-click), FieldMenu (text box menu),
                       ConfirmDialog, ConversationMenu, ScrollList and ScrollArea (see below)
     theme/            Theme: every colour, size and gap, in one file
   assets/           images, and the icons (icons/tabler: see icons/README.md)
 ```
 
 ## Changing how it looks
+
+The owner restyles the app with a `theme.yaml` (see `docs/theming.md`): `Backend::themeValues` reads it, the Shell hands it to
+`Theme.overrides`, and every `Theme` property that goes through `pick()` follows it.
 
 Open `qml/theme/Theme.qml` first. Colours that mean something (danger red, unread badge, the green button), the two hover and
 selection shades, and the main sizes (rail width, sidebar width, header height, row height, the width at which the window goes to one pane)

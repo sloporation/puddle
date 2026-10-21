@@ -2,7 +2,10 @@
 
 #include <QClipboard>
 #include <QCoreApplication>
+#include <QDir>
 #include <QEvent>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QSettings>
 
@@ -35,6 +38,16 @@ Backend::Backend(QObject *parent) : QObject(parent)
     qApp->installEventFilter(this);
     developerMode_ = QSettings().value("developerMode", false).toBool();
 
+    char cfgPath[PUDDLE_PATH_MAX];
+    if (puddle_config_default_path(cfgPath, sizeof cfgPath) == 0) {
+        themePath_ = QFileInfo(QString::fromUtf8(cfgPath)).absoluteDir().filePath("theme.yaml");
+        // watch the folder too, so a theme file made while the app runs is noticed
+        connect(&themeWatch_, &QFileSystemWatcher::fileChanged, this, &Backend::loadTheme);
+        connect(&themeWatch_, &QFileSystemWatcher::directoryChanged, this, &Backend::loadTheme);
+        themeWatch_.addPath(QFileInfo(themePath_).absolutePath());
+        loadTheme();
+    }
+
     char err[512];
     if (puddle_config_load(&cfg_, nullptr, err, sizeof err) != 0) {
         error_ = QString::fromUtf8(err);
@@ -48,6 +61,45 @@ Backend::Backend(QObject *parent) : QObject(parent)
     needsSetup_ = setupRedo_ || !puddle_identity_exists(cfg_.data_dir);
     if (!needsSetup_)
         startServer();
+}
+
+QVariantMap Backend::parseTheme(const QByteArray &text)
+{
+    QVariantMap out;
+    for (const QByteArray &raw : text.split('\n')) {
+        QString line = QString::fromUtf8(raw).trimmed();
+        const int colon = line.indexOf(':');
+        if (line.startsWith('#') || colon <= 0)
+            continue;
+        const QString key = line.left(colon).trimmed();
+        QString value = line.mid(colon + 1).trimmed();
+        if (value.size() >= 2 && (value[0] == '"' || value[0] == '\'')) {
+            const int end = value.indexOf(value[0], 1);
+            value = end > 0 ? value.mid(1, end - 1) : value.mid(1);
+        } else {
+            const int hash = value.indexOf(" #");
+            if (hash >= 0)
+                value = value.left(hash).trimmed();
+        }
+        if (!key.isEmpty() && !value.isEmpty())
+            out.insert(key, value);
+    }
+    return out;
+}
+
+void Backend::loadTheme()
+{
+    QVariantMap now;
+    QFile f(themePath_);
+    if (f.open(QIODevice::ReadOnly))
+        now = parseTheme(f.read(1 << 16));
+    // an editor that saves by replacing the file drops it from the watch list
+    if (QFileInfo::exists(themePath_) && !themeWatch_.files().contains(themePath_))
+        themeWatch_.addPath(themePath_);
+    if (now != theme_) {
+        theme_ = now;
+        emit themeChanged();
+    }
 }
 
 Backend::~Backend()

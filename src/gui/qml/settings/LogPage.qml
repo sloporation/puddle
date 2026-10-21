@@ -11,9 +11,11 @@ Pane {
     required property var backend
     required property var chats
     property bool narrow: false
-    signal back()
+    property bool sidebarShown: true
+    signal toggleSidebar()
 
     padding: 0
+    background: null
 
     ColumnLayout {
         anchors.fill: parent
@@ -21,7 +23,7 @@ Pane {
         RowLayout {
             Layout.fillWidth: true
             Layout.margins: 8
-            ToolButton { visible: page.narrow; icon.source: Theme.icon("chevron-left"); icon.width: Theme.iconSize; icon.height: Theme.iconSize; display: AbstractButton.IconOnly; Accessible.name: qsTr("Back"); onClicked: page.back() }
+            PanelToggle { glyph: "layout-sidebar"; label: qsTr("Conversations"); active: page.sidebarShown; onClicked: page.toggleSidebar() }
             Label { text: qsTr("Settings"); font.bold: true; font.pixelSize: 16 }
             Item { Layout.fillWidth: true }
             Label {
@@ -31,7 +33,7 @@ Pane {
                 Layout.maximumWidth: page.width * 0.6
             }
         }
-        Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.5 }
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.hairline }
 
         // Like Discord's Developer Mode: what is normally kept out of sight
         RowLayout {
@@ -76,7 +78,7 @@ Pane {
             }
             Button { text: qsTr("Copy"); onClicked: page.backend.copyText(page.backend.myId) }
         }
-        Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.5 }
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.hairline }
         // people you blocked, and a way to let them back
         Label { visible: page.chats.blocked.count > 0; Layout.margins: 16; Layout.bottomMargin: 4; text: qsTr("Blocked"); font.bold: true }
         Repeater {
@@ -93,7 +95,7 @@ Pane {
                 name: model.name
             }
         }
-        Rectangle { visible: page.chats.blocked.count > 0; Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.5; Layout.topMargin: 8 }
+        Rectangle { visible: page.chats.blocked.count > 0; Layout.fillWidth: true; height: 1; color: Theme.hairline; Layout.topMargin: 8 }
         Label { Layout.margins: 16; Layout.bottomMargin: 0; text: qsTr("Activity"); font.bold: true }
         Label {
             visible: page.backend.error !== ""

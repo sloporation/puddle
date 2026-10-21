@@ -10,6 +10,7 @@ Rectangle {
     id: bar
 
     objectName: "sidebar"
+    color: "transparent"   // it is drawn on a card
     required property var chats
     required property var backend
     property string selectedId: ""   // the conversation that is open, if one is
@@ -57,7 +58,7 @@ Rectangle {
                     onClicked: bar.newConversation()
                 }
             }
-            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: palette.mid; opacity: 0.5 }
+            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.hairline }
         }
 
         ScrollList {
@@ -110,7 +111,8 @@ Rectangle {
         Rectangle {
             Layout.fillWidth: true
             implicitHeight: 56
-            color: Qt.darker(palette.window, 1.1)
+            color: "transparent"
+            Rectangle { width: parent.width; height: 1; color: Theme.hairline }
             ContextTrigger { onRequested: (x, y) => selfMenu.popup(parent, x, y) }
             Menu {
                 id: selfMenu

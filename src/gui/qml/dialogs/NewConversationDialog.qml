@@ -11,6 +11,10 @@ Popup {
     required property var chats
     required property var backend
     signal startDm(string userId)   // one friend was picked; a group is made through chats.createGroup and announced by groupCreated
+    // set while the dialog is asking more friends into a group that exists (instead of starting something new)
+    property string addTo: ""
+    property string addToName: ""
+    readonly property bool adding: addTo !== ""
 
     modal: true
     anchors.centerIn: Overlay.overlay
@@ -18,19 +22,33 @@ Popup {
     // never taller than the window: the list of friends is what gives way
     height: Math.min(implicitHeight, (Overlay.overlay ? Overlay.overlay.height : 600) - 24)
     padding: 20
+    background: Rectangle { color: Theme.card; radius: Theme.cardRadius - 6; border.width: 1; border.color: Theme.hairline }
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     readonly property int maxPicked: 49   // a group has room for 50 people, and you are one
     readonly property int shownMax: 30
     // who the search finds: the most recent friends until you type, then those whose name has what you typed (never more than a screenful: type more)
-    readonly property var results: { chats.friendCount; chats.sidebar.count; return chats.findFriends(search.text, shownMax) }
-    readonly property int matches: { chats.friendCount; return chats.friendMatches(search.text.trim()) }
+    // (when asking more into a group, those already in it are not offered)
+    function candidates(limit) {
+        const found = chats.findFriends(search.text, adding ? 100000 : limit)
+        return adding ? found.filter(f => !chats.isGroupMember(f.id)).slice(0, limit) : found
+    }
+    readonly property var results: { chats.friendCount; chats.sidebar.count; chats.members.count; return candidates(shownMax) }
+    readonly property int matches: { chats.friendCount; chats.members.count; return adding ? candidates(100000).length : chats.friendMatches(search.text.trim()) }
     property int tab: 0   // 0 message, 1 add friend
     property var picked: ({})
     property int pickedCount: 0
 
     function show(which) {
+        addTo = ""
         tab = which
+        open()
+    }
+    // ask friends who are not in the open group yet
+    function showAdd(groupId, groupName) {
+        addTo = groupId
+        addToName = groupName
+        tab = 0
         open()
     }
     onOpened: (tab === 0 ? search : link).forceActiveFocus()
@@ -51,7 +69,9 @@ Popup {
     function start() {
         const ids = pickedIds()
         if (ids.length === 0) return
-        if (ids.length === 1) {
+        if (adding) {
+            for (const id of ids) chats.inviteToGroup(id)
+        } else if (ids.length === 1) {
             startDm(ids[0])
         } else {
             const name = groupName.text.trim() !== "" ? groupName.text.trim() : defaultName()
@@ -70,9 +90,10 @@ Popup {
         anchors.fill: parent
         spacing: 12
 
-        Label { text: qsTr("New conversation"); font.bold: true; font.pixelSize: 20 }
+        Label { text: pop.adding ? qsTr("Add people to “%1”").arg(pop.addToName) : qsTr("New conversation"); font.bold: true; font.pixelSize: 20; elide: Text.ElideRight; Layout.fillWidth: true }
 
         RowLayout {
+            visible: !pop.adding
             spacing: 4
             Repeater {
                 model: [qsTr("Message"), qsTr("Add friend")]
@@ -89,7 +110,7 @@ Popup {
                     Accessible.name: text
                     onClicked: pop.tab = index
                     background: Rectangle {
-                        radius: Theme.radius
+                        radius: Theme.buttonRadius
                         color: tb.current ? Theme.tint(palette.text, 0.12) : tb.hovered ? Theme.tint(palette.text, 0.06) : "transparent"
                     }
                 }
@@ -98,7 +119,7 @@ Popup {
 
         // ---- message ----
         ColumnLayout {
-            visible: pop.tab === 0
+            visible: pop.tab === 0 || pop.adding
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 10
@@ -184,7 +205,7 @@ Popup {
 
             // more than one person is a group
             ColumnLayout {
-                visible: pop.pickedCount > 1
+                visible: pop.pickedCount > 1 && !pop.adding
                 Layout.fillWidth: true
                 spacing: 6
                 TextField {
@@ -213,13 +234,12 @@ Popup {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
                 Button { text: qsTr("Cancel"); onClicked: pop.close() }
-                Button {
+                PrimaryButton {
                     id: startButton
                     objectName: "startConversationButton"
-                    text: pop.pickedCount > 1 ? qsTr("Create group with %1 people").arg(pop.pickedCount) : qsTr("Message")
+                    text: pop.adding ? (pop.pickedCount === 1 ? qsTr("Ask 1 friend") : qsTr("Ask %1 friends").arg(pop.pickedCount))
+                          : pop.pickedCount > 1 ? qsTr("Create group with %1 people").arg(pop.pickedCount) : qsTr("Message")
                     enabled: pop.pickedCount > 0
-                    contentItem: Label { text: startButton.text; color: "white"; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; opacity: startButton.enabled ? 1 : 0.5 }
-                    background: Rectangle { radius: Theme.radius; color: startButton.down ? Theme.primaryPressed : Theme.primary; opacity: startButton.enabled ? 1 : 0.5 }
                     onClicked: pop.start()
                 }
             }
@@ -227,7 +247,7 @@ Popup {
 
         // ---- add friend ----
         ColumnLayout {
-            visible: pop.tab === 1
+            visible: pop.tab === 1 && !pop.adding
             Layout.fillWidth: true
             spacing: 12
 
@@ -275,12 +295,10 @@ Popup {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
                 Button { text: qsTr("Cancel"); onClicked: pop.close() }
-                Button {
+                PrimaryButton {
                     id: sendButton
                     objectName: "sendRequestButton"
                     text: qsTr("Send Request")
-                    contentItem: Label { text: sendButton.text; color: "white"; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; opacity: sendButton.enabled ? 1 : 0.5 }
-                    background: Rectangle { radius: Theme.radius; color: sendButton.down ? Theme.primaryPressed : Theme.primary; opacity: sendButton.enabled ? 1 : 0.5 }
                     enabled: link.text.trim() !== ""
                     onClicked: pop.send()
                 }

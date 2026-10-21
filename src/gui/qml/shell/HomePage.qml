@@ -10,10 +10,19 @@ Pane {
 
     required property var chats
     property bool narrow: false
+    property bool sidebarShown: true
+    signal toggleSidebar()
     signal newConversation()
     signal addFriend()
 
     padding: 0
+    background: null
+
+    PanelToggle {
+        x: 12; y: (Theme.headerHeight - height) / 2
+        glyph: "layout-sidebar"; label: qsTr("Conversations"); active: page.sidebarShown
+        onClicked: page.toggleSidebar()
+    }
 
     ColumnLayout {
         anchors.centerIn: parent
@@ -36,13 +45,11 @@ Pane {
             text: page.chats.friendCount === 0 ? qsTr("Add a friend with their address, and you can talk here.")
                                                : qsTr("Choose someone from the list, or start a new conversation.")
         }
-        Button {
+        PrimaryButton {
             id: start
             objectName: "homeNewButton"
             Layout.alignment: Qt.AlignHCenter
             text: page.chats.friendCount === 0 ? qsTr("Add a friend") : qsTr("New conversation")
-            contentItem: Label { text: start.text; color: "white"; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-            background: Rectangle { radius: Theme.radius; color: start.down ? Theme.primaryPressed : Theme.primary }
             onClicked: page.chats.friendCount === 0 ? page.addFriend() : page.newConversation()
         }
     }

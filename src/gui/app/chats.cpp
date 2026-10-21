@@ -217,6 +217,24 @@ QVariantList Chats::findFriends(const QString &text, int limit) const
     return out;
 }
 
+QVariantMap Chats::person(const QString &userId) const
+{
+    for (const QJsonObject &p : people_.items()) {
+        if (p.value("id").toString() != userId)
+            continue;
+        const QJsonObject profile = p.value("peer").toObject().value("profile").toObject();
+        return QVariantMap{ { "name", p.value("name").toString() },
+                            { "blurb", profile.value("blurb").toString() },
+                            { "about", profile.value("about").toString() },
+                            { "pronouns", profile.value("pronouns").toString() },
+                            { "state", p.value("state").toString() },
+                            { "since", qint64(p.value("created_at").toDouble()) },
+                            { "address", p.value("address").toString() },
+                            { "certChanged", p.value("certificate_changed").toBool() } };
+    }
+    return {};
+}
+
 int Chats::friendMatches(const QString &filter) const
 {
     int n = 0;
@@ -351,7 +369,7 @@ void Chats::markRead()
 // Take a page from the server: its messages and notices are kept, and the offset of the page before it remembered when it is the furthest back.
 void Chats::refreshMessages()
 {
-    if (current_.isEmpty() || busy_[2])
+    if (current_.isEmpty() || busy_[2] || bridging_)
         return;
     busy_[2] = true;
     const QString user = current_;
@@ -361,14 +379,100 @@ void Chats::refreshMessages()
         busy_[2] = false;
         if (status != 200 || !doc.isObject() || user != current_)
             return;
+        // The newest page joins what is held if it shares a message with it. If not, more than a page arrived since the last look (a burst), and
+        // there is a hole between: it is closed by reading back from this page until a message already held turns up.
+        bool joins = msgs_.isEmpty();
+        for (const QJsonValue &v : doc.object().value("messages").toArray())
+            joins = joins || msgs_.contains(v.toObject().value("id").toString());
+        std::shared_ptr<QSet<QString>> held;
+        if (!joins)
+            held = std::make_shared<QSet<QString>>(QSet<QString>(msgs_.keyBegin(), msgs_.keyEnd()));
         for (const QJsonValue &v : doc.object().value("messages").toArray())
             msgs_.insert(v.toObject().value("id").toString(), v.toObject()); // the newest page again: edits, deletions and delivery states are fresh
         for (const QJsonValue &v : doc.object().value("notices").toArray())
             notices_.insert(v.toObject().value("id").toString(), v.toObject());
-        if (!loadedOlder_) {
-            const QJsonValue next = doc.object().value("next");
-            olderNext_ = next.isNull() ? -1 : qint64(next.toDouble());
+        const QJsonValue next = doc.object().value("next");
+        if (held && !next.isNull()) {
+            bridging_ = true;
+            renderMessages();
+            bridgeGap(user, held, qint64(next.toDouble()), 0);
+            return;
         }
+        if (!loadedOlder_)
+            olderNext_ = next.isNull() ? -1 : qint64(next.toDouble());
+        // what we sent that is still being delivered, but is older than this page, has a state we only saw once: look at it again
+        QSet<QString> live;
+        for (const QJsonValue &v : doc.object().value("messages").toArray())
+            live.insert(v.toObject().value("id").toString());
+        double oldestPending = 0;
+        for (const QJsonObject &m : msgs_)
+            if (m.contains("delivery") && !live.contains(m.value("id").toString()) && (oldestPending == 0 || m.value("ts").toDouble() < oldestPending))
+                oldestPending = m.value("ts").toDouble();
+        if (oldestPending > 0 && !next.isNull()) {
+            bridging_ = true;
+            renderMessages();
+            refreshBack(user, oldestPending, qint64(next.toDouble()), 0);
+            return;
+        }
+        renderMessages();
+    });
+}
+
+void Chats::refreshBack(const QString &user, double oldestTs, qint64 offset, int pages)
+{
+    const QString url = (currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2&offset=%3")
+                                          : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2&offset=%3")).arg(user).arg(kMessagePage).arg(offset);
+    api_.get(url, [this, user, oldestTs, pages](int status, const QJsonDocument &doc) {
+        if (status != 200 || !doc.isObject() || user != current_) {
+            bridging_ = false;
+            return;
+        }
+        double oldest = 1e300;
+        for (const QJsonValue &v : doc.object().value("messages").toArray()) {
+            msgs_.insert(v.toObject().value("id").toString(), v.toObject()); // the fresh copy replaces the old one
+            oldest = qMin(oldest, v.toObject().value("ts").toDouble());
+        }
+        const QJsonValue next = doc.object().value("next");
+        if (oldest > oldestTs && !next.isNull() && pages < 100) {
+            refreshBack(user, oldestTs, qint64(next.toDouble()), pages + 1);
+            return;
+        }
+        bridging_ = false;
+        renderMessages();
+    });
+}
+
+// Read back from `offset` until a page holds a message that was held before (or the chat starts), so nothing is missing from the middle.
+void Chats::bridgeGap(const QString &user, std::shared_ptr<QSet<QString>> held, qint64 offset, int pages)
+{
+    const QString url = (currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2&offset=%3")
+                                          : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2&offset=%3")).arg(user).arg(kMessagePage).arg(offset);
+    api_.get(url, [this, user, held, pages](int status, const QJsonDocument &doc) {
+        if (status != 200 || !doc.isObject() || user != current_) {
+            bridging_ = false;
+            return;
+        }
+        bool joined = false;
+        for (const QJsonValue &v : doc.object().value("messages").toArray()) {
+            joined = joined || held->contains(v.toObject().value("id").toString());
+            msgs_.insert(v.toObject().value("id").toString(), v.toObject());
+        }
+        for (const QJsonValue &v : doc.object().value("notices").toArray())
+            notices_.insert(v.toObject().value("id").toString(), v.toObject());
+        const QJsonValue next = doc.object().value("next");
+        if (!joined && !next.isNull() && pages < 400) {
+            bridgeGap(user, held, qint64(next.toDouble()), pages + 1);
+            return;
+        }
+        if (!joined && !next.isNull()) {                    // an enormous burst: give up what was held before rather than show a hole
+            for (const QString &id : *held)
+                msgs_.remove(id);
+        }
+        if (!loadedOlder_ || !joined)                       // where the page before the oldest held one starts
+            olderNext_ = next.isNull() ? -1 : qint64(next.toDouble());
+        if (!joined)
+            loadedOlder_ = false;
+        bridging_ = false;
         renderMessages();
     });
 }
@@ -473,7 +577,7 @@ void Chats::open(const QString &userId, const QString &kind)
     msgs_.clear();
     notices_.clear();
     olderNext_ = -1;
-    loadedOlder_ = loadingOlder_ = false;
+    loadedOlder_ = loadingOlder_ = bridging_ = false;
     messages_.clear();
     if (hasOlder_) {
         hasOlder_ = false;

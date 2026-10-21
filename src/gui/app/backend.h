@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QFileSystemWatcher>
 #include <QObject>
+#include <QVariantMap>
 #include <QStringListModel>
 #include <memory>
 #include <thread>
@@ -34,6 +36,8 @@ class Backend : public QObject {
     // True once the app has been asked to quit (Cmd+Q, session end, ...), so the
     // window knows to really close instead of hiding to the tray.
     Q_PROPERTY(bool quitting READ quitting NOTIFY quittingChanged)
+    // The owner's restyling: the `key: value` lines of theme.yaml beside puddle.yaml (empty if there is none). Read again when the file changes.
+    Q_PROPERTY(QVariantMap themeValues READ themeValues NOTIFY themeChanged)
 public:
     explicit Backend(QObject *parent = nullptr);
     ~Backend() override;
@@ -50,6 +54,10 @@ public:
     bool needsSetup() const { return needsSetup_; }
     bool setupRedo() const { return setupRedo_; }
     bool quitting() const { return quitting_; }
+    QVariantMap themeValues() const { return theme_; }
+    // Parse the lines of a theme file: `key: value`, `#` starts a comment, quotes around a value are dropped. (A subset of YAML; colours
+    // are quoted in the docs because a bare `#` starts a comment in YAML proper, though this reader lets one through.)
+    static QVariantMap parseTheme(const QByteArray &text);
 
     void append(const QString &line);
 
@@ -77,6 +85,7 @@ signals:
     void startedChanged();
     void errorChanged();
     void needsSetupChanged();
+    void themeChanged();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -84,7 +93,11 @@ protected:
 private:
     void startServer();
     void setError(const QString &message);
+    void loadTheme();
 
+    QVariantMap theme_;
+    QString themePath_;
+    QFileSystemWatcher themeWatch_;
     QStringListModel log_;
     Chats chats_;
     QString listenUrl_, myLink_, myId_;

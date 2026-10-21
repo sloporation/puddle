@@ -124,12 +124,20 @@ if(PUDDLE_BUILD_GUI)
         src/gui/qml/shell/Sidebar.qml
         src/gui/qml/shell/SidebarRow.qml
         src/gui/qml/shell/HomePage.qml
+        src/gui/qml/shell/ContextBar.qml
         src/gui/qml/dialogs/NewConversationDialog.qml
         src/gui/qml/chat/ChatPage.qml
         src/gui/qml/settings/PersonRow.qml
-        src/gui/qml/groups/GroupPopup.qml
         src/gui/qml/settings/LogPage.qml
         src/gui/qml/components/Avatar.qml
+        src/gui/qml/components/Button.qml
+        src/gui/qml/components/Card.qml
+        src/gui/qml/components/Dialog.qml
+        src/gui/qml/components/DialogButtonBox.qml
+        src/gui/qml/components/PrimaryButton.qml
+        src/gui/qml/components/PanelToggle.qml
+        src/gui/qml/components/TextField.qml
+        src/gui/qml/components/ToolButton.qml
         src/gui/qml/components/ContextTrigger.qml
         src/gui/qml/components/FieldMenu.qml
         src/gui/qml/components/ConfirmDialog.qml

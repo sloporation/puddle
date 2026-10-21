@@ -198,6 +198,9 @@ int main(int argc, char **argv)
     CHECK(find("homePage") != nullptr);                                                            /* nothing open: the empty page */
     CHECK(clickName("newConversationButton"));
     CHECK(clickName("tabAddFriend"));
+    settle();
+    if (const QString shot = qEnvironmentVariable("PUDDLE_SHOT"); !shot.isEmpty())
+        win->grabWindow().save(shot + "-dialog.png");
     CHECK(until([&] { return find("linkField") != nullptr; }, 3000));
     CHECK(click(find("linkField")));
     typeText(bob.link);
@@ -226,6 +229,10 @@ int main(int argc, char **argv)
     CHECK(click(dm_row("Bob")));
     CHECK(until([&] { return A.current() == bob.uid; }, 3000));
     CHECK(until([&] { return find("composer") != nullptr; }, 3000));
+    /* the panel beside it shows who Bob is, and what can be done; no IDs until Developer Mode */
+    CHECK(until([&] { return find("profileName") != nullptr; }, 3000));
+    CHECK(find("profileName")->property("text").toString() == "Bob");
+    CHECK(find("profileRemove") && find("profileBlock") && find("profileSince") && !find("profileId") && !find("memberList"));
     CHECK(click(find("composer")));
     typeText("hello from the window");
     key(Qt::Key_Return);
@@ -344,16 +351,34 @@ int main(int argc, char **argv)
     CHECK(until([&] { return A.unreadTotal() == 0; }));
     CHECK(until([&] { return shows("while you were away"); }, 5000));
 
-    /* ---- a narrow window shows one pane at a time ---- */
+    /* ---- a narrow window has the conversation to itself; the list slides in over it ---- */
     win->resize(380, 640);
     CHECK(until([&] { return find("chatPage") && !find("sidebar"); }, 3000));
-    CHECK(find("rail") == nullptr);                                                                /* a conversation has the whole window */
-    CHECK(clickName("chatBack"));
-    CHECK(until([&] { return find("sidebar") && !find("chatPage"); }, 3000));
-    CHECK(find("rail") != nullptr && find("homeButton") != nullptr);                              /* the list keeps the rail (where servers go) beside it */
-    CHECK(find("rail")->x() + find("rail")->width() <= find("sidebar")->x() + 1 && find("sidebar")->x() + find("sidebar")->width() <= win->width() + 1);   /* side by side, both on screen */
+    CHECK(find("rail") == nullptr && find("chatBack") == nullptr);
+    CHECK(clickName("sidebarButton"));
+    CHECK(until([&] { return find("sidebar") && find("rail") && find("chatPage"); }, 3000));      /* over the conversation, which stays where it is */
+    CHECK(find("homeButton") != nullptr);                                                          /* the list keeps the rail (where servers go) beside it */
+    CHECK(until([&] { return find("sidebar")->mapToItem(win->contentItem(), QPointF(0, 0)).x() >= 0; }, 3000));   /* (slid fully in) */
+    if (const QString shot = qEnvironmentVariable("PUDDLE_SHOT"); !shot.isEmpty()) {
+        settle(400);
+        win->grabWindow().save(shot + "-narrow.png");
+    }
+    CHECK(find("rail")->x() + find("rail")->width() <= find("sidebar")->x() + 1);
+    CHECK(find("sidebar")->mapToItem(win->contentItem(), QPointF(find("sidebar")->width(), 0)).x() <= win->width() + 1);
+    QTest::keyClick(win, Qt::Key_Escape);                                                          /* the members or profile slide in from the right the same way */
+    CHECK(until([&] { return !find("sidebar"); }, 3000));
+    CHECK(clickName("contextButton"));
+    CHECK(until([&] { return find("contextBar") && find("contextClose") && find("chatPage"); }, 3000));
+    if (const QString shot = qEnvironmentVariable("PUDDLE_SHOT"); !shot.isEmpty()) {
+        settle(400);
+        win->grabWindow().save(shot + "-narrow-context.png");
+    }
+    CHECK(clickName("contextClose"));
+    CHECK(until([&] { return !find("contextBar"); }, 3000));
+    CHECK(clickName("sidebarButton"));
+    CHECK(until([&] { return find("sidebar") != nullptr; }, 3000));
     CHECK(clickName("settingsButton"));
-    CHECK(until([&] { return find("developerSwitch") && !find("sidebar"); }, 3000));
+    CHECK(until([&] { return find("developerSwitch") && !find("sidebar"); }, 3000));              /* choosing something puts the list away */
     win->resize(1000, 640);
     CHECK(until([&] { return find("sidebar") && find("developerSwitch"); }, 3000));
 
@@ -470,19 +495,53 @@ int main(int argc, char **argv)
         B.close();
         D.close();
 
-        /* ---- the members, a new name, and leaving ---- */
-        CHECK(clickName("membersButton"));
-        CHECK(until([&] { return find("memberList") != nullptr && find("memberList")->property("count").toInt() == 3; }, 5000));
-        CHECK(click(find("renameField")));
+        /* ---- the side panel: the members are beside the conversation (the window is wide), and it can be put away and brought back ---- */
+        CHECK(until([&] { return find("contextBar") != nullptr && find("memberList") != nullptr && find("memberList")->property("count").toInt() == 3; }, 5000));
+        CHECK(click(find("contextButton")));
+        CHECK(until([&] { return find("contextBar") == nullptr; }, 3000));
+        CHECK(click(find("contextButton")));
+        CHECK(until([&] { return find("contextBar") != nullptr && find("memberList")->property("count").toInt() == 3; }, 3000));
+
+        /* the conversations card folds away the same way, and the rail with it */
+        if (const QString shot = qEnvironmentVariable("PUDDLE_SHOT"); !shot.isEmpty())   /* a picture for looking at, when asked */
+            win->grabWindow().save(shot + "-open.png");
+        CHECK(find("sidebar") != nullptr && find("rail") != nullptr);
+        CHECK(click(find("sidebarButton")));
+        CHECK(until([&] { return find("sidebar") == nullptr && find("rail") == nullptr && find("composer") != nullptr; }, 3000));
+        if (const QString shot = qEnvironmentVariable("PUDDLE_SHOT"); !shot.isEmpty())
+            win->grabWindow().save(shot + "-folded.png");
+        CHECK(click(find("sidebarButton")));
+        CHECK(until([&] { return find("sidebar") != nullptr && find("rail") != nullptr; }, 3000));
+
+        /* a member: there is a menu for each of the others (not for you) */
+        CHECK(until([&] { return all("memberMore").size() == 2; }, 3000));
+
+        /* a new name, from the pencil beside it */
+        CHECK(clickName("groupRenameButton"));
+        CHECK(until([&] { return find("renameDialogField") != nullptr; }, 3000));
+        find("renameDialogField")->forceActiveFocus();
+        key(Qt::Key_A, Qt::ControlModifier);
         typeText("Weekend away");
-        CHECK(click(find("renameButton")));
+        key(Qt::Key_Return);
         CHECK(until([&] { return A.currentName() == "Weekend away"; }));
         CHECK(until([&] { return row(conv_a, "id", gid).value("name").toString() == "Weekend away"; }));
+
+        /* more people: only friends who are not in it are offered */
+        CHECK(clickName("addPeopleButton"));
+        CHECK(until([&] { return find_text("friendPick", "Carol") != nullptr; }, 5000));
+        CHECK(find_text("friendPick", "Bob") == nullptr && find_text("friendPick", "Dana") == nullptr);
+        CHECK(find("tabAddFriend") == nullptr);                                                     /* (this is not the place to add a friend) */
+        CHECK(click(find_text("friendPick", "Carol")));
+        CHECK(find("startConversationButton") && find("startConversationButton")->property("text").toString().contains("1"));
+        CHECK(click(find("startConversationButton")));
+        CHECK(until([&] { return find("memberList")->property("count").toInt() == 4; }, 5000));      /* Carol is asked: she shows as invited */
+
+        /* leaving asks first */
         CHECK(clickName("leaveGroupButton"));
-        CHECK(until([&] { return button("OK") != nullptr; }, 3000));
-        CHECK(click(button("OK")));
+        CHECK(until([&] { return find("confirmOk") != nullptr; }, 3000));
+        CHECK(click(find("confirmOk")));
         CHECK(until([&] { return A.current().isEmpty() && group_rows(conv_a) == 0; }, 5000));
-        CHECK(until([&] { return find("memberList") == nullptr; }, 3000));                        /* and the box is gone */
+        CHECK(until([&] { return find("memberList") == nullptr; }, 3000));                        /* and the panel is gone */
 
         /* ---- invited: the invitation waits in Pending, and joining says what it costs ---- */
         QSignalSpy invited(&A, &Chats::newGroupInvite);
@@ -536,6 +595,16 @@ int main(int argc, char **argv)
             auto y = [&] { return list->property("contentY").toReal(); };
             auto atBottom = [&] { return list->property("atBottom").toBool(); };
             CHECK(until([&] { return atBottom() && list->property("contentHeight").toReal() > list->height() + 60; }, 5000));
+            {   /* let the list settle (rows being measured, deliveries finishing) before taking where the bottom is */
+                qreal last = -1;
+                for (int k = 0; k < 20; k++) {
+                    settle(250);
+                    const qreal now = list->property("contentHeight").toReal();
+                    if (now == last && atBottom())
+                        break;
+                    last = now;
+                }
+            }
             const qreal bottom = y();
 
             /* drag the content downwards (towards earlier messages) from the blank gutter beside the pictures: it stays where it is */
@@ -571,7 +640,11 @@ int main(int argc, char **argv)
             /* only the newest page is here; scrolling up to within a screenful of the top fetches the one before, which goes above: what you were
              * reading moves only by what you scrolled, not by the page that was added */
             /* (everything that arrived while the chat was open is already held, so open it afresh: then it is the newest page and no more) */
-            CHECK(click(find("homeButton")));
+            CHECK(clickName("settingsButton"));
+            CHECK(until([&] { return A.current().isEmpty(); }, 3000));
+            CHECK(click(find("homeButton")));                                                          /* Home goes back into the conversation that was open */
+            CHECK(until([&] { return A.current() == bob.uid; }, 3000));
+            CHECK(clickName("settingsButton"));
             CHECK(until([&] { return A.current().isEmpty(); }, 3000));
             CHECK(click(dm_row("Bob")));
             CHECK(until([&] { return A.current() == bob.uid && find("messageList") != nullptr && msgs->rowCount() > 0 && atBottom(); }, 5000));
