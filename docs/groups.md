@@ -42,9 +42,10 @@ Often the people in a group do not know each other. So two members who share no 
 
 1. The one who joins asks each member they hold no stream with (`POST /stream/v1/access`, with `scope` set), and the request carries their own
    signed `member.join` as proof that someone in the group invited them. The address to ask at comes from the invitation.
-2. The member checks that they are in that group, that the requester is invited (or already in), that the join is the requester's own and signed by
+2. The member checks that they are in that group **or invited to it and not yet answered** (whoever says yes first asks the others, and the others may not have got to the invitation yet; refusing would leave the first one cut off for good), that the requester is invited (or already in), that the join is the requester's own and signed by
    the key in the chain they sent, and that the requester is not blocked. Then the join is applied, the stream is recorded in the state `scoped`,
-   and the answer says yes (`access/result` with `scoped:true`, which can only answer a request made for a group).
+   and the answer says yes (`access/result` with `scoped:true`, which can only answer a request made for a group). If we then turn the invitation down, the connection that was only for that group is let go like any other.
+   A request that is never answered is asked again, after three minutes and then every quiet minute the Puddle looks, within the receiver's limit of five requests an hour per person.
 3. Both sides then tell each other that they have joined, once, since a member met this way has no other way to learn it.
 
 What a scoped stream allows: group events (for groups both are in), key and address updates, and the pictures in each other's profile. It does

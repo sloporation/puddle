@@ -19,6 +19,9 @@ Use these terms the way the owner does, in code, docs and conversation.
 - **Stream**: a connection between two Puddles. (Older docs call this federation or
   server-to-server traffic.)
 
+Puddles talk privately to one another (a peer-to-peer chat client); Ponds are public gathering places. In the window, the rail of servers is for Ponds, which
+are not built yet.
+
 When `api/*.yaml` or `docs/*.md` use these words, they mean the above. If a term is ambiguous
 or looks like it conflicts with this list, ask rather than guess.
 
@@ -35,7 +38,7 @@ or looks like it conflicts with this list, ask rather than guess.
 
 - `src/core/`: config, TLS, HTTP, listener, storage (plain C, shared by both programs)
 - `src/service/`: `puddled`, the headless Puddle
-- `src/gui/`: `Puddle`, the desktop app (Qt Quick)
+- `src/gui/`: `Puddle`, the desktop app (Qt Quick): `app/` is the C++ behind the window, `qml/` the screens by topic, `qml/theme/Theme.qml` every colour and size; see `src/gui/README.md`
 - `api/openapi.yaml`: API for phone clients and the desktop app. `api/federation.yaml`: streams.
 - `docs/storage.md`, `docs/identity.md`, `docs/profiles.md`, `docs/streams.md`: design drafts the code follows
 - `docs/roadmap.md`: the step-by-step plan for keys and streams; work through it in order, one step at a time

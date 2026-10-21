@@ -465,7 +465,12 @@ int puddle_server_run(puddle_server *s)
             { s->listen_fd, POLLIN, 0 },
             { s->stop_pipe[0], POLLIN, 0 },
         };
-        if (poll(pfd, 2, -1) < 0) {
+        int ready = poll(pfd, 2, 60 * 1000);
+        if (ready == 0) { /* a quiet minute: look again for group members we asked and who never answered */
+            puddle_group_reconcile(&s->ctx);
+            continue;
+        }
+        if (ready < 0) {
             if (errno == EINTR)
                 continue;
             puddle_log(PUDDLE_LOG_ERROR, "poll: %s", strerror(errno));

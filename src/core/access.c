@@ -311,7 +311,9 @@ typedef struct {
 static int join_fn(void *user, puddle_group *g, int exists)
 {
     joining *j = user;
-    if (!exists || g->my != PUDDLE_GROUP_IN) {
+    /* In, or invited and not yet answered: whoever said yes first asks the others, who may not have got to it. A group we have left or
+     * turned down is not one we are in at all. */
+    if (!exists || (g->my != PUDDLE_GROUP_IN && g->my != PUDDLE_GROUP_INVITED)) {
         j->why = "not_in_group";
         return 3;
     }
@@ -324,7 +326,7 @@ static int join_fn(void *user, puddle_group *g, int exists)
     return 0;
 }
 
-/* Someone asks for a connection that is only for a group we are both in (or are about to be): their own member.join, signed, is the
+/* Someone asks for a connection that is only for a group we are both in (or are invited to and have not answered yet): their own member.join, signed, is the
  * proof that someone in the group invited them. Whatever the outcome the answer is the usual empty 202. */
 static void scoped_request(puddle_ctx *ctx, const request *r, int64_t now)
 {

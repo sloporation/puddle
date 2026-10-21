@@ -4,14 +4,14 @@
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
 
-#include "backend.h"
+#include "app/backend.h"
 
 int main(int argc, char **argv)
 {
     QGuiApplication app(argc, argv);
     app.setApplicationName("Puddle");
     app.setOrganizationName("sloporation");
-    app.setWindowIcon(QIcon(":/qt/qml/Puddle/src/gui/puddle.png"));
+    app.setWindowIcon(QIcon(":/qt/qml/Puddle/src/gui/assets/puddle.png"));
     // Closing the window hides to the tray; the app keeps serving until Quit.
     app.setQuitOnLastWindowClosed(false);
 

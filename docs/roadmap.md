@@ -55,7 +55,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   replaced. What changed under it: the old pre-generated "next keys" and the roll built on them are gone,
   so **chains of more than one record are refused until 1.3**, and the roll tests (including a retired
   key in the request-signing test) come back with 1.3.
-- [x] **1.2b First-run screen in the app.** `src/gui/Setup.qml` and the Backend's start-up state machine.
+- [x] **1.2b First-run screen in the app.** `src/gui/qml/setup/Setup.qml` and the Backend's start-up state machine.
   Welcome step, then the phrase as eight numbered groups (four across when wide, two on a phone-width
   window; light and dark), a copy button, and a "written down" tick before Continue enables. The Puddle
   does not start until Continue. Checked by rendering the screen in both palettes and by `tests/backend_test.cpp`.

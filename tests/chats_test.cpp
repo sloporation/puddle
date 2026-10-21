@@ -48,6 +48,8 @@ int main(int argc, char **argv)
     auto *people_b = static_cast<JsonListModel *>(B.people());
     auto *conv_a = static_cast<JsonListModel *>(A.conversations());
     auto *conv_b = static_cast<JsonListModel *>(B.conversations());
+    auto *side_a = static_cast<JsonListModel *>(A.sidebar());
+    auto *side_b = static_cast<JsonListModel *>(B.sidebar());
     auto *msgs_a = static_cast<JsonListModel *>(A.messages());
     auto *msgs_b = static_cast<JsonListModel *>(B.messages());
 
@@ -70,6 +72,18 @@ int main(int argc, char **argv)
         CHECK(!out.isEmpty() && out.value("provisional").toBool() && out.value("name").toString() == bob.link && out.value("id").toString() != bob.uid);
     }
 
+    /* the sidebar: Bob has it waiting for him, at the top; Alice has her own request, marked as sent */
+    {
+        QJsonObject waiting = row(side_b, "key", "request:" + alice.uid);
+        CHECK(waiting.value("kind").toString() == "request" && waiting.value("section").toString() == "pending" &&
+              waiting.value("preview").toString().contains("hello, it is me"));
+        CHECK(side_b->at(0).value("key").toString() == "request:" + alice.uid);
+        bool sent = false;
+        for (const QJsonObject &o : side_a->items())
+            sent = sent || (o.value("kind").toString() == "sent" && o.value("preview").toString() == "Request sent");
+        CHECK(sent);
+    }
+
     /* a request that cannot work says so */
     QSignalSpy failed(&A, &Chats::failed);
     A.request("not a link", "");
@@ -80,6 +94,12 @@ int main(int argc, char **argv)
     CHECK(until([&] { return row(people_b, "id", alice.uid).value("name").toString() == "Alice"; }));
     CHECK(until([&] { return row(people_a, "id", bob.uid).value("name").toString() == "Bob"; }));
 
+    /* friends are in the sidebar before a word is said, and the requests are gone from it */
+    CHECK(until([&] { return row(side_a, "key", "dm:" + bob.uid).value("kind").toString() == "dm" && row(side_b, "key", "dm:" + alice.uid).value("kind").toString() == "dm"; }));
+    CHECK(row(side_a, "key", "dm:" + bob.uid).value("preview").toString().isEmpty() && row(side_b, "key", "request:" + alice.uid).isEmpty());
+    for (const QJsonObject &o : side_a->items())
+        CHECK(o.value("kind").toString() != "sent");
+
     /* a message arrives: unread for Bob, with a preview, and a notification signal */
     QSignalSpy incoming(&B, &Chats::newIncoming);
     A.open(bob.uid);
@@ -88,6 +108,9 @@ int main(int argc, char **argv)
     CHECK(until([&] { return B.unreadTotal() == 1; }));
     QJsonObject c = row(conv_b, "user", alice.uid);
     CHECK(c.value("unread").toInt() == 1 && c.value("last").toObject().value("preview").toString() == "hello Bob" && c.value("name").toString() == "Alice");
+    CHECK(until([&] { return row(side_b, "key", "dm:" + alice.uid).value("unread").toInt() == 1; }));
+    CHECK(row(side_b, "key", "dm:" + alice.uid).value("preview").toString() == "hello Bob");           /* what the sidebar line says */
+    CHECK(row(side_a, "key", "dm:" + bob.uid).value("preview").toString() == "You: hello Bob" || until([&] { return row(side_a, "key", "dm:" + bob.uid).value("preview").toString() == "You: hello Bob"; }));
     CHECK(incoming.count() == 1 && incoming.at(0).at(1).toInt() == 1);
     CHECK(until([&] { return msgs_a->rowCount() == 1; }));
     CHECK(msgs_a->at(0).value("outgoing").toBool() && msgs_a->at(0).value("senderName").toString() == "You");
@@ -186,7 +209,13 @@ int main(int argc, char **argv)
         }
         CHECK(conv_b->rowCount() == 1);                                                           /* an invitation is not a conversation yet */
 
+        {   /* the invitation is pinned in Bob's list, with no count of who is in it */
+            QJsonObject inv = row(side_b, "key", "invite:" + gid);
+            CHECK(inv.value("kind").toString() == "invite" && inv.value("section").toString() == "pending" && inv.value("name").toString() == "Weekend");
+            CHECK(side_b->at(0).value("key").toString() == "invite:" + gid);
+        }
         B.acceptGroup(gid);
+        CHECK(until([&] { return row(side_b, "key", "group:" + gid).value("kind").toString() == "group" && row(side_b, "key", "invite:" + gid).isEmpty(); }));
         CHECK(until([&] { return B.incomingGroupInvites() == 0 && row(conv_b, "id", gid).value("kind").toString() == "group"; }));
         C.acceptGroup(gid);
         CHECK(until([&] { return row(conv_c, "id", gid).value("name").toString() == "Weekend"; }));
@@ -241,6 +270,28 @@ int main(int argc, char **argv)
                     return true;
             return false;
         }) || true);
+        /* finding someone to talk to: the most recent first when nothing is typed, then by what was typed (names that start with it before names that have it inside) */
+        {
+            QVariantList all = A.findFriends("", 30);
+            CHECK(all.size() == 2);
+            CHECK(A.findFriends("", 1).size() == 1);                                             /* never more than asked for */
+            QVariantList bobs = A.findFriends("BO", 30);                                          /* any case */
+            CHECK(bobs.size() == 1 && bobs.at(0).toMap().value("id").toString() == bob.uid && bobs.at(0).toMap().value("name").toString() == "Bob");
+            CHECK(A.findFriends("zzz", 30).isEmpty());
+            CHECK(A.findFriends("  b  ", 30).size() == 1 && A.findFriends("ob", 30).size() == 1 && A.findFriends("o", 30).size() == 2);   /* trimmed; inside a name counts, after those that start with it */
+        }
+
+        /* lists that come in pages are read to the end: an app that asks for one entry at a time, starting from nothing, ends up with all of it */
+        {
+            const int want = int(side_a->rowCount());
+            CHECK(want >= 3 && A.friendMatches("") == 2 && A.friendMatches("bob") == 1 && A.friendMatches("zzz") == 0);
+            Chats paged;
+            paged.setPageSize(1);
+            paged.setInterval(100);
+            CHECK(paged.attach(QUrl(QString("https://127.0.0.1:%1").arg(alice.cfg.port)), alice.dir + "/data/state/owner-token", alice.dir + "/cert.pem"));
+            auto *side_p = static_cast<JsonListModel *>(paged.sidebar());
+            CHECK(until([&] { return int(side_p->rowCount()) == want && paged.friendCount() == 2; }, 8000));
+        }
         B.close();
         B.open(gid, "group");
         CHECK(until([&] {
@@ -249,6 +300,69 @@ int main(int argc, char **argv)
                     return true;
             return false;
         }));
+        /* a busy chat: far more than a page, then more while the history is open. Everything is there once, in order, with no gap, however the
+         * server cuts its pages (it holds back by size) and however many arrive while the earlier ones are being read */
+        {
+            auto bodies = [&](const QString &prefix) {
+                QStringList out;
+                for (const QJsonObject &m : msgs_b->items())
+                    if (m.value("kind").toString() == "message" && m.value("body").toString().startsWith(prefix))
+                        out << m.value("body").toString();
+                return out;
+            };
+            auto messageCount = [&] { int n = 0; for (const QJsonObject &m : msgs_b->items()) n += m.value("kind").toString() == "message"; return n; };
+            const int before = messageCount();
+            B.close();                                                                               /* (B opens the chat afterwards, so what it reads is the newest page and no more) */
+            for (int i = 0; i < 130; i++)
+                A.send(QString("bulk %1").arg(i));
+            // all 130 have reached B once A no longer shows any of them as waiting to be delivered (not by which comes last: see below)
+            auto delivered = [&] {
+                int n = 0;
+                for (const QJsonObject &m : msgs_a->items())
+                    if (m.value("body").toString().startsWith("bulk ")) {
+                        if (!m.value("deliveryState").toString().isEmpty())
+                            return false;
+                        n++;
+                    }
+                return n == 130;
+            };
+            CHECK(until(delivered, 60000));
+            B.open(gid, "group");
+            CHECK(until([&] { return msgs_b->rowCount() > 0; }, 10000));
+            CHECK(B.hasOlder());                                                                     /* a page holds far fewer than that */
+            CHECK(messageCount() < before + 130);
+            CHECK(until([&] { B.loadOlder(); return !B.hasOlder(); }, 60000));
+            // (the sends are 130 requests in flight at once, so the server stamps them in the order it handled them, not the order they were asked for:
+            //  what has to hold is that every one is there once, and that the list is in the order of its stamps)
+            auto sorted = [](QStringList l) { l.sort(); return l; };
+            QStringList want;
+            for (int i = 0; i < 130; i++)
+                want << QString("bulk %1").arg(i);
+            QStringList got = bodies("bulk ");
+            if (sorted(got) != sorted(want)) fprintf(stderr, "bulk: got %lld of 130\n", (long long)got.size());
+            CHECK(sorted(got) == sorted(want));                                                      /* all of it, once */
+            CHECK(messageCount() == before + 130);
+            auto inOrder = [&] {
+                double last = 0;
+                for (const QJsonObject &m : msgs_b->items()) {
+                    if (m.value("ts").toDouble() < last) return false;
+                    last = m.value("ts").toDouble();
+                }
+                return true;
+            };
+            CHECK(inOrder());
+
+            for (int i = 0; i < 45; i++)
+                A.send(QString("more %1").arg(i));
+            CHECK(until([&] { return bodies("more ").size() == 45; }, 60000));
+            CHECK(sorted(bodies("bulk ")) == sorted(want));                                          /* nothing fell out of the middle */
+            CHECK(messageCount() == before + 175 && !B.hasOlder() && inOrder());
+            QSet<QString> ids;
+            for (const QJsonObject &m : msgs_b->items())
+                ids.insert(m.value("id").toString());
+            CHECK(ids.size() == msgs_b->rowCount());                                                 /* no row twice */
+        }
+
         /* a new name, and someone leaving */
         B.renameGroup("Weekend away");
         CHECK(until([&] { return row(static_cast<JsonListModel *>(A.conversations()), "id", gid).value("name").toString() == "Weekend away" && row(conv_c, "id", gid).value("name").toString() == "Weekend away"; }));

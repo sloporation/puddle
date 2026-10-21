@@ -10,7 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "../src/gui/backend.h"
+#include "../src/gui/app/backend.h"
 
 extern "C" {
 #include "identity.h"
@@ -132,6 +132,14 @@ int main(int argc, char **argv)
         CHECK(!anywhere(home.path(), p.toUtf8()));
         CHECK(!anywhere(home.path(), bare.toUtf8()));
         CHECK(!anywhere(home.path(), bare.toLower().toUtf8()));
+    }
+
+    {   // ---- theme.yaml: plain `key: value` lines ----
+        const QVariantMap t = Backend::parseTheme("# my theme\ncanvas: \"#101418\"\n card: '#1b2026'  \naccent: #7aa2f7 # blue\ncardRadius: 28\nbroken line\nempty:\n");
+        CHECK(t.size() == 4);
+        CHECK(t.value("canvas") == "#101418" && t.value("card") == "#1b2026" && t.value("cardRadius") == "28");
+        CHECK(t.value("accent") == "#7aa2f7");                // an unquoted # right after the colour is the colour; " #" starts a comment
+        CHECK(Backend::parseTheme("").isEmpty());
     }
 
     {   // ---- something wrong with the settings is an error to show, not a setup screen ----

@@ -64,7 +64,7 @@ jobs:
             cp build/puddled dist/puddled.service "stage/$NAME/"
             tar -C stage -czf "out/$NAME.tar.gz" "$NAME"
           else
-            "$(brew --prefix qt)/bin/macdeployqt" build/Puddle.app -qmldir=src/gui || true  # noisy with Homebrew's split Qt
+            "$(brew --prefix qt)/bin/macdeployqt" build/Puddle.app -qmldir=src/gui/qml || true  # noisy with Homebrew's split Qt
             # macdeployqt's own signature is invalid afterwards (macOS kills the app); re-sign ad hoc
             codesign --force --deep -s - build/Puddle.app
             codesign --verify --deep --strict build/Puddle.app

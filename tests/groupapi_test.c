@@ -486,6 +486,22 @@ int main(void)
         reply *r = post_as(&bob, "/stream/v1/group/invite", pk);
         CHECK(r->status == 202 && my_state(tmp, PUDDLE_GROUP_INVITED) && puddle_groups_pending(gs) == 2);
         free(pk);
+        /* someone who accepted before we did asks for a group connection while we are still only invited: it is taken, not dropped.
+         * (Dropping it left the one who accepted first cut off from everyone who had not yet said yes.) */
+        {
+            char jev[800];
+            puddle_stream st;
+            CHECK(puddle_group_join_build(tmp, carol.uid, clock_now, jev, sizeof jev) > 0);
+            r = scoped_post(&carol, tmp, jev, &carol, "198.51.100.21:8443", me.uid);
+            CHECK(r->status == 202 && my_state(tmp, PUDDLE_GROUP_INVITED));
+            CHECK(puddle_streams_get(ss, carol.uid, &st) == 0 && st.group_ok && st.owed == PUDDLE_OWED_SCOPED);
+            puddle_stream_free(&st);
+            /* and if we then say no, the connection that was only for that group is let go */
+            const char *dcode;
+            CHECK(puddle_group_decline(&ctx, tmp, &dcode) == 0);
+            CHECK(puddle_streams_get(ss, carol.uid, &st) == 0 && !st.group_ok);
+            puddle_stream_free(&st);
+        }
         /* a tampered invitation: signed by someone who is not the sender */
         pk = package(&bob, &bob, NULL, "Forged", "88888888888888888888888888888888", T0 + 80, clock_now, roster(&bob, &me, ""), NULL, tmp, sizeof tmp);
         r = post_as(&carol, "/stream/v1/group/invite", pk);                                       /* carol sends bob's invitation */
