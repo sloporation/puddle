@@ -14,7 +14,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "../src/gui/chats.h"
+#include "../src/gui/app/chats.h"
 
 extern "C" {
 #include "config.h"

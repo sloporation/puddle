@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <functional>
 #include <QTimer>
 #include <memory>
 
@@ -15,6 +16,7 @@ class Chats : public QObject {
     Q_OBJECT
     Q_PROPERTY(QObject *people READ people CONSTANT)               // every stream: roles below
     Q_PROPERTY(QObject *conversations READ conversations CONSTANT)  // newest first
+    Q_PROPERTY(QObject *sidebar READ sidebar CONSTANT)              // the one list: what is waiting for an answer, then every friend and group (see rebuildSidebar)
     Q_PROPERTY(QObject *messages READ messages CONSTANT)            // the open chat, oldest first
     Q_PROPERTY(QObject *blocked READ blocked CONSTANT)              // people we blocked: user, name, created_at
     Q_PROPERTY(QObject *groupInvites READ groupInvites CONSTANT)    // invitations to groups waiting for an answer
@@ -42,6 +44,7 @@ public:
 
     QObject *people() { return &people_; }
     QObject *conversations() { return &conversations_; }
+    QObject *sidebar() { return &sidebar_; }
     QObject *messages() { return &messages_; }
     QObject *blocked() { return &blocked_; }
     QObject *groupInvites() { return &invites_; }
@@ -71,6 +74,7 @@ public:
     // Start talking to the Puddle at `base`, reading its token and certificate from the files.
     bool attach(const QUrl &base, const QString &tokenFile, const QString &certFile);
     void setInterval(int ms) { timer_.setInterval(ms); }
+    void setPageSize(int n) { pageSize_ = n; } // how many of a list to ask for at a time (for tests; the Puddle caps it at 100 or 200)
 
     // Fetch everything now (also runs on a timer).
     Q_INVOKABLE void refresh();
@@ -80,6 +84,8 @@ public:
     Q_INVOKABLE void loadOlder();
     Q_INVOKABLE QString userAt(int row) const { return conversations_.at(row).value("id").toString(); }
     Q_INVOKABLE QString kindAt(int row) const { return conversations_.at(row).value("kind").toString(); }
+    Q_INVOKABLE QString sidebarIdAt(int row) const { return sidebar_.at(row).value("id").toString(); }     // for stepping through the list
+    Q_INVOKABLE QString sidebarKindAt(int row) const { return sidebar_.at(row).value("kind").toString(); }
     Q_INVOKABLE QVariantMap messageAt(int row) const { return messages_.at(row).toVariantMap(); }
     Q_INVOKABLE void retry();                           // try again to deliver what is stuck in the open chat
     Q_INVOKABLE void send(const QString &text, const QString &replyTo = QString());
@@ -87,13 +93,19 @@ public:
     Q_INVOKABLE void remove(const QString &messageId);
 
     // groups
+    // Friends to pick from, for the "+" dialog. With no text, the most recent ones; with text, those with it in their name, the ones whose name
+    // starts with it first, then the rest, each in order of recent activity. At most `limit`. Each is { id, name, avatar, color }.
+    Q_INVOKABLE QVariantList findFriends(const QString &text, int limit) const;
+    Q_INVOKABLE int friendMatches(const QString &filter) const; // how many friends have `filter` (any case) in their name; all of them if empty
     Q_INVOKABLE bool isGroupMember(const QString &userId) const { for (const QJsonObject &m : members_.items()) if (m.value("id").toString() == userId) return true; return false; }
     Q_INVOKABLE void createGroup(const QString &name, const QStringList &friends);
     Q_INVOKABLE void inviteToGroup(const QString &userId);   // into the open group
     Q_INVOKABLE void acceptGroup(const QString &groupId);
     Q_INVOKABLE void declineGroup(const QString &groupId);
     Q_INVOKABLE void leaveGroup();                           // the open one
+    Q_INVOKABLE void leaveGroup(const QString &groupId);     // any group we are in (from a menu on its row)
     Q_INVOKABLE void renameGroup(const QString &name);       // the open one
+    Q_INVOKABLE void renameGroup(const QString &groupId, const QString &name);
 
     Q_INVOKABLE void accept(const QString &userId);
     Q_INVOKABLE void decline(const QString &userId);
@@ -147,10 +159,13 @@ private:
     void markRead();
     bool notice(QJsonObject &n) const;
     void rebuildMembers();
+    void rebuildSidebar();
+    // GET a list that comes in pages (`next` is the offset of the following one) and hand over all of it, as one document with the same key
+    void getAll(const QString &path, const QString &key, std::function<void(int, const QJsonDocument &)> done);
 
     ApiClient api_;
     QTimer timer_;
-    JsonListModel people_, conversations_, messages_, blocked_, profiles_, invites_, members_;
+    JsonListModel people_, conversations_, messages_, blocked_, profiles_, invites_, members_, sidebar_;
     QHash<QString, QJsonObject> groups_;   // the groups we are in or invited to, by id
     QSet<QString> invitedTo_;
     QString currentKind_ = QStringLiteral("dm"), self_;
@@ -167,7 +182,15 @@ private:
     bool peopleLoaded_ = false, conversationsLoaded_ = false;
     int friends_ = 0, pending_ = 0;
     int unreadTotal_ = 0, incomingRequests_ = 0;
-    int messageLimit_ = 50;
+    // The open chat's history is read a page at a time (newest first; `next` is the offset of the page before) and everything read is kept, by
+    // id, so scrolling back never leaves a gap however many messages arrive meanwhile. The server cuts a page short when messages are long.
+    QHash<QString, QJsonObject> msgs_;      // every message read so far
+    QHash<QString, QJsonObject> notices_;   // and what happened to the group, by event id
+    qint64 olderNext_ = -1;                 // the offset of the next page back; -1 when there is none
+    bool loadedOlder_ = false, loadingOlder_ = false;
+    void renderMessages();
+    static constexpr int kMessagePage = 50;
+    int pageSize_ = 100;
     bool connected_ = true; // until a request fails, so the banner does not flash at start-up
     bool marking_ = false, profilesLoaded_ = false;
     bool busy_[6] = { false, false, false, false, false, false };

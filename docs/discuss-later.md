@@ -51,6 +51,24 @@ accepts, and the request itself says nothing about who it is going to. Questions
 link; how a Puddle answers a stranger's look at it without breaking "nothing is public" (the link would have to prove the asker
 holds it, and the answer would have to be useless to anyone else); and whether it is a profile of its own or one of the existing ones.
 
+## 9. More for the right-click menus and the conversation list
+
+Right-click menus (`ContextTrigger`, `ConversationMenu`, `FieldMenu` in `src/gui/`) offer only what the owner API can already do. These
+would be useful and each needs something new behind it:
+
+- **Per conversation:** mark as unread, mute (for an hour, a day, for good), pin to the top, and hide a conversation without removing the
+  friend. Needs a place to keep these per Puddle (so a phone sees the same), probably next to `read.tsv`, and the notification code to honour mute.
+- **Per message:** forward, react with an emoji, "message info" (who it reached and when: the delivery state is already there), copy a link to
+  a message, jump to the message a reply points at, select several to copy or delete.
+- **Per person:** a nickname only you see; show their safety code to compare out loud (the short code exists); and "Add friend" on a group
+  member we have no friendship with, which needs a request by user id (we already hold their address from the group connection). Removing someone
+  from a group is the parked question under "Carried over".
+- **Search:** inside a chat (decrypted in memory, so cheap) and across chats (see #3).
+- **Text boxes:** spelling suggestions in the composer, which Qt Quick does not offer on its own.
+- **Menus:** native menus on macOS and Windows (the styled menu looks the same everywhere but is not the system's). Qt 6.9 added a
+  built-in `ContextMenu` attached type that does the right-click, Menu key and press-and-hold wiring; we use our own so the app still builds on
+  Qt 6.2 to 6.8, and could switch when the minimum Qt is raised.
+
 ## Carried over from earlier
 
 - Name for the group-only connection (a scoped stream). Options floated: Brook, Rill, Tributary.

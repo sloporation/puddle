@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../components"
+import "../theme"
 
 // A direct message, laid out like Discord: no bubbles, each message a line of text under the name and time of who wrote it,
 // following messages from the same person tucked under the first. Hover for reply, edit and delete.
@@ -81,20 +83,23 @@ Pane {
         // header
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 48
+            implicitHeight: Theme.headerHeight
             color: "transparent"
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
                 spacing: 10
-                ToolButton { objectName: "chatBack"; visible: page.narrow; text: "‹"; font.pixelSize: 22; Accessible.name: qsTr("Back"); onClicked: page.back() }
+                ToolButton { objectName: "chatBack"; visible: page.narrow; icon.source: Theme.icon("chevron-left"); icon.width: Theme.iconSize; icon.height: Theme.iconSize; display: AbstractButton.IconOnly; Accessible.name: qsTr("Back"); onClicked: page.back() }
                 Avatar { chats: page.chats; name: page.chats.currentName; hash: page.chats.currentAvatar; tint: page.chats.currentColor; size: 28 }
                 Label { text: page.chats.currentName; font.bold: true; font.pixelSize: 16; elide: Text.ElideRight; Layout.fillWidth: true }
                 ToolButton {
                     objectName: "membersButton"
                     visible: page.chats.currentIsGroup
-                    text: "👥 " + page.chats.members.count
+                    text: page.chats.members.count
+                    icon.source: Theme.icon("users")
+                    icon.width: Theme.iconSize
+                    icon.height: Theme.iconSize
                     Accessible.name: qsTr("Members")
                     ToolTip.text: qsTr("Members and settings"); ToolTip.visible: hovered
                     onClicked: page.showGroup()
@@ -104,25 +109,33 @@ Pane {
         }
 
         // the messages
-        ListView {
+        ScrollList {
             id: list
             objectName: "messageList"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            clip: true
             model: page.messages
-            boundsBehavior: Flickable.StopAtBounds
-            ScrollBar.vertical: ScrollBar {}
             property bool stickToEnd: true
-            readonly property bool atBottom: contentY + height >= contentHeight - 4
+            // (the list starts at originY, which is negative while the "loading earlier messages" header is there)
+            readonly property bool atBottom: contentY + height >= originY + contentHeight - 4
 
             onCountChanged: if (stickToEnd) Qt.callLater(positionViewAtEnd)
-            onContentHeightChanged: if (stickToEnd) Qt.callLater(positionViewAtEnd)
-            // moving away from the end stops following; reaching the end follows again
-            onMovingChanged: if (!moving) stickToEnd = atBottom
-            onContentYChanged: {
-                if (moving && !atBottom) stickToEnd = false
-                if (moving && contentY < 40 && page.chats.hasOlder) page.chats.loadOlder()
+            onContentHeightChanged: {
+                if (stickToEnd) Qt.callLater(positionViewAtEnd)
+                fillTimer.restart()
+            }
+            // too short to scroll, so scrolling cannot ask for more: fill the window. (Looked at once things have settled: while rows are being
+            // measured the list's height is an estimate, and can briefly say "short" when it is not.)
+            Timer {
+                id: fillTimer
+                interval: 300
+                onTriggered: if (list.contentHeight <= list.height && page.chats.hasOlder) page.chats.loadOlder()
+            }
+            // scrolling away from the end stops following; reaching the end follows again
+            onUserScrolled: {
+                stickToEnd = atBottom
+                // ask for the page before once you are within a screenful of the top (and not at the top itself: where that is moves as rows are measured)
+                if (contentY - originY < height && page.chats.hasOlder) page.chats.loadOlder()
             }
 
             header: Item {
@@ -142,19 +155,26 @@ Pane {
                 implicitHeight: col.implicitHeight
 
                 HoverHandler { id: hover }
-                TapHandler { acceptedButtons: Qt.RightButton; enabled: !msg.notice; onTapped: ctx.popup() }
+                ContextTrigger { active: !msg.notice; onRequested: (x, y) => ctx.popup(msg, x, y) }
 
                 Menu {
                     id: ctx
-                    MenuItem { text: qsTr("Copy text"); enabled: !!msg.model.body; onTriggered: page.chats.copy(msg.model.body) }
-                    MenuItem { text: qsTr("Reply"); enabled: !msg.model.deleted; onTriggered: page.startReply(msg.model) }
-                    MenuItem { text: qsTr("Edit"); visible: msg.mine && !msg.model.deleted; height: visible ? implicitHeight : 0; onTriggered: page.editingId = msg.model.id }
-                    MenuItem { text: qsTr("Delete"); visible: msg.mine && !msg.model.deleted; height: visible ? implicitHeight : 0; onTriggered: confirm.ask(msg.model.id) }
+                    // with some words selected it copies those, otherwise the whole message
+                    MenuItem {
+                        objectName: "msgCopy"
+                        text: bodyText.selectedText !== "" ? qsTr("Copy") : qsTr("Copy text")
+                        enabled: bodyText.selectedText !== "" || !!msg.model.body
+                        onTriggered: bodyText.selectedText !== "" ? bodyText.copy() : page.chats.copy(msg.model.body)
+                    }
+                    MenuItem { objectName: "msgReply"; text: qsTr("Reply"); enabled: !msg.model.deleted; onTriggered: page.startReply(msg.model) }
+                    MenuItem { objectName: "msgEdit"; text: qsTr("Edit"); visible: msg.mine && !msg.model.deleted; height: visible ? implicitHeight : 0; onTriggered: page.editingId = msg.model.id }
+                    MenuSeparator { visible: msg.mine && !msg.model.deleted; height: visible ? implicitHeight : 0 }
+                    MenuItem { objectName: "msgDelete"; text: qsTr("Delete…"); palette.text: Theme.danger; visible: msg.mine && !msg.model.deleted; height: visible ? implicitHeight : 0; onTriggered: confirm.ask(msg.model.id) }
                 }
 
                 Rectangle {
                     anchors.fill: parent
-                    color: hover.hovered || msg.editing ? Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.05) : "transparent"
+                    color: hover.hovered || msg.editing ? Theme.tint(palette.text, 0.05) : "transparent"
                 }
 
                 ColumnLayout {
@@ -181,7 +201,7 @@ Pane {
                         Layout.rightMargin: 16
                         Layout.topMargin: 6
                         spacing: 6
-                        Label { text: "↱"; opacity: 0.5 }
+                        Icon { glyph: "corner-up-left"; size: 14; opacity: 0.5 }
                         Label {
                             Layout.fillWidth: true
                             elide: Text.ElideRight
@@ -246,11 +266,13 @@ Pane {
                                 Label { text: page.dayLabel(msg.model.ts); font.pixelSize: 11; opacity: 0.55 }
                             }
                             TextEdit {
+                                id: bodyText
                                 objectName: "messageText"
                                 visible: !msg.editing
                                 Layout.fillWidth: true
                                 readOnly: true
                                 selectByMouse: true
+                                persistentSelection: true // the selection stays while the menu is open
                                 wrapMode: TextEdit.Wrap
                                 color: palette.text
                                 font.pixelSize: 14
@@ -271,7 +293,7 @@ Pane {
                                     Layout.fillWidth: true
                                     wrapMode: Text.Wrap
                                     font.pixelSize: 11
-                                    color: msg.model.deliveryState === "failed" ? "#d9534f" : msg.model.deliveryState === "held" ? "#d9a000" : palette.text
+                                    color: msg.model.deliveryState === "failed" ? Theme.danger : msg.model.deliveryState === "held" ? Theme.warning : palette.text
                                     opacity: msg.model.deliveryState === "failed" || msg.model.deliveryState === "held" ? 1 : 0.6
                                     text: msg.model.deliveryState === "queued" ? qsTr("Sending…")
                                           : msg.model.deliveryState === "retrying" ? qsTr("%1 can't be reached right now. Trying again at %2.").arg(page.chats.currentName).arg(page.clock(new Date(msg.model.deliveryNext)))
@@ -305,6 +327,7 @@ Pane {
                                     onTextChanged: if (length > 4000) remove(4000, length)
                                     text: msg.editing ? (msg.model.body || "") : ""
                                     onVisibleChanged: if (visible) { forceActiveFocus(); cursorPosition = length }
+                                    FieldMenu {}
                                     Keys.onPressed: event => {
                                         if (event.key === Qt.Key_Escape) { page.editingId = ""; event.accepted = true }
                                         else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier) && !inputMethodComposing) {
@@ -328,14 +351,14 @@ Pane {
                     y: msg.model.dayStart === true ? 34 : 0
                     spacing: 0
                     Rectangle {
-                        width: tools.implicitWidth + 4; height: 30; radius: 6
+                        width: tools.implicitWidth + 4; height: 30; radius: Theme.radius
                         color: palette.window; border.color: palette.mid
                         Row {
                             id: tools
                             anchors.centerIn: parent
-                            ToolButton { objectName: "replyButton"; text: "↩"; Accessible.name: qsTr("Reply"); ToolTip.text: qsTr("Reply"); ToolTip.visible: hovered; onClicked: page.startReply(msg.model) }
-                            ToolButton { objectName: "editButton"; visible: msg.mine; text: "✎"; Accessible.name: qsTr("Edit"); ToolTip.text: qsTr("Edit"); ToolTip.visible: hovered; onClicked: page.editingId = msg.model.id }
-                            ToolButton { objectName: "deleteButton"; visible: msg.mine; text: "🗑"; Accessible.name: qsTr("Delete"); ToolTip.text: qsTr("Delete"); ToolTip.visible: hovered; onClicked: confirm.ask(msg.model.id) }
+                            ToolButton { objectName: "replyButton"; icon.source: Theme.icon("arrow-back-up"); icon.width: Theme.iconSize; icon.height: Theme.iconSize; display: AbstractButton.IconOnly; Accessible.name: qsTr("Reply"); ToolTip.text: qsTr("Reply"); ToolTip.visible: hovered; onClicked: page.startReply(msg.model) }
+                            ToolButton { objectName: "editButton"; visible: msg.mine; icon.source: Theme.icon("pencil"); icon.width: Theme.iconSize; icon.height: Theme.iconSize; display: AbstractButton.IconOnly; Accessible.name: qsTr("Edit"); ToolTip.text: qsTr("Edit"); ToolTip.visible: hovered; onClicked: page.editingId = msg.model.id }
+                            ToolButton { objectName: "deleteButton"; visible: msg.mine; icon.source: Theme.icon("trash"); icon.width: Theme.iconSize; icon.height: Theme.iconSize; display: AbstractButton.IconOnly; Accessible.name: qsTr("Delete"); ToolTip.text: qsTr("Delete"); ToolTip.visible: hovered; onClicked: confirm.ask(msg.model.id) }
                         }
                     }
                 }
@@ -361,7 +384,10 @@ Pane {
                 anchors.right: parent.right
                 anchors.rightMargin: 24
                 y: -44
-                text: "↓  " + qsTr("Latest")
+                text: qsTr("Latest")
+                icon.source: Theme.icon("arrow-down")
+                icon.width: 16
+                icon.height: 16
                 onClicked: { list.stickToEnd = true; list.positionViewAtEnd() }
             }
         }
@@ -388,13 +414,13 @@ Pane {
             Layout.leftMargin: 16
             Layout.rightMargin: 16
             implicitHeight: 30
-            color: Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.08)
-            radius: 6
+            color: Theme.tint(palette.text, 0.08)
+            radius: Theme.radius
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 10
                 Label { Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; textFormat: Text.StyledText; text: qsTr("Replying to <b>%1</b>  %2").arg(page.replyName).arg(page.replyText.replace(/</g, "&lt;")) }
-                ToolButton { text: "✕"; Accessible.name: qsTr("Cancel reply"); onClicked: page.clearReply() }
+                ToolButton { icon.source: Theme.icon("x"); icon.width: Theme.iconSize; icon.height: Theme.iconSize; display: AbstractButton.IconOnly; Accessible.name: qsTr("Cancel reply"); onClicked: page.clearReply() }
             }
         }
 
@@ -404,7 +430,7 @@ Pane {
             Layout.margins: 16
             Layout.topMargin: 8
             implicitHeight: Math.min(input.implicitHeight, 160) + 4
-            radius: 8
+            radius: Theme.radiusLarge
             color: Qt.darker(palette.window, 1.06)
             opacity: page.canSend ? 1 : 0.6
 
@@ -421,6 +447,7 @@ Pane {
                     selectByMouse: true
                     onTextChanged: if (length > 4000) remove(4000, length)
                     background: null
+                    FieldMenu {}
                     Accessible.name: qsTr("Message")
                     Keys.onPressed: event => {
                         if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier) && !inputMethodComposing) {

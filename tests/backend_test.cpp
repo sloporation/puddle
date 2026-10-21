@@ -10,7 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "../src/gui/backend.h"
+#include "../src/gui/app/backend.h"
 
 extern "C" {
 #include "identity.h"

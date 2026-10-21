@@ -3,13 +3,17 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtCore
 import Qt.labs.platform as Platform
+import "components"
+import "setup"
+import "shell"
+import "theme"
 
 ApplicationWindow {
     id: root
 
     required property var backend
 
-    readonly property bool wide: width >= 720
+    readonly property bool wide: width >= Theme.wideBreakpoint
     readonly property int margin: wide ? 24 : 12
 
     visible: true
@@ -51,7 +55,7 @@ ApplicationWindow {
         id: tray
         visible: true
         // Must be a resolved URL: a relative one gives the tray item an empty icon.
-        icon.source: Qt.resolvedUrl("puddle.png")
+        icon.source: Qt.resolvedUrl("../assets/puddle.png")
         // macOS template image: drawn black/white to follow the menu bar's light/dark theme.
         icon.mask: Qt.platform.os === "osx"
         tooltip: "Puddle"

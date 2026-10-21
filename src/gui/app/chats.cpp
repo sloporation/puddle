@@ -30,7 +30,8 @@ Chats::Chats(QObject *parent)
       blocked_({ "id", "user", "name", "created_at" }, nullptr, "user"),
       profiles_({ "id", "display_name", "avatar", "default" }),
       invites_({ "id", "name", "invitedBy", "invitedByName" }),
-      members_({ "id", "name", "avatar", "color", "state", "isMe", "friend" })
+      members_({ "id", "name", "avatar", "color", "state", "isMe", "friend" }),
+      sidebar_({ "key", "kind", "id", "name", "avatar", "color", "preview", "lastTs", "unread", "state", "members", "note", "invitedBy", "section" }, nullptr, "key")
 {
     cacheDir_ = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/avatars";
     timer_.setInterval(2000);
@@ -169,12 +170,68 @@ QString Chats::shortCode(const QString &id)
     return out;
 }
 
+void Chats::getAll(const QString &path, const QString &key, std::function<void(int, const QJsonDocument &)> done)
+{
+    auto all = std::make_shared<QJsonArray>();
+    auto step = std::make_shared<std::function<void(int)>>();
+    *step = [this, path, key, done, all, step](int offset) {
+        api_.get(path + QStringLiteral("&offset=%1").arg(offset), [this, key, done, all, step](int status, const QJsonDocument &doc) {
+            const QJsonValue next = doc.object().value("next");
+            if (status == 200 && doc.isObject()) {
+                for (const QJsonValue &v : doc.object().value(key).toArray())
+                    all->append(v);
+                if (next.isDouble() && all->size() < 20000) {
+                    (*step)(int(next.toDouble()));
+                    return;
+                }
+                done(200, QJsonDocument(QJsonObject{ { key, *all } }));
+            } else {
+                done(status, doc);
+            }
+            *step = nullptr; // the function holds itself; let go of it now it is done
+        });
+    };
+    (*step)(0);
+}
+
+QVariantList Chats::findFriends(const QString &text, int limit) const
+{
+    const QString q = text.trimmed();
+    QVariantList starts, contains;
+    for (const QJsonObject &row : sidebar_.items()) { // already newest first
+        if (row.value("kind").toString() != QLatin1String("dm") || row.value("state").toString() != QLatin1String("active"))
+            continue; // not a group, nor someone whose connection is closed
+        const QString name = row.value("name").toString();
+        const bool prefix = q.isEmpty() || name.startsWith(q, Qt::CaseInsensitive);
+        if (!prefix && !name.contains(q, Qt::CaseInsensitive))
+            continue;
+        QVariantMap f{ { "id", row.value("id").toString() }, { "name", name }, { "avatar", row.value("avatar").toString() }, { "color", row.value("color").toString() } };
+        (prefix ? starts : contains).append(f);
+        if (starts.size() >= limit)
+            break;
+    }
+    QVariantList out = starts;
+    for (const QVariant &v : contains)
+        if (out.size() < limit)
+            out.append(v);
+    return out;
+}
+
+int Chats::friendMatches(const QString &filter) const
+{
+    int n = 0;
+    for (const QJsonObject &p : people_.items())
+        if (p.value("state").toString() == QLatin1String("active") && (filter.isEmpty() || p.value("name").toString().contains(filter, Qt::CaseInsensitive)))
+            n++;
+    return n;
+}
+
 void Chats::refreshPeople()
 {
     if (busy_[0])
         return;
     busy_[0] = true;
-    api_.get(QStringLiteral("/api/v1/stream?limit=200"), [this](int status, const QJsonDocument &doc) {
+    getAll(QStringLiteral("/api/v1/stream?limit=%1").arg(qMin(pageSize_, 200)), QStringLiteral("streams"), [this](int status, const QJsonDocument &doc) {
         busy_[0] = false;
         setConnected(status != 0);
         if (status != 200 || !doc.isObject())
@@ -218,6 +275,7 @@ void Chats::refreshPeople()
         avatars_ = avatars;
         colors_ = colors;
         people_.setItems(rows);
+        rebuildSidebar();
         updateCurrentInfo();
         if (friends != friends_ || pending != pending_) {
             friends_ = friends;
@@ -236,7 +294,7 @@ void Chats::refreshConversations()
     if (busy_[1])
         return;
     busy_[1] = true;
-    api_.get(QStringLiteral("/api/v1/conversations?limit=100"), [this](int status, const QJsonDocument &doc) {
+    getAll(QStringLiteral("/api/v1/conversations?limit=%1").arg(qMin(pageSize_, 100)), QStringLiteral("conversations"), [this](int status, const QJsonDocument &doc) {
         busy_[1] = false;
         if (status != 200 || !doc.isObject())
             return;
@@ -274,6 +332,7 @@ void Chats::refreshConversations()
         unread_ = unread;
         conversationsLoaded_ = true;
         conversations_.setItems(rows);
+        rebuildSidebar();
         if (total != unreadTotal_) {
             unreadTotal_ = total;
             emit unreadTotalChanged();
@@ -289,82 +348,120 @@ void Chats::markRead()
     api_.post(QStringLiteral("/api/v1/dm/read"), QJsonObject{ { currentIsGroup() ? "group" : "user", current_ } }, [this](int, const QJsonDocument &) { marking_ = false; });
 }
 
+// Take a page from the server: its messages and notices are kept, and the offset of the page before it remembered when it is the furthest back.
 void Chats::refreshMessages()
 {
     if (current_.isEmpty() || busy_[2])
         return;
     busy_[2] = true;
     const QString user = current_;
-    const QString url = currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2").arg(user).arg(messageLimit_)
-                                         : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2").arg(user).arg(messageLimit_);
-    api_.get(url,
-             [this, user](int status, const QJsonDocument &doc) {
-                 busy_[2] = false;
-                 if (status != 200 || !doc.isObject() || user != current_)
-                     return;
-                 QList<QJsonObject> rows;
-                 QHash<QString, QJsonObject> byId;
-                 const QJsonArray list = doc.object().value("messages").toArray();
-                 for (const QJsonValue &v : list)
-                     byId.insert(v.toObject().value("id").toString(), v.toObject());
-                 // what the messages are, and what happened to the group between them, in the order it happened
-                 QList<QJsonObject> items;
-                 for (const QJsonValue &v : list) {
-                     QJsonObject m = v.toObject();
-                     m.insert("kind", QStringLiteral("message"));
-                     items.append(m);
-                 }
-                 for (const QJsonValue &v : doc.object().value("notices").toArray()) {
-                     QJsonObject n = v.toObject();
-                     if (!notice(n))
-                         continue;
-                     items.append(n);
-                 }
-                 std::stable_sort(items.begin(), items.end(), [](const QJsonObject &a, const QJsonObject &b) { return a.value("ts").toDouble() < b.value("ts").toDouble(); });
-                 QJsonObject prev;
-                 for (QJsonObject m : items) {
-                     const qint64 ts = qint64(m.value("ts").toDouble());
-                     const bool first = prev.isEmpty();
-                     const bool newDay = first || QDateTime::fromMSecsSinceEpoch(ts).date() != QDateTime::fromMSecsSinceEpoch(qint64(prev.value("ts").toDouble())).date();
-                     m.insert("dayStart", newDay);
-                     if (m.value("kind").toString() == QLatin1String("notice")) {
-                         m.insert("grouped", false);
-                         prev = m;
-                         rows.append(m);
-                         continue;
-                     }
-                     const QString sender = m.value("sender").toString();
-                     const bool mine = m.value("outgoing").toBool();
-                     if (m.contains("delivery")) {
-                         const QJsonObject d = m.value("delivery").toObject();
-                         m.insert("deliveryState", d.value("state"));
-                         m.insert("deliveryReason", d.value("reason"));
-                         m.insert("deliveryNext", d.value("next_at"));
-                     }
-                     m.insert("senderName", mine ? tr("You") : nameOf(sender));
-                     m.insert("avatar", mine ? myAvatar_ : avatars_.value(sender));
-                     m.insert("tint", mine ? QString() : colors_.value(sender));
-                     m.insert("grouped", !first && !newDay && prev.value("kind").toString() == QLatin1String("message") && prev.value("sender") == m.value("sender") &&
-                                             !m.contains("reply_to") && ts - qint64(prev.value("ts").toDouble()) < 7 * 60 * 1000);
-                     if (m.contains("reply_to")) {
-                         const QJsonObject r = byId.value(m.value("reply_to").toString());
-                         if (r.isEmpty()) {
-                             m.insert("replyMissing", true);
-                         } else {
-                             m.insert("replyName", r.value("outgoing").toBool() ? tr("You") : nameOf(r.value("sender").toString()));
-                             m.insert("replyText", r.value("deleted").toBool() ? QString() : r.value("body").toString().simplified().left(100));
-                         }
-                     }
-                     prev = m;
-                     rows.append(m);
-                 }
-                 const bool older = !doc.object().value("next").isNull();
-                 if (older != hasOlder_) {
-                     hasOlder_ = older;
-                     emit hasOlderChanged();
-                 }
-                 messages_.setItems(rows);
-             });
+    const QString url = currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2").arg(user).arg(kMessagePage)
+                                         : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2").arg(user).arg(kMessagePage);
+    api_.get(url, [this, user](int status, const QJsonDocument &doc) {
+        busy_[2] = false;
+        if (status != 200 || !doc.isObject() || user != current_)
+            return;
+        for (const QJsonValue &v : doc.object().value("messages").toArray())
+            msgs_.insert(v.toObject().value("id").toString(), v.toObject()); // the newest page again: edits, deletions and delivery states are fresh
+        for (const QJsonValue &v : doc.object().value("notices").toArray())
+            notices_.insert(v.toObject().value("id").toString(), v.toObject());
+        if (!loadedOlder_) {
+            const QJsonValue next = doc.object().value("next");
+            olderNext_ = next.isNull() ? -1 : qint64(next.toDouble());
+        }
+        renderMessages();
+    });
+}
+
+// One page further back.
+void Chats::loadOlder()
+{
+    if (current_.isEmpty() || loadingOlder_ || olderNext_ < 0)
+        return;
+    loadingOlder_ = true;
+    const QString user = current_;
+    const QString url = (currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2&offset=%3")
+                                          : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2&offset=%3")).arg(user).arg(kMessagePage).arg(olderNext_);
+    api_.get(url, [this, user](int status, const QJsonDocument &doc) {
+        loadingOlder_ = false;
+        if (status != 200 || !doc.isObject() || user != current_)
+            return;
+        for (const QJsonValue &v : doc.object().value("messages").toArray())
+            msgs_.insert(v.toObject().value("id").toString(), v.toObject()); // (what is already held is not held twice: it has the same id)
+        for (const QJsonValue &v : doc.object().value("notices").toArray())
+            notices_.insert(v.toObject().value("id").toString(), v.toObject());
+        const QJsonValue next = doc.object().value("next");
+        olderNext_ = next.isNull() ? -1 : qint64(next.toDouble());
+        loadedOlder_ = true;
+        renderMessages();
+    });
+}
+
+// What the window shows: everything held, in the order it happened, with the notices between the messages.
+void Chats::renderMessages()
+{
+    QList<QJsonObject> list = msgs_.values();
+    std::sort(list.begin(), list.end(), [](const QJsonObject &a, const QJsonObject &b) {
+        const double ta = a.value("ts").toDouble(), tb = b.value("ts").toDouble();
+        return ta != tb ? ta < tb : a.value("id").toString() < b.value("id").toString();
+    });
+    QList<QJsonObject> rows;
+    QHash<QString, QJsonObject> byId = msgs_;
+    // what the messages are, and what happened to the group between them, in the order it happened
+    QList<QJsonObject> items;
+    for (QJsonObject m : list) {
+        m.insert("kind", QStringLiteral("message"));
+        items.append(m);
+    }
+    for (QJsonObject n : notices_.values()) {
+        if (!notice(n))
+            continue;
+        items.append(n);
+    }
+    std::stable_sort(items.begin(), items.end(), [](const QJsonObject &a, const QJsonObject &b) { return a.value("ts").toDouble() < b.value("ts").toDouble(); });
+    QJsonObject prev;
+    for (QJsonObject m : items) {
+        const qint64 ts = qint64(m.value("ts").toDouble());
+        const bool first = prev.isEmpty();
+        const bool newDay = first || QDateTime::fromMSecsSinceEpoch(ts).date() != QDateTime::fromMSecsSinceEpoch(qint64(prev.value("ts").toDouble())).date();
+        m.insert("dayStart", newDay);
+        if (m.value("kind").toString() == QLatin1String("notice")) {
+            m.insert("grouped", false);
+            prev = m;
+            rows.append(m);
+            continue;
+        }
+        const QString sender = m.value("sender").toString();
+        const bool mine = m.value("outgoing").toBool();
+        if (m.contains("delivery")) {
+            const QJsonObject d = m.value("delivery").toObject();
+            m.insert("deliveryState", d.value("state"));
+            m.insert("deliveryReason", d.value("reason"));
+            m.insert("deliveryNext", d.value("next_at"));
+        }
+        m.insert("senderName", mine ? tr("You") : nameOf(sender));
+        m.insert("avatar", mine ? myAvatar_ : avatars_.value(sender));
+        m.insert("tint", mine ? QString() : colors_.value(sender));
+        m.insert("grouped", !first && !newDay && prev.value("kind").toString() == QLatin1String("message") && prev.value("sender") == m.value("sender") &&
+                                !m.contains("reply_to") && ts - qint64(prev.value("ts").toDouble()) < 7 * 60 * 1000);
+        if (m.contains("reply_to")) {
+            const QJsonObject r = byId.value(m.value("reply_to").toString());
+            if (r.isEmpty()) {
+                m.insert("replyMissing", true);
+            } else {
+                m.insert("replyName", r.value("outgoing").toBool() ? tr("You") : nameOf(r.value("sender").toString()));
+                m.insert("replyText", r.value("deleted").toBool() ? QString() : r.value("body").toString().simplified().left(100));
+            }
+        }
+        prev = m;
+        rows.append(m);
+    }
+    const bool older = olderNext_ >= 0;
+    if (older != hasOlder_) {
+        hasOlder_ = older;
+        emit hasOlderChanged();
+    }
+    messages_.setItems(rows);
 }
 
 void Chats::open(const QString &userId, const QString &kind)
@@ -373,9 +470,15 @@ void Chats::open(const QString &userId, const QString &kind)
         return;
     current_ = userId;
     currentKind_ = userId.isEmpty() ? QStringLiteral("dm") : kind;
-    messageLimit_ = 50;
+    msgs_.clear();
+    notices_.clear();
+    olderNext_ = -1;
+    loadedOlder_ = loadingOlder_ = false;
     messages_.clear();
-    hasOlder_ = false;
+    if (hasOlder_) {
+        hasOlder_ = false;
+        emit hasOlderChanged(); // (the window still thinks the chat before this one had more history)
+    }
     updateCurrentInfo();
     rebuildMembers();
     emit currentChanged();
@@ -428,14 +531,6 @@ void Chats::setAttentive(bool a)
 void Chats::close()
 {
     open(QString());
-}
-
-void Chats::loadOlder()
-{
-    if (current_.isEmpty() || messageLimit_ >= 1000)
-        return;
-    messageLimit_ += 50;
-    refreshMessages();
 }
 
 void Chats::post(const QString &path, const QJsonObject &body, const QString &failure, bool andRefresh)
@@ -523,6 +618,124 @@ bool Chats::notice(QJsonObject &n) const
     return true;
 }
 
+// The window's one list. First what is waiting for an answer (invitations to groups, friend requests), then every friend and every group,
+// whether or not anything has been said, newest first (a friend or group nobody has written in yet counts from when it began), and last
+// the requests we sent that nobody has answered. Blocked people and people we only know through a group are not in it.
+void Chats::rebuildSidebar()
+{
+    struct Row {
+        int rank;
+        qint64 ts;
+        QString name;
+        QJsonObject o;
+    };
+    QList<Row> rows;
+    auto add = [&rows](int rank, qint64 ts, const QJsonObject &o) { rows.append({ rank, ts, o.value("name").toString().toLower(), o }); };
+
+    for (const QJsonObject &i : invites_.items()) {
+        QJsonObject o;
+        o.insert("key", QStringLiteral("invite:") + i.value("id").toString());
+        o.insert("kind", QStringLiteral("invite"));
+        o.insert("id", i.value("id"));
+        o.insert("name", i.value("name"));
+        o.insert("invitedBy", i.value("invitedByName"));
+        o.insert("preview", tr("%1 invited you").arg(i.value("invitedByName").toString()));
+        o.insert("section", QStringLiteral("pending"));
+        add(0, 0, o);
+    }
+    for (const QJsonObject &p : people_.items()) {
+        if (p.value("state").toString() != QLatin1String("pending_in"))
+            continue;
+        const QString id = p.value("id").toString(), note = p.value("note").toString();
+        QJsonObject o;
+        o.insert("key", QStringLiteral("request:") + id);
+        o.insert("kind", QStringLiteral("request"));
+        o.insert("id", id);
+        o.insert("name", p.value("name"));
+        o.insert("avatar", p.value("avatar"));
+        o.insert("color", p.value("color"));
+        o.insert("note", note);
+        o.insert("preview", note.isEmpty() ? tr("Wants to be your friend") : QStringLiteral("“") + note + QStringLiteral("”"));
+        o.insert("section", QStringLiteral("pending"));
+        add(0, 0, o);
+    }
+
+    QSet<QString> haveChat;
+    for (const QJsonObject &c : conversations_.items()) {
+        const bool isGroup = c.value("kind").toString() == QLatin1String("group");
+        const QString id = c.value("id").toString();
+        haveChat.insert(id);
+        const QJsonObject last = c.value("last").toObject();
+        QJsonObject o;
+        o.insert("key", (isGroup ? QStringLiteral("group:") : QStringLiteral("dm:")) + id);
+        o.insert("kind", isGroup ? QStringLiteral("group") : QStringLiteral("dm"));
+        o.insert("id", id);
+        o.insert("name", c.value("name"));
+        o.insert("avatar", c.value("avatar"));
+        o.insert("color", c.value("color"));
+        o.insert("unread", c.value("unread"));
+        o.insert("state", c.value("stream"));
+        o.insert("members", c.value("members"));
+        o.insert("section", QStringLiteral("chats"));
+        QString preview;
+        qint64 ts = 0;
+        if (!last.isEmpty()) {
+            ts = qint64(last.value("ts").toDouble());
+            preview = last.value("deleted").toBool() ? tr("Message deleted")
+                      : (isGroup ? c.value("lastBy").toString() + QStringLiteral(": ")
+                                 : last.value("outgoing").toBool() ? tr("You: ") : QString()) + last.value("preview").toString();
+        } else if (isGroup) {
+            ts = qint64(groups_.value(id).value("updated_at").toDouble());
+            const int n = c.value("members").toInt();
+            preview = n == 1 ? tr("1 member") : tr("%1 members").arg(n);
+        }
+        o.insert("preview", preview);
+        o.insert("lastTs", double(ts));
+        add(1, ts, o);
+    }
+    for (const QJsonObject &p : people_.items()) {
+        const QString state = p.value("state").toString(), id = p.value("id").toString();
+        if (state == QLatin1String("active") && !haveChat.contains(id)) {
+            QJsonObject o;
+            o.insert("key", QStringLiteral("dm:") + id);
+            o.insert("kind", QStringLiteral("dm"));
+            o.insert("id", id);
+            o.insert("name", p.value("name"));
+            o.insert("avatar", p.value("avatar"));
+            o.insert("color", p.value("color"));
+            o.insert("state", state);
+            o.insert("preview", QString());
+            o.insert("section", QStringLiteral("chats"));
+            add(1, qint64(p.value("created_at").toDouble()), o);
+        } else if (state == QLatin1String("pending_out")) {
+            QJsonObject o;
+            o.insert("key", QStringLiteral("sent:") + id);
+            o.insert("kind", QStringLiteral("sent"));
+            o.insert("id", id);
+            o.insert("name", p.value("name"));
+            o.insert("avatar", p.value("avatar"));
+            o.insert("color", p.value("color"));
+            o.insert("state", state);
+            o.insert("preview", tr("Request sent"));
+            o.insert("section", QStringLiteral("chats"));
+            add(3, 0, o);
+        }
+    }
+
+    std::stable_sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
+        if (a.rank != b.rank)
+            return a.rank < b.rank;
+        if (a.ts != b.ts)
+            return a.ts > b.ts;
+        return a.name.localeAwareCompare(b.name) < 0;
+    });
+    QList<QJsonObject> out;
+    out.reserve(rows.size());
+    for (const Row &r : rows)
+        out.append(r.o);
+    sidebar_.setItems(out);
+}
+
 void Chats::rebuildMembers()
 {
     QList<QJsonObject> rows;
@@ -554,7 +767,7 @@ void Chats::refreshGroups()
     if (busy_[5])
         return;
     busy_[5] = true;
-    api_.get(QStringLiteral("/api/v1/gm?limit=100"), [this](int status, const QJsonDocument &doc) {
+    getAll(QStringLiteral("/api/v1/gm?limit=%1").arg(qMin(pageSize_, 100)), QStringLiteral("groups"), [this](int status, const QJsonDocument &doc) {
         busy_[5] = false;
         if (status != 200 || !doc.isObject())
             return;
@@ -583,6 +796,7 @@ void Chats::refreshGroups()
         invitedTo_ = invitedTo;
         groupsLoaded_ = true;
         invites_.setItems(invites);
+        rebuildSidebar();
         if (invites.size() != groupInviteCount_) {
             groupInviteCount_ = int(invites.size());
             emit groupInvitesChanged();
@@ -629,9 +843,12 @@ void Chats::declineGroup(const QString &groupId)
 
 void Chats::leaveGroup()
 {
-    if (!currentIsGroup())
-        return;
-    const QString id = current_;
+    if (currentIsGroup())
+        leaveGroup(current_);
+}
+
+void Chats::leaveGroup(const QString &id)
+{
     api_.post(QStringLiteral("/api/v1/gm/leave"), QJsonObject{ { "group", id } }, [this, id](int status, const QJsonDocument &) {
         if (status == 0 || status >= 400) {
             emit failed(tr("Could not leave the group."));
@@ -646,9 +863,13 @@ void Chats::leaveGroup()
 
 void Chats::renameGroup(const QString &name)
 {
-    if (!currentIsGroup())
-        return;
-    post(QStringLiteral("/api/v1/gm/rename"), QJsonObject{ { "group", current_ }, { "name", name.trimmed() } }, tr("The group could not be renamed."));
+    if (currentIsGroup())
+        renameGroup(current_, name);
+}
+
+void Chats::renameGroup(const QString &id, const QString &name)
+{
+    post(QStringLiteral("/api/v1/gm/rename"), QJsonObject{ { "group", id }, { "name", name.trimmed() } }, tr("The group could not be renamed."));
 }
 
 QString Chats::nameOf(const QString &userId) const

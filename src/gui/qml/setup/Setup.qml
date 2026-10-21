@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../components"
+import "../theme"
 
 // First run: make the identity and show its recovery phrase once. The Puddle does not start until the
 // owner says the phrase is written down.
@@ -29,12 +31,10 @@ Pane {
         backend.finishSetup()
     }
 
-    Flickable {
+    ScrollArea {
         anchors.fill: parent
         contentWidth: width
         contentHeight: column.implicitHeight + 48
-        clip: true
-        ScrollBar.vertical: ScrollBar {}
 
         ColumnLayout {
             id: column
@@ -58,7 +58,7 @@ Pane {
                     visible: setup.backend.setupRedo
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    color: "#b8860b"
+                    color: Theme.banner
                     text: "Setup wasn't finished last time, so it will start again. The identity from that attempt was never used."
                 }
                 Label {
@@ -72,7 +72,7 @@ Pane {
                     visible: setup.backend.error !== ""
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    color: "#c0392b"
+                    color: Theme.alert
                     text: setup.backend.error
                 }
                 Button {
@@ -113,7 +113,7 @@ Pane {
                             required property string modelData
                             Layout.fillWidth: true
                             implicitHeight: 62
-                            radius: 8
+                            radius: Theme.radiusLarge
                             color: "transparent"
                             border.width: 1
                             border.color: setup.palette.mid
@@ -157,7 +157,7 @@ Pane {
                 Label {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    color: "#b8860b"
+                    color: Theme.banner
                     text: "Anyone who has this phrase can take over your identity. If you lose it and lose this "
                           + "computer, your identity is gone for good. When you change your keys later you will get a "
                           + "new phrase, and this one will stop working."

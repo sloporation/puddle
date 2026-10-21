@@ -96,31 +96,54 @@ install(TARGETS puddled RUNTIME DESTINATION bin)
 # --- Puddle: the desktop app (Qt). Embeds the server, so nothing else is needed.
 option(PUDDLE_BUILD_GUI "Build the Qt desktop app" ON)
 if(PUDDLE_BUILD_GUI)
-  find_package(Qt6 COMPONENTS Quick QuickControls2 Network Test QUIET)
+  find_package(Qt6 COMPONENTS Quick QuickControls2 Network Svg Test QUIET) # Svg: the icons are SVG files
   if(Qt6_FOUND)
     qt_standard_project_setup()
     qt_policy(SET QTP0001 NEW)
     qt_policy(SET QTP0004 NEW)
     qt_add_executable(puddle WIN32 MACOSX_BUNDLE
       src/gui/main.cpp
-      src/gui/backend.cpp
-      src/gui/backend.h
-      src/gui/chats.cpp
-      src/gui/chats.h
-      src/gui/apiclient.cpp
-      src/gui/apiclient.h
-      src/gui/jsonlistmodel.cpp
-      src/gui/jsonlistmodel.h)
+      src/gui/app/backend.cpp
+      src/gui/app/backend.h
+      src/gui/app/chats.cpp
+      src/gui/app/chats.h
+      src/gui/app/apiclient.cpp
+      src/gui/app/apiclient.h
+      src/gui/app/jsonlistmodel.cpp
+      src/gui/app/jsonlistmodel.h)
+    file(GLOB PUDDLE_ICONS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS src/gui/assets/icons/tabler/*.svg)
+    # Theme is a singleton: the colours and sizes everything else reads
+    set_source_files_properties(src/gui/qml/theme/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
     qt_add_qml_module(puddle
       URI Puddle
       VERSION 1.0
-      QML_FILES src/gui/Main.qml src/gui/Setup.qml src/gui/Shell.qml src/gui/Avatar.qml src/gui/PersonRow.qml
-        src/gui/ChatPage.qml src/gui/GroupsPage.qml src/gui/NewGroupPopup.qml src/gui/GroupInviteRow.qml src/gui/GroupPopup.qml src/gui/FriendsPage.qml src/gui/AddFriendPopup.qml src/gui/LogPage.qml
-      RESOURCES src/gui/puddle.png)
-    target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network)
+      QML_FILES
+        src/gui/qml/Main.qml
+        src/gui/qml/setup/Setup.qml
+        src/gui/qml/shell/Shell.qml
+        src/gui/qml/shell/Sidebar.qml
+        src/gui/qml/shell/SidebarRow.qml
+        src/gui/qml/shell/HomePage.qml
+        src/gui/qml/dialogs/NewConversationDialog.qml
+        src/gui/qml/chat/ChatPage.qml
+        src/gui/qml/settings/PersonRow.qml
+        src/gui/qml/groups/GroupPopup.qml
+        src/gui/qml/settings/LogPage.qml
+        src/gui/qml/components/Avatar.qml
+        src/gui/qml/components/ContextTrigger.qml
+        src/gui/qml/components/FieldMenu.qml
+        src/gui/qml/components/ConfirmDialog.qml
+        src/gui/qml/components/ConversationMenu.qml
+        src/gui/qml/components/Icon.qml
+        src/gui/qml/components/ScrollArea.qml
+        src/gui/qml/components/ScrollList.qml
+        src/gui/qml/components/WheelScroll.qml
+        src/gui/qml/theme/Theme.qml
+      RESOURCES src/gui/assets/puddle.png ${PUDDLE_ICONS})
+    target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Svg)
     if(APPLE)
       enable_language(OBJCXX)
-      target_sources(puddle PRIVATE src/gui/dock_mac.mm)
+      target_sources(puddle PRIVATE src/gui/app/dock_mac.mm)
       target_link_libraries(puddle PRIVATE "-framework AppKit")
     endif()
     set_target_properties(puddle PROPERTIES
@@ -131,32 +154,32 @@ if(PUDDLE_BUILD_GUI)
     install(TARGETS puddle BUNDLE DESTINATION . RUNTIME DESTINATION bin)
 
     # The first-run state machine, against the real core, with no window (needs the offscreen platform).
-    add_executable(backend_test tests/backend_test.cpp src/gui/backend.cpp src/gui/backend.h src/gui/chats.cpp src/gui/chats.h
-      src/gui/apiclient.cpp src/gui/apiclient.h src/gui/jsonlistmodel.cpp src/gui/jsonlistmodel.h)
-    target_include_directories(backend_test PRIVATE src/gui)
+    add_executable(backend_test tests/backend_test.cpp src/gui/app/backend.cpp src/gui/app/backend.h src/gui/app/chats.cpp src/gui/app/chats.h
+      src/gui/app/apiclient.cpp src/gui/app/apiclient.h src/gui/app/jsonlistmodel.cpp src/gui/app/jsonlistmodel.h)
+    target_include_directories(backend_test PRIVATE src/gui/app)
     target_link_libraries(backend_test PRIVATE puddle_core Qt6::Gui Qt6::Network)
     if(APPLE)
-      target_sources(backend_test PRIVATE src/gui/dock_mac.mm)
+      target_sources(backend_test PRIVATE src/gui/app/dock_mac.mm)
       target_link_libraries(backend_test PRIVATE "-framework AppKit")
     endif()
     add_test(NAME backend COMMAND backend_test)
 
     # The app's view of a Puddle (owner API over pinned TLS), against two real Puddles talking to each other.
-    add_executable(chats_test tests/chats_test.cpp src/gui/chats.cpp src/gui/chats.h src/gui/apiclient.cpp src/gui/apiclient.h
-      src/gui/jsonlistmodel.cpp src/gui/jsonlistmodel.h)
+    add_executable(chats_test tests/chats_test.cpp src/gui/app/chats.cpp src/gui/app/chats.h src/gui/app/apiclient.cpp src/gui/app/apiclient.h
+      src/gui/app/jsonlistmodel.cpp src/gui/app/jsonlistmodel.h)
     set_target_properties(chats_test PROPERTIES AUTOMOC ON)
     target_link_libraries(chats_test PRIVATE puddle_core Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
     add_test(NAME chats COMMAND chats_test)
 
     # The window, driven with real mouse and key events against two real Puddles.
-    add_executable(ui_test tests/ui_test.cpp src/gui/backend.cpp src/gui/backend.h src/gui/chats.cpp src/gui/chats.h
-      src/gui/apiclient.cpp src/gui/apiclient.h src/gui/jsonlistmodel.cpp src/gui/jsonlistmodel.h)
+    add_executable(ui_test tests/ui_test.cpp src/gui/app/backend.cpp src/gui/app/backend.h src/gui/app/chats.cpp src/gui/app/chats.h
+      src/gui/app/apiclient.cpp src/gui/app/apiclient.h src/gui/app/jsonlistmodel.cpp src/gui/app/jsonlistmodel.h)
     set_target_properties(ui_test PROPERTIES AUTOMOC ON)
-    target_include_directories(ui_test PRIVATE src/gui)
-    target_compile_definitions(ui_test PRIVATE PUDDLE_GUI_DIR="${CMAKE_SOURCE_DIR}/src/gui")
+    target_include_directories(ui_test PRIVATE src/gui/app)
+    target_compile_definitions(ui_test PRIVATE PUDDLE_GUI_DIR="${CMAKE_SOURCE_DIR}/src/gui/qml")
     target_link_libraries(ui_test PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Test)
     if(APPLE)
-      target_sources(ui_test PRIVATE src/gui/dock_mac.mm)
+      target_sources(ui_test PRIVATE src/gui/app/dock_mac.mm)
       target_link_libraries(ui_test PRIVATE "-framework AppKit")
     endif()
     add_test(NAME ui COMMAND ui_test)

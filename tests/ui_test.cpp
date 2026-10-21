@@ -12,7 +12,7 @@
 #include <QtTest/QTest>
 #include <QQuickStyle>
 
-#include "../src/gui/backend.h"
+#include "../src/gui/app/backend.h"
 #include "testnode.h"
 
 static int failures;
@@ -91,6 +91,37 @@ static bool click(QQuickItem *i)
     QTest::mouseClick(win, Qt::LeftButton, {}, centre(i));
     return true;
 }
+static bool rightClick(QQuickItem *i)
+{
+    if (!i || !i->isVisible())
+        return false;
+    settle(150);
+    QTest::mouseClick(win, Qt::RightButton, {}, centre(i));
+    return true;
+}
+// turn the wheel over `i`: positive notches scroll up
+static void wheel(QQuickItem *i, int notches)
+{
+    const QPointF p = i->mapToScene(QPointF(i->width() / 2, i->height() / 2));
+    QWheelEvent e(p, win->mapToGlobal(p), QPoint(), QPoint(0, notches * 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QCoreApplication::sendEvent(win, &e);
+}
+// the sidebar row of the conversation with this name
+static QQuickItem *dm_row(const QString &name)
+{
+    for (QQuickItem *i : all("dmRow"))
+        if (i->property("convName").toString() == name)
+            return i;
+    return nullptr;
+}
+// the sidebar row of this kind ("request", "invite", "sent", "dm", "group")
+static QQuickItem *row_of_kind(const QString &kind)
+{
+    for (QQuickItem *i : all("dmRow"))
+        if (i->property("kind").toString() == kind)
+            return i;
+    return nullptr;
+}
 static bool clickName(const char *name) { return until([&] { return find(name) != nullptr; }, 5000) && click(find(name)); }
 static void typeText(const QString &t)
 {
@@ -146,7 +177,7 @@ int main(int argc, char **argv)
     const QString qml = QString(R"(
         import QtQuick
         import QtQuick.Controls
-        import "file://%1" as G
+        import "file://%1/shell" as G
         ApplicationWindow { width: 1000; height: 640; visible: true
             G.Shell { anchors.fill: parent; backend: appBackend } })").arg(PUDDLE_GUI_DIR);
     engine.loadData(qml.toUtf8(), QUrl("file:///ui_test.qml"));
@@ -164,7 +195,9 @@ int main(int argc, char **argv)
     CHECK(until([&] { return QGuiApplication::clipboard()->text() == backend.myLink(); }, 3000));
 
     /* ---- ask Bob to be a friend, from the window ---- */
-    CHECK(clickName("addFriendButton"));
+    CHECK(find("homePage") != nullptr);                                                            /* nothing open: the empty page */
+    CHECK(clickName("newConversationButton"));
+    CHECK(clickName("tabAddFriend"));
     CHECK(until([&] { return find("linkField") != nullptr; }, 3000));
     CHECK(click(find("linkField")));
     typeText(bob.link);
@@ -176,6 +209,7 @@ int main(int argc, char **argv)
     CHECK(until([&] { return B.incomingRequests() == 1; }));
     CHECK(newReq.count() == 1);
     CHECK(until([&] { return find("linkField") == nullptr; }, 3000)); /* the popup went away */
+    CHECK(until([&] { return row_of_kind("sent") != nullptr; }, 5000));                            /* the request is in the list, as "request sent" */
     {
         bool noted = false;
         for (const QJsonObject &o : static_cast<JsonListModel *>(B.people())->items())
@@ -186,10 +220,10 @@ int main(int argc, char **argv)
     /* ---- Bob accepts; the window shows a friend ---- */
     B.accept(backend.myId());
     CHECK(until([&] { return A.friendCount() == 1; }));
-    CHECK(until([&] { return find("messageButton") != nullptr; }, 5000));
+    CHECK(until([&] { return dm_row("Bob") != nullptr && row_of_kind("sent") == nullptr; }, 5000));   /* a friend is in the list before anything is said; the request is no more */
 
     /* ---- chat: send ---- */
-    CHECK(click(find("messageButton")));
+    CHECK(click(dm_row("Bob")));
     CHECK(until([&] { return A.current() == bob.uid; }, 3000));
     CHECK(until([&] { return find("composer") != nullptr; }, 3000));
     CHECK(click(find("composer")));
@@ -213,6 +247,31 @@ int main(int argc, char **argv)
     /* ---- chat: receive ---- */
     B.send("hi back");
     CHECK(until([&] { return shows("hi back"); }, 5000));
+
+    /* ---- right-click: a message copies, a text box has the usual edit menu ---- */
+    {
+        QGuiApplication::clipboard()->setText("nothing yet");
+        QQuickItem *text = nullptr;
+        for (QQuickItem *i : all("messageText"))
+            if (i->property("text").toString() == "hi back")
+                text = i;
+        CHECK(text && rightClick(text));
+        CHECK(until([&] { return find("msgCopy") != nullptr; }, 3000));
+        CHECK(find("msgReply") && !find("msgEdit") && !find("msgDelete"));                         /* Bob's message: no edit, no delete */
+        CHECK(click(find("msgCopy")));
+        CHECK(until([&] { return QGuiApplication::clipboard()->text() == "hi back"; }, 3000));
+        CHECK(until([&] { return find("msgCopy") == nullptr; }, 3000));                            /* choosing closes it */
+
+        CHECK(click(find("composer")));
+        typeText("abc");
+        CHECK(rightClick(find("composer")));
+        CHECK(until([&] { return find("menuSelectAll") != nullptr; }, 3000));
+        CHECK(find("menuPaste") && find("menuCut") && !find("menuCut")->property("enabled").toBool());  /* nothing selected to cut yet */
+        CHECK(click(find("menuSelectAll")));
+        CHECK(until([&] { return find("composer")->property("selectedText").toString() == "abc"; }, 3000));
+        key(Qt::Key_Backspace);                                                                    /* leave the box empty again */
+        CHECK(until([&] { return find("composer")->property("text").toString().isEmpty(); }, 3000));
+    }
 
     /* ---- edit with Up ---- */
     CHECK(click(find("composer")));
@@ -288,12 +347,15 @@ int main(int argc, char **argv)
     /* ---- a narrow window shows one pane at a time ---- */
     win->resize(380, 640);
     CHECK(until([&] { return find("chatPage") && !find("sidebar"); }, 3000));
+    CHECK(find("rail") == nullptr);                                                                /* a conversation has the whole window */
     CHECK(clickName("chatBack"));
     CHECK(until([&] { return find("sidebar") && !find("chatPage"); }, 3000));
-    CHECK(clickName("friendsButton"));
-    CHECK(until([&] { return find("addFriendButton") && !find("sidebar"); }, 3000));
+    CHECK(find("rail") != nullptr && find("homeButton") != nullptr);                              /* the list keeps the rail (where servers go) beside it */
+    CHECK(find("rail")->x() + find("rail")->width() <= find("sidebar")->x() + 1 && find("sidebar")->x() + find("sidebar")->width() <= win->width() + 1);   /* side by side, both on screen */
+    CHECK(clickName("settingsButton"));
+    CHECK(until([&] { return find("developerSwitch") && !find("sidebar"); }, 3000));
     win->resize(1000, 640);
-    CHECK(until([&] { return find("sidebar") && find("addFriendButton"); }, 3000));
+    CHECK(until([&] { return find("sidebar") && find("developerSwitch"); }, 3000));
 
     /* ---- someone asks us: no IDs or codes on screen, until Developer Mode is on ---- */
     {
@@ -302,11 +364,14 @@ int main(int argc, char **argv)
         QSignalSpy asked(&A, &Chats::newRequest);
         carol.chats->request(backend.myLink(), "carol here");
         CHECK(until([&] { return asked.count() == 1 && A.incomingRequests() == 1; }));
-        CHECK(clickName("friendsButton"));
-        CHECK(clickName("tab1"));                                              /* Pending */
-        CHECK(until([&] { return find("acceptButton") != nullptr; }, 5000));
-        CHECK(find("codeLabel") == nullptr);                                   /* nobody compares them */
+        CHECK(until([&] { return find("acceptButton") != nullptr && row_of_kind("request") != nullptr; }, 5000));   /* waiting for us, at the top of the list */
+        CHECK(row_of_kind("request")->mapToScene(QPointF(0, 0)).y() < dm_row("Bob")->mapToScene(QPointF(0, 0)).y());                                   /* what waits for an answer is above everyone else */
         CHECK(!backend.developerMode());
+        CHECK(rightClick(row_of_kind("request")));
+        CHECK(until([&] { return find("convAccept") != nullptr; }, 3000));
+        CHECK(find("convDecline") && find("convBlock") && !find("convCopyId"));   /* no ID to copy until Developer Mode is on */
+        key(Qt::Key_Escape);
+        CHECK(until([&] { return find("convAccept") == nullptr; }, 3000));
         CHECK(clickName("settingsButton"));
         CHECK(until([&] { return find("developerSwitch") != nullptr; }, 3000));
         CHECK(find("myIdField") == nullptr);
@@ -314,11 +379,17 @@ int main(int argc, char **argv)
         CHECK(until([&] { return backend.developerMode(); }, 3000));
         CHECK(until([&] { return find("myIdField") != nullptr; }, 3000));
         CHECK(find("myIdField")->property("text").toString() == backend.myId());
-        CHECK(clickName("friendsButton"));
-        CHECK(until([&] { return find("codeLabel") != nullptr; }, 5000));
-        CHECK(find("codeLabel")->property("text").toString().contains(carol.uid));
+        CHECK(rightClick(row_of_kind("request")));
+        CHECK(until([&] { return find("convCopyId") != nullptr; }, 3000));
+        QGuiApplication::clipboard()->setText("nothing yet");
+        CHECK(click(find("convCopyId")));
+        CHECK(until([&] { return QGuiApplication::clipboard()->text() == carol.uid; }, 3000));
         backend.setDeveloperMode(false);
-        CHECK(until([&] { return find("codeLabel") == nullptr; }, 3000));
+        CHECK(rightClick(row_of_kind("request")));
+        CHECK(until([&] { return find("convAccept") != nullptr; }, 3000));
+        CHECK(!find("convCopyId"));
+        key(Qt::Key_Escape);
+        CHECK(until([&] { return find("convAccept") == nullptr; }, 3000));
         CHECK(click(find("acceptButton")));                                    /* and it can be accepted without ever seeing an ID */
         CHECK(until([&] { return A.incomingRequests() == 0 && A.friendCount() == 2; }));
     }
@@ -337,19 +408,24 @@ int main(int argc, char **argv)
         auto group_rows = [&](JsonListModel *m) { int n = 0; for (const QJsonObject &o : m->items()) n += o.value("kind").toString() == "group"; return n; };
 
         /* ---- make a group from the window: a name, and which friends ---- */
-        CHECK(find("newGroupButton") == nullptr);                                                   /* no "+" beside Direct Messages */
-        CHECK(clickName("groupsButton"));                                                           /* Groups has its own page, like Friends */
-        CHECK(until([&] { return find("groupsPage") != nullptr; }, 3000));
-        CHECK(clickName("newGroupButton"));
-        CHECK(until([&] { return find("groupNameField") != nullptr; }, 3000));
+        CHECK(clickName("newConversationButton"));                                                  /* the "+" beside Direct Messages */
+        CHECK(until([&] { return find_text("friendPick", "Bob") && find_text("friendPick", "Dana"); }, 5000));
+        CHECK(find("groupNameField") == nullptr);                                                   /* one person is a conversation, not a group: no name asked */
+        CHECK(click(find_text("friendPick", "Bob")));
+        CHECK(find("groupNameField") == nullptr);
+        CHECK(until([&] { return find("pickedChip") != nullptr; }, 3000));                         /* picked people stay in view as chips */
+        CHECK(find("pickedChip")->property("text").toString() == "Bob");
+        CHECK(click(find("convSearch")));
+        typeText("da");                                                                             /* typing finds people by name, any case */
+        CHECK(until([&] { return find_text("friendPick", "Dana") != nullptr && find_text("friendPick", "Bob") == nullptr; }, 3000));
+        CHECK(find("pickedChip") && find("pickedChip")->property("text").toString() == "Bob");     /* and the pick survives the search */
+        CHECK(click(find_text("friendPick", "Dana")));
+        CHECK(until([&] { return find("groupNameField") != nullptr; }, 3000));                      /* two or more: a group, which can be named */
         CHECK(click(find("groupNameField")));
         typeText("Weekend");
-        CHECK(until([&] { return find_text("friendPick", "Bob") && find_text("friendPick", "Dana"); }, 5000));
-        CHECK(click(find_text("friendPick", "Bob")));
-        CHECK(click(find_text("friendPick", "Dana")));
-        CHECK(find("createGroupButton") && find("createGroupButton")->property("text").toString().contains("2"));
+        CHECK(find("startConversationButton") && find("startConversationButton")->property("text").toString().contains("2"));   /* Bob and Dana */
         QSignalSpy made(&A, &Chats::groupCreated);
-        CHECK(click(find("createGroupButton")));
+        CHECK(click(find("startConversationButton")));
         CHECK(until([&] { return made.count() == 1; }));
         const QString gid = made.at(0).at(0).toString();
         CHECK(until([&] { return A.currentIsGroup() && A.current() == gid && find("composer") != nullptr; }, 5000));   /* the window opens it */
@@ -412,14 +488,12 @@ int main(int argc, char **argv)
         QSignalSpy invited(&A, &Chats::newGroupInvite);
         B.createGroup("Bob's trip", { backend.myId() });
         CHECK(until([&] { return A.incomingGroupInvites() == 1 && invited.count() == 1; }));
-        CHECK(find("newGroupButton") == nullptr);                                                   /* no "+" beside Direct Messages */
-        CHECK(clickName("groupsButton"));                                                           /* invitations are on the Groups page, not among friend requests */
-        CHECK(until([&] { return find("acceptGroupButton") != nullptr; }, 5000));
+        CHECK(until([&] { return find("acceptGroupButton") != nullptr && row_of_kind("invite") != nullptr; }, 5000));   /* pinned at the top of the list */
         {
             bool shown = false, counted = false;
             walk(win->contentItem(), [&](QQuickItem *i) {
                 const QString t = i->isVisible() ? i->property("text").toString() : QString();
-                if (t.contains("invited you to a group")) {
+                if (t.contains("invited you")) {
                     shown = true;
                     counted = counted || t.contains(QRegularExpression("\\d")) || t.contains("people") || t.contains("member");   /* it does not say how many are in it */
                 }
@@ -447,6 +521,165 @@ int main(int argc, char **argv)
         CHECK(until([&] { return A.incomingGroupInvites() == 0; }));
         settle(500);
         CHECK(group_rows(conv_a) == 1);
+
+        /* ---- scrolling: the wheel scrolls a list, dragging it with the mouse does not ---- */
+        {
+            /* (a chat of its own for this, at the end: sixty more lines in the first one would move everything the other checks look for) */
+            CHECK(click(dm_row("Bob")));
+            CHECK(until([&] { return A.current() == bob.uid && find("messageList") != nullptr; }, 3000));
+            B.open(backend.myId());
+            for (int i = 0; i < 60; i++)
+                B.send(QString("filler %1").arg(i));
+            CHECK(until([&] { return shows("filler 59"); }, 15000));
+            QQuickItem *list = find("messageList");
+            CHECK(list != nullptr);
+            auto y = [&] { return list->property("contentY").toReal(); };
+            auto atBottom = [&] { return list->property("atBottom").toBool(); };
+            CHECK(until([&] { return atBottom() && list->property("contentHeight").toReal() > list->height() + 60; }, 5000));
+            const qreal bottom = y();
+
+            /* drag the content downwards (towards earlier messages) from the blank gutter beside the pictures: it stays where it is */
+            const QPoint from = list->mapToScene(QPointF(8, 60)).toPoint();
+            QTest::mousePress(win, Qt::LeftButton, {}, from);
+            for (int step = 1; step <= 10; step++)
+                QTest::mouseMove(win, from + QPoint(0, step * 30));
+            QTest::mouseRelease(win, Qt::LeftButton, {}, from + QPoint(0, 300));
+            settle(300);
+            CHECK(y() == bottom && atBottom());
+
+            /* the wheel does scroll it, and it stops following new messages until it is back at the end */
+            auto first_visible = [&](QString &text, qreal &top_y) {
+                const qreal top = list->mapToScene(QPointF(0, 0)).y();
+                top_y = 1e9;
+                for (QQuickItem *i : all("messageText")) {
+                    const qreal yy = i->mapToScene(QPointF(0, 0)).y();
+                    if (yy >= top && yy < top_y) {
+                        top_y = yy;
+                        text = i->property("text").toString();
+                    }
+                }
+                return top_y < 1e9;
+            };
+            auto *msgs = static_cast<JsonListModel *>(A.messages());
+            wheel(list, 1);                                                                            /* one notch is Theme.wheelStep pixels */
+            CHECK(until([&] { return y() == bottom - 60; }, 2000));
+            CHECK(!list->property("stickToEnd").toBool());
+            wheel(list, -10);                                                                          /* and further than the end is the end */
+            CHECK(until([&] { return y() == bottom; }, 2000));
+            CHECK(list->property("stickToEnd").toBool());
+
+            /* only the newest page is here; scrolling up to within a screenful of the top fetches the one before, which goes above: what you were
+             * reading moves only by what you scrolled, not by the page that was added */
+            /* (everything that arrived while the chat was open is already held, so open it afresh: then it is the newest page and no more) */
+            CHECK(click(find("homeButton")));
+            CHECK(until([&] { return A.current().isEmpty(); }, 3000));
+            CHECK(click(dm_row("Bob")));
+            CHECK(until([&] { return A.current() == bob.uid && find("messageList") != nullptr && msgs->rowCount() > 0 && atBottom(); }, 5000));
+            settle(500);
+            CHECK(A.hasOlder());
+            {
+                const int rows_first = msgs->rowCount();
+                QString anchor;
+                qreal anchor_y = 0;
+                CHECK(first_visible(anchor, anchor_y));
+                int steps = 0;
+                while (steps < 20 && msgs->rowCount() == rows_first) {
+                    wheel(list, 1);
+                    steps++;
+                    settle(150);
+                }
+                CHECK(msgs->rowCount() > rows_first);
+                settle(500);
+                bool seen = false;
+                qreal at = 0;
+                for (QQuickItem *i : all("messageText"))
+                    if (i->property("text").toString() == anchor) {
+                        at = i->mapToScene(QPointF(0, 0)).y();
+                        seen = true;
+                    }
+                CHECK(seen && std::abs(at - (anchor_y + 60 * steps)) < 100);
+                wheel(list, -1000);                                                                    /* back to the end for what follows */
+                CHECK(until([&] { return atBottom(); }, 3000));
+            }
+            const qreal bottom2 = y();
+            wheel(list, 1000);                                                                         /* up as far as it goes: it moves, and never past the top */
+            CHECK(until([&] { return y() < bottom2 - 100; }, 2000));
+            CHECK(y() >= list->property("originY").toReal());
+            wheel(list, -1000);
+            CHECK(until([&] { return atBottom(); }, 3000));
+
+            /* reading back: each time the top is reached the page before arrives, and what you were looking at stays where it was */
+            int loads = 0;
+            for (int round = 0; round < 12 && A.hasOlder(); round++) {
+                const int rows = msgs->rowCount();
+                wheel(list, 1000);
+                QString was;
+                qreal was_y = 0;
+                CHECK(until([&] { return first_visible(was, was_y); }, 2000));
+                CHECK(until([&] { return msgs->rowCount() > rows || !A.hasOlder(); }, 5000));           /* the earlier page came (or there was no more) */
+                settle(400);
+                if (msgs->rowCount() == rows)
+                    continue;
+                loads++;
+                qreal now_y = 0;
+                bool same = false;
+                for (QQuickItem *i : all("messageText"))
+                    if (i->property("text").toString() == was) {
+                        now_y = i->mapToScene(QPointF(0, 0)).y();
+                        same = true;
+                    }
+                CHECK(same && std::abs(now_y - was_y) < 80);                                          /* what you were reading did not jump */
+            }
+            (void)loads;
+            CHECK(!A.hasOlder());                                                                       /* all the way back */
+            CHECK(msgs->at(0).value("kind").toString() == "message" && msgs->at(0).value("deleted").toBool());   /* the first thing said (later taken back) is there */
+        }
+        /* ---- right-click on a conversation: the group's menu, and the friend's ---- */
+        {
+            QQuickItem *g = dm_row("Bob's trip");
+            CHECK(g && rightClick(g));
+            CHECK(until([&] { return find("convOpen") != nullptr; }, 3000));
+            CHECK(find("convRename") && find("convLeave") && !find("convRemove") && !find("convBlock"));
+            CHECK(click(find("convRename")));
+            CHECK(until([&] { return find("renameDialogField") != nullptr; }, 3000));
+            find("renameDialogField")->forceActiveFocus();
+            key(Qt::Key_A, Qt::ControlModifier);
+            typeText("Bob trip two");
+            key(Qt::Key_Return);
+            CHECK(until([&] { return group_rows(conv_a) == 1 && dm_row("Bob trip two") != nullptr; }, 5000));
+
+            /* leaving asks first: Cancel keeps the group, the red button leaves it */
+            g = dm_row("Bob trip two");
+            CHECK(g && rightClick(g));
+            CHECK(clickName("convLeave"));
+            CHECK(until([&] { return find("confirmOk") != nullptr; }, 3000));
+            CHECK(click(find("confirmCancel")));
+            CHECK(until([&] { return find("confirmOk") == nullptr; }, 3000));
+            settle(300);
+            CHECK(group_rows(conv_a) == 1);
+            CHECK(rightClick(dm_row("Bob trip two")));
+            CHECK(clickName("convLeave"));
+            CHECK(until([&] { return find("confirmOk") != nullptr; }, 3000));
+            CHECK(click(find("confirmOk")));
+            CHECK(until([&] { return group_rows(conv_a) == 0; }, 5000));
+
+            /* a friend: removing asks first too */
+            const int friends = A.friendCount();
+            QQuickItem *f = dm_row("Bob");
+            CHECK(f && rightClick(f));
+            CHECK(until([&] { return find("convRemove") != nullptr; }, 3000));
+            CHECK(find("convBlock") && !find("convRename") && !find("convLeave"));
+            CHECK(click(find("convRemove")));
+            CHECK(until([&] { return find("confirmOk") != nullptr; }, 3000));
+            CHECK(click(find("confirmCancel")));
+            settle(300);
+            CHECK(A.friendCount() == friends);
+            CHECK(rightClick(dm_row("Bob")));
+            CHECK(clickName("convRemove"));
+            CHECK(until([&] { return find("confirmOk") != nullptr; }, 3000));
+            CHECK(click(find("confirmOk")));
+            CHECK(until([&] { return A.friendCount() == friends - 1; }, 5000));
+        }
     }
 
     return failures ? 1 : 0;
