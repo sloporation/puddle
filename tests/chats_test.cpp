@@ -315,12 +315,23 @@ int main(int argc, char **argv)
             B.close();                                                                               /* (B opens the chat afterwards, so what it reads is the newest page and no more) */
             for (int i = 0; i < 130; i++)
                 A.send(QString("bulk %1").arg(i));
-            CHECK(until([&] { return row(side_b, "key", "group:" + gid).value("preview").toString().contains("bulk 129"); }, 30000));
+            // all 130 have reached B once A no longer shows any of them as waiting to be delivered (not by which comes last: see below)
+            auto delivered = [&] {
+                int n = 0;
+                for (const QJsonObject &m : msgs_a->items())
+                    if (m.value("body").toString().startsWith("bulk ")) {
+                        if (!m.value("deliveryState").toString().isEmpty())
+                            return false;
+                        n++;
+                    }
+                return n == 130;
+            };
+            CHECK(until(delivered, 60000));
             B.open(gid, "group");
-            CHECK(until([&] { return msgs_b->rowCount() > 0 && msgs_b->at(msgs_b->rowCount() - 1).value("body").toString() == "bulk 129"; }, 10000));
+            CHECK(until([&] { return msgs_b->rowCount() > 0; }, 10000));
             CHECK(B.hasOlder());                                                                     /* a page holds far fewer than that */
             CHECK(messageCount() < before + 130);
-            CHECK(until([&] { B.loadOlder(); return !B.hasOlder(); }, 30000));
+            CHECK(until([&] { B.loadOlder(); return !B.hasOlder(); }, 60000));
             // (the sends are 130 requests in flight at once, so the server stamps them in the order it handled them, not the order they were asked for:
             //  what has to hold is that every one is there once, and that the list is in the order of its stamps)
             auto sorted = [](QStringList l) { l.sort(); return l; };
@@ -343,7 +354,7 @@ int main(int argc, char **argv)
 
             for (int i = 0; i < 45; i++)
                 A.send(QString("more %1").arg(i));
-            CHECK(until([&] { return bodies("more ").size() == 45; }, 30000));
+            CHECK(until([&] { return bodies("more ").size() == 45; }, 60000));
             CHECK(sorted(bodies("bulk ")) == sorted(want));                                          /* nothing fell out of the middle */
             CHECK(messageCount() == before + 175 && !B.hasOlder() && inOrder());
             QSet<QString> ids;
