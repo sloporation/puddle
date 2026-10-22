@@ -1,0 +1,448 @@
+STREAM PROTOCOL v1
+==================
+
+How one server talks to another. One protocol, shared by Puddle (identity lives on your own
+computer, direct messages go straight between machines) and Concord (a federated, Discord-like
+service where a profile can move between servers). The same endpoints serve both; only the
+hosting, and the user experience layered on top, differ.
+
+This file is the plain-text specification, written to be read by people and used as the input
+for generating handlers and clients. The machine-readable form is api/federation.yaml
+(OpenAPI 3.1); where the two disagree, federation.yaml wins and this file is the bug. The
+reasoning behind the rules is in docs/streams.md, docs/identity.md, docs/storage.md and
+docs/groups.md.
+
+Status: draft, v0.1. Section 12 lists what is not decided.
+
+
+1. TERMS
+--------
+
+peer        Either end of a stream: a Puddle, or (later) a Pond or a Concord server. A peer is an
+            identity (a key chain) plus one or more network addresses.
+Puddle      A peer run by one person on their own computer.
+Pond        A community peer with channels and many members. Not designed yet; it will speak the
+            same core protocol.
+Stream      An authorised connection between two peers. Nothing is sent between two peers
+            without one, apart from asking for one.
+Profile     How a person appears to others. A peer may hold several and show a different one on
+            each stream.
+Chat        A log of signed events: a direct message between two users, or a group.
+Event       One signed, immutable record in a chat (message, edit, redact, member.join, ...).
+Sender      The peer making a request. Recipient: the peer answering it.
+
+Where the two projects differ, the UX differs and the wire format does not. A Concord server is
+simply a peer that is always on and may host identities for people who do not run their own.
+(How a hosted identity proves itself is open; see 12.)
+
+
+2. CONVENTIONS
+--------------
+
+2.1  Transport
+     JSON over HTTPS. Every path is under /stream/v1. UTF-8. TLS certificates are not issued by
+     a public authority in the Puddle case; peers pin each other's certificate fingerprint
+     (tls_fp, see /address).
+
+2.2  Methods
+     Only GET and POST. GET reads and never changes anything. POST does everything else, with
+     the verb in the path. No PUT, PATCH, DELETE or HEAD.
+
+2.3  Nothing is public
+     Every request is signed (section 3). A request that fails any check up to and including the
+     signature gets 404, identical to a path that does not exist, so a stranger learns nothing,
+     not even that the address is a peer. 401 and 403 are only ever sent to a sender that has
+     already authenticated.
+
+2.4  Size limits
+     Decided per route before the body is read. A body over its limit is answered 404. Chunked
+     request bodies are not supported. No body is over 4 MiB.
+
+2.5  Identifiers
+     user id     52 characters of lowercase base32 (a-z, 2-7): the hash of the first signing key
+                 together with the commitment to the first roll key. It never changes, even when
+                 keys are rolled.
+     event id    64 lowercase hex: SHA-256 of the event's exact bytes.
+     chat id     1 to 128 characters of A-Z a-z 0-9 _ -
+                   direct message: base32(SHA-256("dm" || sort(userA, userB)))
+                   group:          base32(SHA-256("group\n" creator "\n" ts "\n" nonce))
+     key id      hex SHA-256 of a public signing key.
+     time        UTC milliseconds since the epoch. An event's ts is the sender's clock and is
+                 only checked to fall between the years 2000 and 2100.
+
+2.6  Events travel as strings
+     An event's id is the SHA-256 of its exact bytes, and its signature covers the same bytes, so
+     an event is carried as the raw JSON text inside a JSON string. Never parse and re-serialise
+     it before hashing or verifying. Implementations must keep the original bytes.
+
+2.7  Errors
+     Authenticated errors carry {"error": "<text>", "code": "<code>"}. Codes: clock_skew,
+     replayed, no_stream. An unauthenticated failure is a bare 404 with no code.
+
+
+3. AUTHENTICATION
+-----------------
+
+Every request carries
+
+    X-Puddle-Signature: v1 id=<sender id>; kid=<key id>; ts=<ms>; nonce=<base64>; sig=<base64>
+
+sig is an Ed25519 signature, by the sender's current signing key, over these lines joined by "\n":
+
+    puddle-request-v1
+    <METHOD>
+    <request target: path and query, as sent>
+    <hex SHA-256 of the body; of the empty string for a GET>
+    <ts>
+    <nonce>
+    <the recipient's user id>
+
+The recipient checks in this order. Steps 1 to 3 fail with 404 and nothing else:
+
+    1. The recipient id in the signature is its own. (Only POST /access also accepts "*", for a
+       first request to an address whose owner is not yet known.)
+    2. The sender is known and kid is its current key. Retired keys cannot start requests.
+       Exceptions: POST /access is checked against the chain in its body; POST /identity is
+       checked by chain continuity.
+    3. The signature verifies.
+
+Only now is the sender authenticated, so only now may the answer be specific:
+
+    4. ts is within five minutes of the recipient's clock, else 401 with code clock_skew
+       (the reply states its own time).
+    5. The nonce has not been seen in that window, else 401 with code replayed.
+    6. The sender has a stream in a state the route allows, else 403 with code no_stream.
+
+Events inside chats are signed separately (see Event, section 5) so history signed before a key
+roll still verifies.
+
+
+4. IDENTITY AND PEER OBJECTS
+----------------------------
+
+Chain
+    A peer's identity chain: the text of its chain.jsonl, one record per line exactly as written
+    ({"record":{...},"sig":"..."}); signatures cover the exact bytes. At most 64 KiB. A reader
+    verifies it with the rules in docs/identity.md and pins it to the id it expects. Carried as a
+    string.
+
+Peer
+    {
+      "id":      user id,
+      "profile": Profile,
+      "address": "host:port" this peer can be reached at,
+      "chain":   Chain
+    }
+
+Profile
+    display_name  string, 1-64 chars, required
+    blurb         string, up to 160 chars     (a short line)
+    about         string, up to 2000 chars    (the longer description)
+    pronouns      string, up to 32 chars
+    color         Color
+    avatar, banner, background   MediaRef
+
+    Color    {"colors": ["#rrggbb", ...] (1-5), "angle": 0-360}. One colour is solid, two to
+             five make a gradient. angle defaults to 180.
+    MediaRef {"hash": 64 hex, "mime": image/png | image/jpeg | image/gif | image/webp,
+              "size": integer}. Fetched by hash from GET /media.
+
+Scope
+    Limits a stream to groups. Absent means a full friendship.
+    {"group": chat id, "join": SignedEvent}, where join is the requester's own member.join for
+    that group, signed by a key in the chain they sent.
+
+SignedEvent
+    {
+      "id":    event id (SHA-256 of the bytes of "event"),
+      "event": the event's exact JSON text, as a string,
+      "sig":   "<key id>:<base64 Ed25519 signature>"
+    }
+    The signature covers "puddle-event-v1\n" followed by the event's bytes. The key id is outside
+    the signed bytes, so a peer that has rolled keys can sign the same event again without
+    changing its id.
+
+
+5. EVENTS
+---------
+
+An event is one compact JSON object, at most 16 KiB for a message (1 MiB absolute ceiling),
+with no duplicate top-level keys:
+
+    type     string
+    chat     chat id
+    sender   user id
+    ts       integer, sender's time in UTC ms (strictly increasing per sender)
+    body     text, for message, edit, chat.rename
+    ref      target event id, for edit, redact, and replies
+    member   user id, for member.invite
+
+Types in v1:
+
+    message        body is 1-4000 chars of UTF-8, no control characters except newline and tab.
+                   ref (optional) is the message being replied to.
+    edit           body is the new text; ref is the message edited.
+    redact         no body; ref is the message taken back. A request to hide, not an erase.
+    chat.create    first event of a group, by its creator. Carries name and nonce.
+    chat.rename    any member; body is the new name.
+    member.invite  any member; member is the invitee.
+    member.join    the invitee, saying yes.
+    member.leave   a member or invitee, for themselves; also a "no" to an invitation.
+
+Rules every implementation applies identically, so the same events give the same view:
+
+    - An edit or redact counts only if its sender wrote the message it names and its ts is later
+      than the message's. The last valid edit wins; a redact beats any edit. An edit or redact of
+      a non-message, or of an event not yet held, changes nothing.
+    - Chat order is by (ts, id).
+    - Group membership: only a member can invite or rename; a join counts only from someone
+      invited and only if newer than the invitation; a leave newer than your last change takes
+      you out; a later invitation can bring a leaver back; the newest name wins; never more than
+      50 members and invited together. Nobody can remove another member. (docs/groups.md)
+
+An event is stored and forwarded exactly as signed. Duplicates (same id) are ignored, which makes
+delivery idempotent.
+
+
+6. STREAM LIFECYCLE
+-------------------
+
+States, per peer:
+
+    pending_out   we asked; they have not answered
+    pending_in    they asked; the owner has not answered
+    active        trusted both ways; messages may flow
+    scoped        group-only connection (section 8)
+    closed        dried up (deleted or declined); either side may ask again
+
+A block is not a state. It is a local list of user ids that overrides everything. There is
+deliberately no endpoint for blocks: a blocked sender is answered exactly like an ordinary
+pending request and is never told.
+
+Asking for a stream, in order:
+
+    1. The owner of A is given B's address (host, host:port or [ipv6]), optionally with an invite
+       token. No user id is typed or compared; who lives there is learned from the answer.
+    2. A makes a random 32-hex ticket and sends POST /access to B, signed for recipient "*".
+    3. B validates the request. Anything malformed or unauthentic: 404. Otherwise 202 with an
+       empty body, always, whatever it then decides. Privately it drops the request if the
+       sender is blocked, B refuses requests, the sender is rate-limited (five an hour), or B is
+       full; approves at once for a valid invite token or an open policy; otherwise records
+       pending_in and tells its owner.
+    4. When B approves, it calls POST /access/result on A with its own chain, profile and A's
+       ticket, retrying with backoff while A is away. A accepts it only if the ticket is one it
+       made and has not spent, the chain belongs to the claimed id, and a key in that chain signed
+       the result. That is when A learns B's id.
+    5. A declined request is answered with approved=false the same way. A requester that missed
+       the answer may ask POST /access/status.
+
+Because a refusal looks the same as no answer, "closed" means "ignore strangers", not "reject".
+
+
+7. ENDPOINTS
+------------
+
+All paths are relative to /stream/v1. "Auth" says which section-3 checks apply. Unless stated,
+bodies are application/json.
+
+7.1  POST /access                                    ask for a stream
+     Auth:     chain in the body proves the requester (not a known sender). May be signed for "*".
+     Limit:    96 KiB.
+     Request:  {
+                 "requester": Peer,
+                 "message":   string, up to 500 chars (optional),
+                 "invite":    invite token (optional),
+                 "ticket":    32 hex (optional),
+                 "scope":     Scope (optional)
+               }
+     Reply:    202, empty body, always, once the request authenticates. 404 if it does not.
+     Notes:    Only display_name, blurb, about and pronouns of the profile are read at this
+               point (cleaned, length-limited); pictures come later over the stream. With scope
+               set it is a group-only request (section 8).
+
+7.2  POST /access/result                             tell the requester the decision
+     Auth:     chain in the body proves the responder. Accepted only if the ticket matches one
+               the receiver made and has not spent (or, for scoped answers, per section 8).
+     Request:  {
+                 "responder": Peer,
+                 "approved":  boolean,
+                 "ticket":    32 hex (optional),
+                 "scoped":    boolean (optional; true answers only a group-only request),
+                 "scope":     Scope (optional)
+               }
+     Reply:    202 always once authenticated. What came of it shows only in the receiver's own
+               state.
+
+7.3  POST /access/status                             what became of my request
+     Auth:     chain-proven, like /access (the target may hold nothing about the requester).
+     Request:  {"requester": Peer}
+     Reply:    200 {"state": "pending" | "approved" | "declined", "responder": Peer (with approved)}
+               "approved" only to a requester with an active stream; "declined" only to one whose
+               stream was closed; "pending" to everyone else, so a block, a closed door and an
+               unseen request look the same.
+
+7.4  POST /close                                     the stream is closed
+     Auth:     steps 1-5. Sender's stream required.
+     Request:  {"scope": Scope (optional)}
+     Reply:    204 closed; 403 no_stream if there is nothing to close.
+     Notes:    Sent when the owner deletes a stream or withdraws a pending request. A block sends
+               nothing. Chat history is never removed by closing.
+
+7.5  POST /events                                    deliver signed events for one chat
+     Auth:     steps 1-6. Open stream required (friend, or scoped for group events).
+     Limit:    100 events, 256 KiB. More is refused whole.
+     Request:  {"chat": chat id, "events": [SignedEvent, ...]}
+     Reply:    200 {
+                 "accepted":  [event id, ...],
+                 "duplicate": [event id, ...],
+                 "rejected":  [{"id": event id, "reason": string}, ...]
+               }
+               400 if chat is not a chat the sender may use here (for direct messages, the one
+               between the two of you).
+     Rejection reasons: malformed, too_large, bad_id, bad_signature, unknown_key (signed by a
+               key that is not the sender's current one), unsupported_type, wrong_chat,
+               wrong_sender, bad_time, bad_body, storage_error.
+     Notes:    Safe to repeat. Each event is judged on its own. Only the sender's current key
+               delivers; a replaced key (a stolen phone) cannot.
+
+7.6  POST /profile                                   the profile you see me as has changed
+     Auth:     steps 1-6. Open stream required.
+     Request:  {"profile": Profile}
+     Reply:    204 recorded; 400 if any field is invalid (colour not #rrggbb, malformed media
+               hash, an image kind not taken, a size over the cap).
+     Notes:    The receiver rebuilds the profile from the fields it understands and then fetches
+               any pictures it lacks from GET /media.
+
+7.7  GET /media?hash=<64 hex>                        an image from the sender's profile
+     Auth:     steps 1-6. Open stream required.
+     Reply:    200 with the image (image/png, image/jpeg, image/gif or image/webp); 404 for
+               anything not in the profile the owner shows this caller.
+     Notes:    The fetcher checks the SHA-256, the size and the kind against the MediaRef and
+               keeps nothing that does not match. Size cap 25 MiB (placeholder).
+
+7.8  GET /identity                                   this peer's key chain
+     Auth:     steps 1-6. Known peer only.
+     Reply:    200 {"chain": Chain}.
+     Notes:    Used by an owner recovering after losing a device.
+
+7.9  POST /identity                                  my keys rolled
+     Auth:     by chain continuity: the body's chain must be the chain the recipient already holds
+               for that id plus further records, each verifying.
+     Request:  {"chain": Chain}
+     Reply:    202 always (any stranger can attach a chain of their own, so the answer says
+               nothing). Anything that does not extend a held chain is ignored.
+     Notes:    Sent after a roll to every peer holding the chain, ahead of anything else queued
+               for them; queued items are re-signed with the new key.
+
+7.10 POST /address                                   where to reach me now
+     Auth:     steps 1-6. Known peer.
+     Request:  {"record": string, "sig": "<key id>:<base64>"}
+               record is the exact text
+               {"type":"address","id":..,"addresses":[..],"tls_fp":"<64 hex>","seq":N,"ts":..}
+               (tls_fp optional); sig is an Ed25519 signature over "puddle-address-v1\n"
+               followed by those bytes, by the sender's current key.
+     Reply:    204 recorded; 400 bad_record if it does not check out.
+     Notes:    The highest seq wins; a record that is not newer, or carries no addresses, changes
+               nothing. A tls_fp is accepted without asking because a key we already trust signed
+               it. Unspecified, multicast and link-local addresses are refused. Sent to every
+               active stream when an address or certificate changes. Peers try all known
+               addresses, newest first.
+
+7.11 POST /group/invite                              invite a friend into a group
+     Auth:     steps 1-6. Full friend only (403 no_stream otherwise).
+     Request:  {
+                 "group":   chat id,
+                 "create":  {"event": string, "sig": string},   the group's chat.create
+                 "invite":  {"event": string, "sig": string},   sender's member.invite naming the recipient
+                 "members": [{"id": user id, "state": "invited" | "member",
+                              "ts": integer, "address": "host:port" (optional)}, ...]
+               }
+     Reply:    202 whatever the owner decides later; 400 if malformed.
+     Notes:    The recipient verifies the group id, the invitation (signed by the sender's
+               current key) and that the sender is a member; it takes the roster on the sender's
+               word. Yes is signalled by member.join to the members; no by member.leave to the
+               inviter.
+
+
+8. GROUP-ONLY CONNECTIONS ("scoped streams")
+---------------------------------------------
+
+Members of a group who share no friendship still need to talk. When someone joins, they send
+POST /access with scope set to each member they hold no stream with. The target approves, and
+answers with /access/result scoped=true, if:
+
+    - the target is in that group, or invited to it and not yet answered,
+    - the requester is invited (or already in),
+    - the join is the requester's own and signed by a key in the chain they sent, and
+    - the requester is not blocked.
+
+The stream is recorded as `scoped`. It allows group events for groups both are in, key and
+address updates, and profile pictures. It does not allow direct messages, friend requests or
+anything else a friend can do. When the last shared group is left, the connection is closed (and
+the other side told). A block closes it at once.
+
+Cost, stated plainly: every member of a group learns every other member's address. There is no
+mode that hides it.
+
+
+9. DELIVERY AND RETRY
+---------------------
+
+Sending is done through an outbox. Offline peers are retried; what is still owed to a peer is
+kept on its stream record so a restart loses nothing. Everything idempotent can be repeated:
+events by id, access/result by ticket, address by seq. The schedule is in docs/roadmap.md.
+
+
+10. RATE AND CAPACITY (suggested)
+---------------------------------
+
+    Access requests            5 per hour per requester
+    Waiting access requests    200; 5000 on record
+    Events per delivery        100 events, 256 KiB
+    Group size                 50 members and invited together
+    Group invitations waiting  50 per owner
+    Request clock tolerance    5 minutes
+    Request body               4 MiB at most
+
+Dropped requests are dropped silently, never refused with a reason.
+
+
+11. ENDPOINT INDEX (for code generation)
+----------------------------------------
+
+    METHOD  PATH                      HANDLER            AUTH               OK    ERRORS
+    POST    /stream/v1/access         requestAccess      chain in body      202   404
+    POST    /stream/v1/access/result  sendAccessResult   chain in body      202   404
+    POST    /stream/v1/access/status  getAccessStatus    chain in body      200   404
+    POST    /stream/v1/close          closeStream        signature          204   401 403 404
+    POST    /stream/v1/events         deliverEvents      signature          200   400 401 403 404
+    POST    /stream/v1/profile        pushProfile        signature          204   400 401 403 404
+    GET     /stream/v1/media          getMedia           signature          200   401 403 404
+    GET     /stream/v1/identity       getIdentityChain   signature          200   401 403 404
+    POST    /stream/v1/identity       pushIdentityChain  chain continuity   202   404
+    POST    /stream/v1/address        pushAddress        signature          204   400 401 404
+    POST    /stream/v1/group/invite   inviteToGroup      signature          202   400 401 403 404
+
+Handler names match operationId in api/federation.yaml. The owner's own app and phone clients
+use a different, separate API (api/openapi.yaml, under /api/v1) and are not part of this
+protocol.
+
+
+12. NOT DECIDED
+---------------
+
+    - Hosted identities (the Concord case). A Concord server holding an identity for someone who
+      does not run their own needs a rule for who holds the signing keys, and how a profile moves
+      to another server while keeping its user id. The key chain and /identity already allow the
+      id to survive a key roll; moving hosts is a further use of the same mechanism, not yet
+      specified.
+    - Ponds and Concord servers as multi-member spaces: channels, roles, history held by the
+      server rather than replicated between peers. Same core, extra routes under /stream/v1,
+      not designed.
+    - Retry and backoff numbers; where the nonce cache lives across restarts.
+    - Friend codes and a stronger first-contact handshake.
+    - Syncing chat history by day chunks (docs/storage.md, "Index"). Events are pushed on send
+      only; a peer that missed some has no way yet to ask for them.
+    - Key rotation records beyond the owner-triggered roll.
+    - What a receiver does about oversized or booby-trapped images.
+    - Whether a group creator or anyone else can remove a member (docs/discuss-later.md).
