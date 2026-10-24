@@ -39,6 +39,15 @@ static int h_owner(const puddle_call *c, puddle_jw *w)
     return 200;
 }
 static int h_empty(const puddle_call *c, puddle_jw *w) { (void)c; (void)w; return 202; }
+static int h_params(const puddle_call *c, puddle_jw *w)
+{
+    puddle_jw_object(w);
+    puddle_jw_str(w, "user", puddle_param(c, "user"));
+    puddle_jw_str(w, "message", puddle_param(c, "message"));
+    puddle_jw_str(w, "none", puddle_param(c, "none"));
+    puddle_jw_end_object(w);
+    return 200;
+}
 static int h_toolong(const puddle_call *c, puddle_jw *w)
 {
     (void)c;
@@ -75,6 +84,10 @@ static const puddle_route routes[] = {
     { "POST", "/c",      PUDDLE_AUTH_CHAIN, 100, h_owner, chain_key },
     { "GET",  "/empty",  PUDDLE_AUTH_OWNER, 0,   h_empty, NULL },
     { "GET",  "/toolong", PUDDLE_AUTH_OWNER, 0,  h_toolong, NULL },
+    { "GET",  "/u/me",   PUDDLE_AUTH_OWNER, 0,   h_empty, NULL },
+    { "GET",  "/u/{user:id}", PUDDLE_AUTH_OWNER, 0, h_params, NULL },
+    { "POST", "/u/{user:id}/m/{message:event}/edit", PUDDLE_AUTH_OWNER, 10, h_params, NULL },
+    { "POST", "/i/{token:token}/revoke", PUDDLE_AUTH_OWNER, 0, h_empty, NULL },
 };
 
 static puddle_ctx ctx;
@@ -135,6 +148,39 @@ int main(void)
     puddle_router R = { routes, sizeof routes / sizeof routes[0], &ctx };
     reply r;
     char sig[600];
+
+    /* ---- path parameters ---- */
+    {
+        char path[300], want[200];
+        const char *ev = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        r = call(&R, "GET", "/u/me", NULL, NULL, 1);
+        CHECK(r.status == 202);                                   /* a literal segment, not a malformed id */
+        snprintf(path, sizeof path, "/u/%s", alice_id);
+        r = call(&R, "GET", path, NULL, NULL, 1);
+        CHECK(r.status == 200);
+        snprintf(want, sizeof want, "\"user\":\"%s\"", alice_id);
+        CHECK(strstr(body_of(&r), want) != NULL);
+        CHECK(strstr(body_of(&r), "\"none\":\"\"") != NULL);
+        r = call(&R, "GET", "/u/notanid", NULL, NULL, 1);
+        CHECK(r.status == 404);                                   /* the wrong form is a path that does not exist */
+        r = call(&R, "GET", path, NULL, NULL, 0);
+        CHECK(r.status == 404);                                   /* and the owner check still applies */
+        snprintf(path, sizeof path, "/u/%s/m/%s/edit", alice_id, ev);
+        r = call(&R, "POST", path, NULL, "{}", 1);
+        CHECK(r.status == 200 && strstr(body_of(&r), ev) != NULL);
+        r = call(&R, "GET", path, NULL, NULL, 1);
+        CHECK(r.status == 405);                                   /* the path is there, for POST */
+        snprintf(path, sizeof path, "/u/%s/m/%.63s/edit", alice_id, ev);
+        r = call(&R, "POST", path, NULL, "{}", 1);
+        CHECK(r.status == 404);                                   /* 63 hex is not an event id */
+        snprintf(path, sizeof path, "/u/%s/m/%s/edit/more", alice_id, ev);
+        r = call(&R, "POST", path, NULL, "{}", 1);
+        CHECK(r.status == 404);
+        r = call(&R, "POST", "/i/abc-DEF_123/revoke", NULL, NULL, 1);
+        CHECK(r.status == 202);
+        r = call(&R, "POST", "/i/a.b/revoke", NULL, NULL, 1);
+        CHECK(r.status == 404);
+    }
 
     /* ---- owner routes ---- */
     r = call(&R, "GET", "/o", NULL, NULL, 1);

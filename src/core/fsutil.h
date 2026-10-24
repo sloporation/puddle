@@ -20,6 +20,17 @@ int puddle_write_file_atomic(const char *dir, const char *final_path, const void
 /* Flush a directory entry, so a newly created file survives a crash. */
 int puddle_fsync_dir(const char *path);
 
+/* The names in a directory, one at a time, without "." and "..", the same on every OS:
+ *     puddle_dir *d = puddle_dir_open(path);   // NULL with errno set if it can't be read
+ *     const char *name;
+ *     while ((name = puddle_dir_next(d))) ...  // valid until the next call
+ *     puddle_dir_close(d);
+ * Order is whatever the file system gives. */
+typedef struct puddle_dir puddle_dir;
+puddle_dir *puddle_dir_open(const char *path);
+const char *puddle_dir_next(puddle_dir *d);
+void puddle_dir_close(puddle_dir *d);
+
 #ifdef __cplusplus
 }
 #endif

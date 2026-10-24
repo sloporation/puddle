@@ -19,6 +19,51 @@ QString shortId(const QString &id)
     return id.left(8);
 }
 
+// The owner API names what it acts on in the path: "/api/v1/<kind>/<id>/<rest>".
+QString path(const QString &kind, const QString &id, const QString &rest = QString())
+{
+    return QStringLiteral("/api/v1/%1/%2").arg(kind, id) + (rest.isEmpty() ? QString() : QStringLiteral("/") + rest);
+}
+
+QString idOf(const QJsonValue &person) { return person.toObject().value("id").toString(); }
+
+// A page of a conversation holds its messages and what happened to the group, in one list told apart by `type`. The window keeps the two
+// apart and in the shape it reads: who said it as `sender`, and an `edited` flag beside `edited_at`.
+QJsonObject asMessage(QJsonObject m)
+{
+    m.insert("sender", idOf(m.value("author")));
+    if (m.contains("edited_at"))
+        m.insert("edited", true);
+    return m;
+}
+
+QJsonObject asNotice(QJsonObject n)
+{
+    n.insert("sender", idOf(n.value("author")));
+    n.insert("type", n.value("type").toString().mid(6)); // "group_join" -> "join"
+    if (n.contains("member"))
+        n.insert("member", idOf(n.value("member")));
+    return n;
+}
+
+QList<QJsonObject> messagesOf(const QJsonDocument &doc)
+{
+    QList<QJsonObject> out;
+    for (const QJsonValue &v : doc.object().value("items").toArray())
+        if (v.toObject().value("type").toString() == QLatin1String("default"))
+            out.append(asMessage(v.toObject()));
+    return out;
+}
+
+QList<QJsonObject> noticesOf(const QJsonDocument &doc)
+{
+    QList<QJsonObject> out;
+    for (const QJsonValue &v : doc.object().value("items").toArray())
+        if (v.toObject().value("type").toString().startsWith(QLatin1String("group_")))
+            out.append(asNotice(v.toObject()));
+    return out;
+}
+
 } // namespace
 
 Chats::Chats(QObject *parent)
@@ -75,16 +120,18 @@ void Chats::refreshBlocked()
     if (busy_[3])
         return;
     busy_[3] = true;
-    api_.get(QStringLiteral("/api/v1/user/block?limit=200"), [this](int status, const QJsonDocument &doc) {
+    api_.get(QStringLiteral("/api/v1/blocks?limit=200"), [this](int status, const QJsonDocument &doc) {
         busy_[3] = false;
         if (status != 200 || !doc.isObject())
             return;
         QList<QJsonObject> rows;
-        for (const QJsonValue &v : doc.object().value("blocks").toArray()) {
+        for (const QJsonValue &v : doc.object().value("items").toArray()) {
             QJsonObject b = v.toObject();
-            const QString user = b.value("user").toString();
+            const QJsonObject who = b.value("user").toObject();
+            const QString user = who.value("id").toString();
             b.insert("id", user);
-            b.insert("name", nameOf(user));
+            b.insert("user", user);
+            b.insert("name", names_.contains(user) ? nameOf(user) : who.value("display_name").toString());
             rows.append(b);
         }
         blocked_.setItems(rows);
@@ -96,7 +143,7 @@ void Chats::refreshProfiles()
     if (busy_[4])
         return;
     busy_[4] = true;
-    api_.get(QStringLiteral("/api/v1/profile"), [this](int status, const QJsonDocument &doc) {
+    api_.get(QStringLiteral("/api/v1/profiles"), [this](int status, const QJsonDocument &doc) {
         busy_[4] = false;
         if (status != 200 || !doc.isArray())
             return;
@@ -175,10 +222,10 @@ void Chats::getAll(const QString &path, const QString &key, std::function<void(i
     auto all = std::make_shared<QJsonArray>();
     auto step = std::make_shared<std::function<void(int)>>();
     *step = [this, path, key, done, all, step](int offset) {
-        api_.get(path + QStringLiteral("&offset=%1").arg(offset), [this, key, done, all, step](int status, const QJsonDocument &doc) {
+        api_.get(path + QStringLiteral("&offset=%1").arg(offset), [key, done, all, step](int status, const QJsonDocument &doc) {
             const QJsonValue next = doc.object().value("next");
             if (status == 200 && doc.isObject()) {
-                for (const QJsonValue &v : doc.object().value(key).toArray())
+                for (const QJsonValue &v : doc.object().value("items").toArray())
                     all->append(v);
                 if (next.isDouble() && all->size() < 20000) {
                     (*step)(int(next.toDouble()));
@@ -222,7 +269,7 @@ QVariantMap Chats::person(const QString &userId) const
     for (const QJsonObject &p : people_.items()) {
         if (p.value("id").toString() != userId)
             continue;
-        const QJsonObject profile = p.value("peer").toObject().value("profile").toObject();
+        const QJsonObject profile = p.value("user").toObject().value("profile").toObject();
         return QVariantMap{ { "name", p.value("name").toString() },
                             { "blurb", profile.value("blurb").toString() },
                             { "about", profile.value("about").toString() },
@@ -249,7 +296,7 @@ void Chats::refreshPeople()
     if (busy_[0])
         return;
     busy_[0] = true;
-    getAll(QStringLiteral("/api/v1/stream?limit=%1").arg(qMin(pageSize_, 200)), QStringLiteral("streams"), [this](int status, const QJsonDocument &doc) {
+    getAll(QStringLiteral("/api/v1/streams?limit=%1").arg(qMin(pageSize_, 200)), QStringLiteral("streams"), [this](int status, const QJsonDocument &doc) {
         busy_[0] = false;
         setConnected(status != 0);
         if (status != 200 || !doc.isObject())
@@ -260,7 +307,7 @@ void Chats::refreshPeople()
         QSet<QString> seen;
         for (const QJsonValue &v : doc.object().value("streams").toArray()) {
             QJsonObject s = v.toObject();
-            const QJsonObject profile = s.value("peer").toObject().value("profile").toObject();
+            const QJsonObject profile = s.value("user").toObject().value("profile").toObject();
             const QString id = s.value("id").toString();
             QString name = profile.value("display_name").toString();
             if (name.isEmpty() && s.value("provisional").toBool())
@@ -322,14 +369,17 @@ void Chats::refreshConversations()
         for (const QJsonValue &v : doc.object().value("conversations").toArray()) {
             QJsonObject c = v.toObject();
             const bool isGroup = c.value("kind").toString() == QLatin1String("group");
-            const QString user = isGroup ? c.value("group").toString() : c.value("user").toString(); // the id of the chat: who, or which group
-            c.insert("id", user);
+            const QString user = c.value("id").toString(); // the id of the chat: who, or which group
+            c.insert("last", c.value("last_message"));
             if (isGroup) {
                 names_.insert(user, c.value("name").toString()); // so a notification can name it
+                c.insert("members", c.value("group").toObject().value("member_count"));
+                c.insert("group", user);
                 const QJsonObject last = c.value("last").toObject();
                 if (!last.isEmpty()) // who said it, for the preview line
-                    c.insert("lastBy", last.value("outgoing").toBool() ? tr("You") : nameOf(last.value("sender").toString()));
+                    c.insert("lastBy", last.value("outgoing").toBool() ? tr("You") : nameOf(idOf(last.value("author"))));
             } else {
+                c.insert("user", user);
                 c.insert("name", nameOf(user));
                 c.insert("avatar", avatars_.value(user));
                 c.insert("color", colors_.value(user));
@@ -363,7 +413,7 @@ void Chats::markRead()
     if (current_.isEmpty() || marking_)
         return;
     marking_ = true;
-    api_.post(QStringLiteral("/api/v1/dm/read"), QJsonObject{ { currentIsGroup() ? "group" : "user", current_ } }, [this](int, const QJsonDocument &) { marking_ = false; });
+    api_.post(path("conversations", current_, "read"), QJsonObject{}, [this](int, const QJsonDocument &) { marking_ = false; });
 }
 
 // Take a page from the server: its messages and notices are kept, and the offset of the page before it remembered when it is the furthest back.
@@ -373,8 +423,7 @@ void Chats::refreshMessages()
         return;
     busy_[2] = true;
     const QString user = current_;
-    const QString url = currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2").arg(user).arg(kMessagePage)
-                                         : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2").arg(user).arg(kMessagePage);
+    const QString url = path("conversations", user, QStringLiteral("messages?limit=%1").arg(kMessagePage));
     api_.get(url, [this, user](int status, const QJsonDocument &doc) {
         busy_[2] = false;
         if (status != 200 || !doc.isObject() || user != current_)
@@ -382,15 +431,16 @@ void Chats::refreshMessages()
         // The newest page joins what is held if it shares a message with it. If not, more than a page arrived since the last look (a burst), and
         // there is a hole between: it is closed by reading back from this page until a message already held turns up.
         bool joins = msgs_.isEmpty();
-        for (const QJsonValue &v : doc.object().value("messages").toArray())
-            joins = joins || msgs_.contains(v.toObject().value("id").toString());
+        const QList<QJsonObject> page = messagesOf(doc);
+        for (const QJsonObject &m : page)
+            joins = joins || msgs_.contains(m.value("id").toString());
         std::shared_ptr<QSet<QString>> held;
         if (!joins)
             held = std::make_shared<QSet<QString>>(QSet<QString>(msgs_.keyBegin(), msgs_.keyEnd()));
-        for (const QJsonValue &v : doc.object().value("messages").toArray())
-            msgs_.insert(v.toObject().value("id").toString(), v.toObject()); // the newest page again: edits, deletions and delivery states are fresh
-        for (const QJsonValue &v : doc.object().value("notices").toArray())
-            notices_.insert(v.toObject().value("id").toString(), v.toObject());
+        for (const QJsonObject &m : page)
+            msgs_.insert(m.value("id").toString(), m); // the newest page again: edits, deletions and delivery states are fresh
+        for (const QJsonObject &n : noticesOf(doc))
+            notices_.insert(n.value("id").toString(), n);
         const QJsonValue next = doc.object().value("next");
         if (held && !next.isNull()) {
             bridging_ = true;
@@ -402,8 +452,8 @@ void Chats::refreshMessages()
             olderNext_ = next.isNull() ? -1 : qint64(next.toDouble());
         // what we sent that is still being delivered, but is older than this page, has a state we only saw once: look at it again
         QSet<QString> live;
-        for (const QJsonValue &v : doc.object().value("messages").toArray())
-            live.insert(v.toObject().value("id").toString());
+        for (const QJsonObject &m : page)
+            live.insert(m.value("id").toString());
         double oldestPending = 0;
         for (const QJsonObject &m : msgs_)
             if (m.contains("delivery") && !live.contains(m.value("id").toString()) && (oldestPending == 0 || m.value("ts").toDouble() < oldestPending))
@@ -420,17 +470,16 @@ void Chats::refreshMessages()
 
 void Chats::refreshBack(const QString &user, double oldestTs, qint64 offset, int pages)
 {
-    const QString url = (currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2&offset=%3")
-                                          : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2&offset=%3")).arg(user).arg(kMessagePage).arg(offset);
+    const QString url = path("conversations", user, QStringLiteral("messages?limit=%1&offset=%2").arg(kMessagePage).arg(offset));
     api_.get(url, [this, user, oldestTs, pages](int status, const QJsonDocument &doc) {
         if (status != 200 || !doc.isObject() || user != current_) {
             bridging_ = false;
             return;
         }
         double oldest = 1e300;
-        for (const QJsonValue &v : doc.object().value("messages").toArray()) {
-            msgs_.insert(v.toObject().value("id").toString(), v.toObject()); // the fresh copy replaces the old one
-            oldest = qMin(oldest, v.toObject().value("ts").toDouble());
+        for (const QJsonObject &m : messagesOf(doc)) {
+            msgs_.insert(m.value("id").toString(), m); // the fresh copy replaces the old one
+            oldest = qMin(oldest, m.value("ts").toDouble());
         }
         const QJsonValue next = doc.object().value("next");
         if (oldest > oldestTs && !next.isNull() && pages < 100) {
@@ -445,20 +494,19 @@ void Chats::refreshBack(const QString &user, double oldestTs, qint64 offset, int
 // Read back from `offset` until a page holds a message that was held before (or the chat starts), so nothing is missing from the middle.
 void Chats::bridgeGap(const QString &user, std::shared_ptr<QSet<QString>> held, qint64 offset, int pages)
 {
-    const QString url = (currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2&offset=%3")
-                                          : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2&offset=%3")).arg(user).arg(kMessagePage).arg(offset);
+    const QString url = path("conversations", user, QStringLiteral("messages?limit=%1&offset=%2").arg(kMessagePage).arg(offset));
     api_.get(url, [this, user, held, pages](int status, const QJsonDocument &doc) {
         if (status != 200 || !doc.isObject() || user != current_) {
             bridging_ = false;
             return;
         }
         bool joined = false;
-        for (const QJsonValue &v : doc.object().value("messages").toArray()) {
-            joined = joined || held->contains(v.toObject().value("id").toString());
-            msgs_.insert(v.toObject().value("id").toString(), v.toObject());
+        for (const QJsonObject &m : messagesOf(doc)) {
+            joined = joined || held->contains(m.value("id").toString());
+            msgs_.insert(m.value("id").toString(), m);
         }
-        for (const QJsonValue &v : doc.object().value("notices").toArray())
-            notices_.insert(v.toObject().value("id").toString(), v.toObject());
+        for (const QJsonObject &n : noticesOf(doc))
+            notices_.insert(n.value("id").toString(), n);
         const QJsonValue next = doc.object().value("next");
         if (!joined && !next.isNull() && pages < 400) {
             bridgeGap(user, held, qint64(next.toDouble()), pages + 1);
@@ -484,16 +532,15 @@ void Chats::loadOlder()
         return;
     loadingOlder_ = true;
     const QString user = current_;
-    const QString url = (currentIsGroup() ? QStringLiteral("/api/v1/gm/messages?group=%1&limit=%2&offset=%3")
-                                          : QStringLiteral("/api/v1/dm/messages?user=%1&limit=%2&offset=%3")).arg(user).arg(kMessagePage).arg(olderNext_);
+    const QString url = path("conversations", user, QStringLiteral("messages?limit=%1&offset=%2").arg(kMessagePage).arg(olderNext_));
     api_.get(url, [this, user](int status, const QJsonDocument &doc) {
         loadingOlder_ = false;
         if (status != 200 || !doc.isObject() || user != current_)
             return;
-        for (const QJsonValue &v : doc.object().value("messages").toArray())
-            msgs_.insert(v.toObject().value("id").toString(), v.toObject()); // (what is already held is not held twice: it has the same id)
-        for (const QJsonValue &v : doc.object().value("notices").toArray())
-            notices_.insert(v.toObject().value("id").toString(), v.toObject());
+        for (const QJsonObject &m : messagesOf(doc))
+            msgs_.insert(m.value("id").toString(), m); // (what is already held is not held twice: it has the same id)
+        for (const QJsonObject &n : noticesOf(doc))
+            notices_.insert(n.value("id").toString(), n);
         const QJsonValue next = doc.object().value("next");
         olderNext_ = next.isNull() ? -1 : qint64(next.toDouble());
         loadedOlder_ = true;
@@ -651,8 +698,7 @@ void Chats::retry()
 {
     if (current_.isEmpty())
         return;
-    post(currentIsGroup() ? QStringLiteral("/api/v1/gm/retry") : QStringLiteral("/api/v1/dm/retry"), QJsonObject{ { currentIsGroup() ? "group" : "user", current_ } },
-         tr("There was nothing to send again."));
+    post(path("conversations", current_, "retry"), QJsonObject{}, tr("There was nothing to send again."));
 }
 
 void Chats::send(const QString &text, const QString &replyTo)
@@ -660,31 +706,29 @@ void Chats::send(const QString &text, const QString &replyTo)
     const QString body = text.trimmed();
     if (current_.isEmpty() || body.isEmpty())
         return;
-    QJsonObject o{ { currentIsGroup() ? "group" : "to", current_ }, { "body", body } };
+    QJsonObject o{ { "body", body } };
     if (!replyTo.isEmpty())
         o.insert("reply_to", replyTo);
-    post(currentIsGroup() ? QStringLiteral("/api/v1/gm/send") : QStringLiteral("/api/v1/dm/send"), o, tr("The message could not be sent."));
+    post(path("conversations", current_, "messages/send"), o, tr("The message could not be sent."));
 }
 
 void Chats::edit(const QString &messageId, const QString &text)
 {
-    post(currentIsGroup() ? QStringLiteral("/api/v1/gm/edit") : QStringLiteral("/api/v1/dm/edit"),
-         QJsonObject{ { currentIsGroup() ? "group" : "user", current_ }, { "message", messageId }, { "body", text.trimmed() } },
+    post(path("conversations", current_, QStringLiteral("messages/%1/edit").arg(messageId)), QJsonObject{ { "body", text.trimmed() } },
          tr("The message could not be changed."));
 }
 
 void Chats::remove(const QString &messageId)
 {
-    post(currentIsGroup() ? QStringLiteral("/api/v1/gm/delete") : QStringLiteral("/api/v1/dm/delete"),
-         QJsonObject{ { currentIsGroup() ? "group" : "user", current_ }, { "message", messageId } }, tr("The message could not be deleted."));
+    post(path("conversations", current_, QStringLiteral("messages/%1/delete").arg(messageId)), QJsonObject{}, tr("The message could not be deleted."));
 }
 
-void Chats::accept(const QString &u) { post(QStringLiteral("/api/v1/stream/accept"), QJsonObject{ { "stream", u } }, tr("Could not accept.")); }
-void Chats::decline(const QString &u) { post(QStringLiteral("/api/v1/stream/decline"), QJsonObject{ { "stream", u } }, tr("Could not decline.")); }
-void Chats::cancel(const QString &u) { post(QStringLiteral("/api/v1/stream/delete"), QJsonObject{ { "stream", u } }, tr("Could not remove.")); }
-void Chats::block(const QString &u) { post(QStringLiteral("/api/v1/user/block"), QJsonObject{ { "user", u } }, tr("Could not block.")); }
-void Chats::unblock(const QString &u) { post(QStringLiteral("/api/v1/user/unblock"), QJsonObject{ { "user", u } }, tr("Could not unblock.")); }
-void Chats::trust(const QString &u) { post(QStringLiteral("/api/v1/stream/trust"), QJsonObject{ { "stream", u } }, tr("Could not trust the new certificate.")); }
+void Chats::accept(const QString &u) { post(path("streams", u, "accept"), QJsonObject{}, tr("Could not accept.")); }
+void Chats::decline(const QString &u) { post(path("streams", u, "decline"), QJsonObject{}, tr("Could not decline.")); }
+void Chats::cancel(const QString &u) { post(path("streams", u, "delete"), QJsonObject{}, tr("Could not remove.")); }
+void Chats::block(const QString &u) { post(path("users", u, "block"), QJsonObject{}, tr("Could not block.")); }
+void Chats::unblock(const QString &u) { post(path("users", u, "unblock"), QJsonObject{}, tr("Could not unblock.")); }
+void Chats::trust(const QString &u) { post(path("streams", u, "trust"), QJsonObject{}, tr("Could not trust the new certificate.")); }
 
 void Chats::request(const QString &link, const QString &note, const QString &profile)
 {
@@ -693,7 +737,7 @@ void Chats::request(const QString &link, const QString &note, const QString &pro
         o.insert("message", note);
     if (!profile.isEmpty())
         o.insert("profile", profile);
-    post(QStringLiteral("/api/v1/stream/request"), o, tr("The request could not be sent. Check the link."));
+    post(QStringLiteral("/api/v1/streams/request"), o, tr("The request could not be sent. Check the link."));
 }
 
 // ---- groups ----
@@ -850,7 +894,7 @@ void Chats::rebuildMembers()
                 friends.insert(p.value("id").toString());
         for (const QJsonValue &v : groups_.value(current_).value("members").toArray()) {
             QJsonObject m = v.toObject();
-            const QString id = m.value("id").toString();
+            const QString id = idOf(m.value("user"));
             QJsonObject r;
             r.insert("id", id);
             const bool me = !self_.isEmpty() && id == self_;
@@ -871,7 +915,7 @@ void Chats::refreshGroups()
     if (busy_[5])
         return;
     busy_[5] = true;
-    getAll(QStringLiteral("/api/v1/gm?limit=%1").arg(qMin(pageSize_, 100)), QStringLiteral("groups"), [this](int status, const QJsonDocument &doc) {
+    getAll(QStringLiteral("/api/v1/groups?limit=%1").arg(qMin(pageSize_, 100)), QStringLiteral("groups"), [this](int status, const QJsonDocument &doc) {
         busy_[5] = false;
         if (status != 200 || !doc.isObject())
             return;
@@ -885,7 +929,7 @@ void Chats::refreshGroups()
             names_.insert(id, g.value("name").toString());
             if (g.value("my").toString() == QLatin1String("invited")) {
                 invitedTo.insert(id);
-                const QString by = g.value("invited_by").toString();
+                const QString by = idOf(g.value("invited_by"));
                 QJsonObject row;
                 row.insert("id", id);
                 row.insert("name", g.value("name"));
@@ -915,15 +959,14 @@ void Chats::createGroup(const QString &name, const QStringList &friends)
     QJsonArray members;
     for (const QString &f : friends)
         members.append(f);
-    api_.post(QStringLiteral("/api/v1/gm/create"), QJsonObject{ { "name", name.trimmed() }, { "members", members } }, [this](int status, const QJsonDocument &doc) {
+    api_.post(QStringLiteral("/api/v1/groups/create"), QJsonObject{ { "name", name.trimmed() }, { "members", members } }, [this](int status, const QJsonDocument &doc) {
         if (status != 201 || !doc.isObject()) {
             emit failed(tr("The group could not be made."));
             return;
         }
-        const QJsonObject g = doc.object();
-        if (g.contains("not_invited"))
+        if (!doc.object().value("not_invited").toArray().isEmpty())
             emit failed(tr("Some people could not be invited: they must be your friends."));
-        emit groupCreated(g.value("id").toString());
+        emit groupCreated(doc.object().value("group").toObject().value("id").toString());
         refresh();
     });
 }
@@ -932,17 +975,17 @@ void Chats::inviteToGroup(const QString &userId)
 {
     if (!currentIsGroup())
         return;
-    post(QStringLiteral("/api/v1/gm/invite"), QJsonObject{ { "group", current_ }, { "user", userId } }, tr("They could not be invited."));
+    post(path("groups", current_, "invite"), QJsonObject{ { "user", userId } }, tr("They could not be invited."));
 }
 
 void Chats::acceptGroup(const QString &groupId)
 {
-    post(QStringLiteral("/api/v1/gm/accept"), QJsonObject{ { "group", groupId } }, tr("The group could not be joined."));
+    post(path("groups", groupId, "accept"), QJsonObject{}, tr("The group could not be joined."));
 }
 
 void Chats::declineGroup(const QString &groupId)
 {
-    post(QStringLiteral("/api/v1/gm/decline"), QJsonObject{ { "group", groupId } }, tr("Could not decline."));
+    post(path("groups", groupId, "decline"), QJsonObject{}, tr("Could not decline."));
 }
 
 void Chats::leaveGroup()
@@ -953,7 +996,7 @@ void Chats::leaveGroup()
 
 void Chats::leaveGroup(const QString &id)
 {
-    api_.post(QStringLiteral("/api/v1/gm/leave"), QJsonObject{ { "group", id } }, [this, id](int status, const QJsonDocument &) {
+    api_.post(path("groups", id, "leave"), QJsonObject{}, [this, id](int status, const QJsonDocument &) {
         if (status == 0 || status >= 400) {
             emit failed(tr("Could not leave the group."));
         } else {
@@ -973,7 +1016,7 @@ void Chats::renameGroup(const QString &name)
 
 void Chats::renameGroup(const QString &id, const QString &name)
 {
-    post(QStringLiteral("/api/v1/gm/rename"), QJsonObject{ { "group", id }, { "name", name.trimmed() } }, tr("The group could not be renamed."));
+    post(path("groups", id, "rename"), QJsonObject{ { "name", name.trimmed() } }, tr("The group could not be renamed."));
 }
 
 QString Chats::nameOf(const QString &userId) const

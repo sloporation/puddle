@@ -91,7 +91,8 @@ int main(void)
 
     puddle_ctx ctx = { .config = &cfg, .identity = id, .profiles = &profiles, .roll_slot = puddle_roll_slot_new(),
                        .replay = puddle_replay_new(64), .now_ms = now_cb };
-    puddle_router R = { puddle_routes, puddle_routes_count, &ctx };
+    puddle_router R = { NULL, 0, &ctx };
+    R.routes = puddle_all_routes(&R.count);
     reply r;
     char v[300], uid[PUDDLE_USER_ID_LEN + 1];
     puddle_identity_id(id, uid);
@@ -133,8 +134,8 @@ int main(void)
         CHECK(strstr(body_of(&r), "\"link\":\"[2001:db8::1]:8443\""));
     }
 
-    /* ---- GET /api/v1/me ---- */
-    r = call(&R, "GET", "/api/v1/me", NULL, 1);
+    /* ---- GET /api/v1/users/me ---- */
+    r = call(&R, "GET", "/api/v1/users/me", NULL, 1);
     CHECK(r.status == 200 && puddle_json_valid_object(body_of(&r), strlen(body_of(&r))));
     CHECK(member(&r, "id", v, sizeof v) == 0 && strcmp(v, uid) == 0);
     {
@@ -163,7 +164,7 @@ int main(void)
 
     /* ---- strangers ---- */
     {
-        const char *paths[] = { "/api/v1/identity", "/api/v1/me", "/api/v1/identity/roll", "/api/v1/identity/roll/confirm",
+        const char *paths[] = { "/api/v1/identity", "/api/v1/users/me", "/api/v1/identity/roll", "/api/v1/identity/roll/confirm",
                                 "/api/v1/identity/roll/cancel", "/nothing" };
         reply nothing = call(&R, "GET", "/nothing", NULL, 0);
         for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++)
@@ -172,7 +173,7 @@ int main(void)
                 CHECK(r.status == 404 && r.n == nothing.n && memcmp(r.out, nothing.out, r.n) == 0);
             }
         CHECK(call(&R, "GET", "/api/v1/identity/roll", NULL, 1).status == 405); /* the owner is told it's a POST */
-        CHECK(call(&R, "POST", "/api/v1/me", NULL, 1).status == 405);
+        CHECK(call(&R, "POST", "/api/v1/users/me", NULL, 1).status == 405);
         puddle_request q;
         memset(&q, 0, sizeof q);
         strcpy(q.method, "POST"); strcpy(q.path, "/api/v1/identity/roll");

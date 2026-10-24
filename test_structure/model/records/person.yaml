@@ -1,0 +1,24 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+title: Person
+description: |
+  Someone this Puddle knows of, and the profile their Puddle sent us. Collection "people", key = user id.
+  Kept by core/people.hpp.
+
+  The profile arrives over federation, from their Puddle, in three places: an access request (AccessRequest.requester),
+  the answer to one (AccessResult.responder), and POST /stream/v1/profile whenever they change it. Whichever comes
+  last replaces what we held. It is the profile they chose to show us, which may not be the one they show others.
+type: object
+required: [id, first_seen]
+properties:
+  id: { $ref: "../wire/ids.yaml#/$defs/UserId" }
+  profile:
+    $ref: "../wire/profile.yaml"
+    description: Exactly as their Puddle sent it; absent until one has arrived
+  profile_at: { $ref: "../wire/ids.yaml#/$defs/Timestamp", description: When it arrived }
+  first_seen: { $ref: "../wire/ids.yaml#/$defs/Timestamp", description: "When we first heard of them: a request, an answer, or a group" }
+x-fields:
+  derived: []
+  owners-own: []
+  from-peer: [profile, profile_at]
+x-source:
+  today: "The profile is a field of the stream record (puddle_stream.profile), written by src/core/access.c and src/core/inbound.c through puddle_stream_set_profile. Someone with no stream has nowhere to keep one."

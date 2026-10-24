@@ -3,7 +3,7 @@ project(puddle VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -43,53 +43,63 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_compile_definitions(_GNU_SOURCE)
 endif()
 
-# --- core: config, TLS, HTTP, listener (plain C, shared by both targets) -----
+# --- core: config, TLS, HTTP, listener (C++, shared by both targets; C-callable headers) -----
 add_library(puddle_core STATIC
-  src/core/access.c
-  src/core/auth.c
-  src/core/client.c
-  src/core/config.c
-  src/core/encoding.c
-  src/core/flow.c
-  src/core/fsutil.c
-  src/core/hash.c
-  src/core/http.c
-  src/core/identity.c
-  src/core/inbound.c
-  src/core/json.c
-  src/core/keysync.c
-  src/core/log.c
-  src/core/media.c
-  src/core/message.c
-  src/core/messages.c
-  src/core/phrase.c
-  src/core/outbox.c
-  src/core/owner_streams.c
-  src/core/profile.c
-  src/core/profiles_api.c
-  src/core/ratelimit.c
-  src/core/group.c
-  src/core/groupapi.c
-  src/core/groupflow.c
-  src/core/link.c
-  src/core/router.c
-  src/core/routes.c
-  src/core/reqsig.c
-  src/core/serve.c
-  src/core/server.c
-  src/core/store.c
-  src/core/streams.c
-  src/core/tls.c
-  src/core/wireprofile.c
-  src/core/yamltree.c)
+  src/core/access.cpp
+  src/core/api/conversations.cpp
+  src/core/api/groups.cpp
+  src/core/api/request.cpp
+  src/core/api/streams.cpp
+  src/core/api/users.cpp
+  src/core/objects/conversation.cpp
+  src/core/objects/group.cpp
+  src/core/objects/message.cpp
+  src/core/objects/stream.cpp
+  src/core/objects/user.cpp
+  src/core/auth.cpp
+  src/core/client.cpp
+  src/core/clock.cpp
+  src/core/config.cpp
+  src/core/encoding.cpp
+  src/core/flow.cpp
+  src/core/fsutil.cpp
+  src/core/hash.cpp
+  src/core/http.cpp
+  src/core/identity.cpp
+  src/core/inbound.cpp
+  src/core/json.cpp
+  src/core/keysync.cpp
+  src/core/log.cpp
+  src/core/media.cpp
+  src/core/message.cpp
+  src/core/messages.cpp
+  src/core/phrase.cpp
+  src/core/outbox.cpp
+  src/core/profile.cpp
+  src/core/profiles_api.cpp
+  src/core/ratelimit.cpp
+  src/core/group.cpp
+  src/core/groupapi.cpp
+  src/core/groupflow.cpp
+  src/core/link.cpp
+  src/core/router.cpp
+  src/core/routes.cpp
+  src/core/reqsig.cpp
+  src/core/serve.cpp
+  src/core/server.cpp
+  src/core/store.cpp
+  src/core/streams.cpp
+  src/core/tls.cpp
+  src/core/wireprofile.cpp
+  src/core/yamltree.cpp)
 target_include_directories(puddle_core PUBLIC src/core)
 # Only yamltree.c sees libyaml's headers: a shared include dir like /opt/homebrew/include would
 # also expose a different OpenSSL's headers.
-set_source_files_properties(src/core/yamltree.c PROPERTIES INCLUDE_DIRECTORIES "${YAML_INCLUDE_DIR}")
+set_source_files_properties(src/core/yamltree.cpp PROPERTIES INCLUDE_DIRECTORIES "${YAML_INCLUDE_DIR}")
 target_link_libraries(puddle_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${YAML_LIBRARY})
 
 # --- puddled: headless service (systemd --user, launchd, ...) -----------------
-add_executable(puddled src/service/main.c)
+add_executable(puddled src/service/main.cpp)
 target_link_libraries(puddled PRIVATE puddle_core)
 install(TARGETS puddled RUNTIME DESTINATION bin)
 

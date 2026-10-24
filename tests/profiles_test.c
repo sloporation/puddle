@@ -199,12 +199,12 @@ int main(void)
     char t[400], bodyj[1200];
 
     /* ---- the owner's profiles ---- */
-    r = owner_call("GET", "/api/v1/profile", NULL);
+    r = owner_call("GET", "/api/v1/profiles", NULL);
     CHECK(r->status == 200 && puddle_json_valid_object("{}", 2) && body_of(r)[0] == '[');
     CHECK(strstr(body_of(r), "\"id\":\"main\",\"default\":true,\"display_name\":\"Me\",\"blurb\":\"the default\",\"avatar\":{\"hash\":\"") &&
           strstr(body_of(r), "\"id\":\"work\",\"default\":false,\"display_name\":\"Me at work\"") && strstr(body_of(r), "\"color\":{\"colors\":[\"#112233\",\"#445566\"],\"angle\":135}") &&
           strstr(body_of(r), avatar_work) && strstr(body_of(r), banner_work));
-    CHECK(call("GET", "/api/v1/profile", NULL, NULL, 0)->status == 404);
+    CHECK(call("GET", "/api/v1/profiles", NULL, NULL, 0)->status == 404);
 
     /* ---- the owner fetches a picture ---- */
     snprintf(t, sizeof t, "/api/v1/media?hash=%s", avatar_main);
@@ -282,9 +282,11 @@ int main(void)
     CHECK(peer_call(&carol, "GET", t, NULL)->status == 404);
 
     /* ---- the owner chooses what a stream sees ---- */
-    snprintf(bodyj, sizeof bodyj, "{\"stream\":\"%s\",\"profile\":\"work\"}", alice.uid);
-    CHECK(call("POST", "/api/v1/stream/profile", bodyj, NULL, 0)->status == 404);
-    r = owner_call("POST", "/api/v1/stream/profile", bodyj);
+    char pp[200];
+    snprintf(pp, sizeof pp, "/api/v1/streams/%s/profile", alice.uid);
+    snprintf(bodyj, sizeof bodyj, "{\"profile\":\"work\"}");
+    CHECK(call("POST", pp, bodyj, NULL, 0)->status == 404);
+    r = owner_call("POST", pp, bodyj);
     CHECK(r->status == 200 && strstr(body_of(r), "\"profile\":\"work\""));
     {
         char pr[PUDDLE_PROFILE_ID_MAX + 1];
@@ -310,26 +312,22 @@ int main(void)
     CHECK(peer_call(&alice, "GET", t, NULL)->status == 404);
     snprintf(t, sizeof t, "/stream/v1/media?hash=%s", banner_work);
     CHECK(peer_call(&alice, "GET", t, NULL)->status == 200);
-    snprintf(bodyj, sizeof bodyj, "{\"stream\":\"%s\",\"profile\":null}", alice.uid);
-    r = owner_call("POST", "/api/v1/stream/profile", bodyj);
+    r = owner_call("POST", pp, "{\"profile\":null}");
     CHECK(r->status == 200 && !strstr(body_of(r), "\"profile\":\"work\"") && queued(alice.uid, "profile") == 2);
     {
         char pr[PUDDLE_PROFILE_ID_MAX + 1];
         CHECK(puddle_assignments_get(as, alice.uid, pr) == 1);                                   /* back to the default */
     }
     /* what it refuses */
-    snprintf(bodyj, sizeof bodyj, "{\"stream\":\"%s\",\"profile\":\"nope\"}", alice.uid);
-    CHECK(owner_call("POST", "/api/v1/stream/profile", bodyj)->status == 400);
-    snprintf(bodyj, sizeof bodyj, "{\"stream\":\"%s\",\"profile\":5}", alice.uid);
-    CHECK(owner_call("POST", "/api/v1/stream/profile", bodyj)->status == 400);
-    snprintf(bodyj, sizeof bodyj, "{\"stream\":\"%s\"}", alice.uid);
-    CHECK(owner_call("POST", "/api/v1/stream/profile", bodyj)->status == 400);
-    CHECK(owner_call("POST", "/api/v1/stream/profile", "{\"stream\":\"zaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"work\"}")->status == 404);
-    CHECK(owner_call("POST", "/api/v1/stream/profile", "{\"profile\":\"work\"}")->status == 400);
+    CHECK(owner_call("POST", pp, "{\"profile\":\"nope\"}")->status == 400);
+    CHECK(owner_call("POST", pp, "{\"profile\":5}")->status == 400);
+    CHECK(owner_call("POST", pp, "{}")->status == 400);
+    CHECK(owner_call("POST", "/api/v1/streams/zaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/profile", "{\"profile\":\"work\"}")->status == 404);
+    CHECK(owner_call("POST", "/api/v1/streams/nope/profile", "{\"profile\":\"work\"}")->status == 404);
     /* a stream that is not open is not pushed to, but the choice is kept for when it is */
-    snprintf(bodyj, sizeof bodyj, "{\"stream\":\"%s\",\"profile\":\"work\"}", carol.uid);
+    snprintf(pp, sizeof pp, "/api/v1/streams/%s/profile", carol.uid);
     int before = queued(carol.uid, NULL);
-    CHECK(owner_call("POST", "/api/v1/stream/profile", bodyj)->status == 200 && queued(carol.uid, NULL) == before);
+    CHECK(owner_call("POST", pp, "{\"profile\":\"work\"}")->status == 200 && queued(carol.uid, NULL) == before);
     {
         char pr[PUDDLE_PROFILE_ID_MAX + 1];
         CHECK(puddle_assignments_get(as, carol.uid, pr) == 0 && !strcmp(pr, "work"));

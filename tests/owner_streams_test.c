@@ -1,4 +1,4 @@
-#include "owner_streams.h"
+#include "router.h"
 
 #include "encoding.h"
 #include "phrase.h"
@@ -59,6 +59,16 @@ static const char *body_of(const reply *r)
 static int valid_body(const reply *r) { const char *b = body_of(r); return puddle_json_valid_object(b, strlen(b)); }
 
 static int status(const char *method, const char *target, const char *body) { return call(method, target, body, 1)->status; }
+
+/* "/api/v1/streams/<id>/<verb>", or "/api/v1/users/<id>/<verb>" */
+static const char *at(const char *kind, const char *id, const char *verb)
+{
+    static char buf[4][200];
+    static int k;
+    k = (k + 1) % 4;
+    snprintf(buf[k], sizeof buf[k], "/api/v1/%s/%s%s%s", kind, id, verb ? "/" : "", verb ? verb : "");
+    return buf[k];
+}
 
 static void fake_id(int i, char *out)
 {
@@ -137,9 +147,11 @@ int main(void)
 
     /* ---- nobody else gets anything ---- */
     {
-        const char *get[] = { "/api/v1/stream", "/api/v1/stream/invite", "/api/v1/stream/policy", "/api/v1/user/block" };
-        const char *post[] = { "/api/v1/stream/accept", "/api/v1/stream/decline", "/api/v1/stream/delete", "/api/v1/stream/invite",
-                               "/api/v1/stream/invite/revoke", "/api/v1/stream/policy", "/api/v1/user/block", "/api/v1/user/unblock" };
+        const char *get[] = { "/api/v1/streams", "/api/v1/invites", "/api/v1/streams/policy", "/api/v1/blocks", at("streams", a, NULL),
+                              at("users", a, NULL), "/api/v1/users/me" };
+        const char *post[] = { at("streams", a, "accept"), at("streams", a, "decline"), at("streams", a, "delete"), "/api/v1/invites/create" };
+        const char *post2[] = { "/api/v1/invites/abcdefghijklmnopqrstuvwxy2/revoke", "/api/v1/streams/policy/set", at("users", a, "block"),
+                                at("users", a, "unblock") };
         reply *nothing = call("GET", "/nope", NULL, 0);
         size_t nn = nothing->n;
         char keep[sizeof nothing->out];
@@ -148,18 +160,19 @@ int main(void)
             r = call("GET", get[i], NULL, 0);
             CHECK(r->status == 404 && r->n == nn && !memcmp(r->out, keep, nn));
         }
-        for (size_t i = 0; i < sizeof post / sizeof *post; i++) {
-            snprintf(body, sizeof body, "{\"stream\":\"%s\",\"user\":\"%s\"}", a, a);
-            r = call("POST", post[i], body, 0);
+        for (size_t i = 0; i < 4; i++) {
+            r = call("POST", post[i], "{}", 0);
+            CHECK(r->status == 404 && r->n == nn && !memcmp(r->out, keep, nn));
+            r = call("POST", post2[i], "{}", 0);
             CHECK(r->status == 404 && r->n == nn && !memcmp(r->out, keep, nn));
         }
-        CHECK(call("POST", "/api/v1/stream", "{}", 1)->status == 405);          /* the owner is told it is a GET */
-        CHECK(call("GET", "/api/v1/stream/accept", NULL, 1)->status == 405);
+        CHECK(call("POST", "/api/v1/streams", "{}", 1)->status == 405);          /* the owner is told it is a GET */
+        CHECK(call("GET", at("streams", a, "accept"), NULL, 1)->status == 405);
     }
 
     /* ---- listing ---- */
-    r = call("GET", "/api/v1/stream", NULL, 1);
-    CHECK(r->status == 200 && !strcmp(body_of(r), "{\"streams\":[],\"next\":null}"));
+    r = call("GET", "/api/v1/streams", NULL, 1);
+    CHECK(r->status == 200 && !strcmp(body_of(r), "{\"items\":[],\"next\":null}"));
 
     put(a, PUDDLE_STREAM_PENDING_IN, T0 + 100, "hi, it's \"A\"\nfrom work", "{\"display_name\":\"Ann\",\"blurb\":\"x\"}", "203.0.113.7:8443");
     put(b, PUDDLE_STREAM_ACTIVE, T0 + 300, NULL, "{\"display_name\":\"Bo\"}", NULL);
@@ -171,7 +184,7 @@ int main(void)
         as = puddle_assignments_open(dir, e2, sizeof e2);
         ctx.assignments = as;
     }
-    r = call("GET", "/api/v1/stream", NULL, 1);
+    r = call("GET", "/api/v1/streams", NULL, 1);
     CHECK(r->status == 200 && valid_body(r));
     {
         const char *body_s = body_of(r);
@@ -179,36 +192,52 @@ int main(void)
         CHECK(pa && pb && pc && pd && pb < pc && pc < pa && pa < pd);          /* most recently changed first */
         CHECK(strstr(body_s, "\"message\":\"hi, it's \\\"A\\\"\\nfrom work\""));
         CHECK(strstr(body_s, "\"address\":\"203.0.113.7:8443\"") && strstr(body_s, "\"address\":\"[2001:db8::1]:8443\""));
-        CHECK(strstr(body_s, "\"peer\":{\"id\":\"") && strstr(body_s, "\"profile\":{\"display_name\":\"Ann\",\"blurb\":\"x\"}"));
+        /* the person is a User: their profile, and the state of the stream with them */
+        CHECK(strstr(body_s, "\"user\":{\"id\":\"") && strstr(body_s, "\"profile\":{\"display_name\":\"Ann\",\"blurb\":\"x\"},\"stream\":\"pending_in\"}"));
         CHECK(strstr(body_s, "\"state\":\"pending_in\"") && strstr(body_s, "\"state\":\"active\"") && strstr(body_s, "\"state\":\"pending_out\"") && strstr(body_s, "\"state\":\"closed\""));
         CHECK(strstr(body_s, "\"next\":null"));
     }
-    r = call("GET", "/api/v1/stream?state=pending_in", NULL, 1);
+    r = call("GET", "/api/v1/streams?state=pending_in", NULL, 1);
     CHECK(r->status == 200 && count_of(body_of(r), "\"state\"") == 1 && strstr(body_of(r), a));
-    r = call("GET", "/api/v1/stream?state=active", NULL, 1);
+    r = call("GET", "/api/v1/streams?state=active", NULL, 1);
     CHECK(count_of(body_of(r), "\"state\"") == 1 && strstr(body_of(r), b));
-    r = call("GET", "/api/v1/stream?limit=2", NULL, 1);
+    r = call("GET", "/api/v1/streams?limit=2", NULL, 1);
     CHECK(count_of(body_of(r), "\"state\"") == 2 && member(r, "next", v, sizeof v) == 0 && !strcmp(v, "2"));
-    r = call("GET", "/api/v1/stream?limit=2&offset=2", NULL, 1);
+    r = call("GET", "/api/v1/streams?limit=2&offset=2", NULL, 1);
     CHECK(count_of(body_of(r), "\"state\"") == 2 && member(r, "next", v, sizeof v) == 0 && !strcmp(v, "null"));
-    r = call("GET", "/api/v1/stream?offset=9", NULL, 1);
-    CHECK(r->status == 200 && !strcmp(body_of(r), "{\"streams\":[],\"next\":null}"));
-    r = call("GET", "/api/v1/stream?state=closed&limit=1", NULL, 1);
+    r = call("GET", "/api/v1/streams?offset=9", NULL, 1);
+    CHECK(r->status == 200 && !strcmp(body_of(r), "{\"items\":[],\"next\":null}"));
+    r = call("GET", "/api/v1/streams?state=closed&limit=1", NULL, 1);
     CHECK(count_of(body_of(r), "\"state\"") == 1 && strstr(body_of(r), d));
     const char *bad_queries[] = { "?limit=0", "?limit=201", "?limit=abc", "?limit=-1", "?limit=", "?limit", "?state=bogus", "?x=1",
                                   "?limit=1&limit=2", "?limit=1&", "?&limit=1", "?state=a%20b", "?offset=99999999999", "?=1", "?limit=1&&offset=1" };
     for (size_t i = 0; i < sizeof bad_queries / sizeof *bad_queries; i++) {
         char t[100];
-        snprintf(t, sizeof t, "/api/v1/stream%s", bad_queries[i]);
+        snprintf(t, sizeof t, "/api/v1/streams%s", bad_queries[i]);
         if (status("GET", t, NULL) != 400) { fprintf(stderr, "FAIL %s was not refused\n", t); failures++; }
     }
+    /* one stream on its own */
+    r = call("GET", at("streams", a, NULL), NULL, 1);
+    CHECK(r->status == 200 && member(r, "id", v, sizeof v) == 0 && !strcmp(v, a) && member(r, "state", v, sizeof v) == 0 && !strcmp(v, "pending_in"));
+    CHECK(status("GET", at("streams", f, NULL), NULL) == 404);
+    CHECK(status("GET", "/api/v1/streams/zzzz", NULL) == 404);                   /* not an id: no such path */
     /* the profile we show them */
     {
         char e2[200];
         CHECK(puddle_assignments_set(as, a, "default", e2, sizeof e2) == 0);
-        r = call("GET", "/api/v1/stream?state=pending_in", NULL, 1);
+        r = call("GET", "/api/v1/streams?state=pending_in", NULL, 1);
         CHECK(strstr(body_of(r), "\"profile\":\"default\""));
     }
+    /* a person, as a User */
+    r = call("GET", at("users", a, NULL), NULL, 1);
+    CHECK(r->status == 200 && strncmp(body_of(r), "{\"id\":\"", 7) == 0);
+    CHECK(strstr(body_of(r), "\"profile\":{\"display_name\":\"Ann\",\"blurb\":\"x\"}") && strstr(body_of(r), "\"stream\":\"pending_in\"") &&
+          !strstr(body_of(r), "blocked"));
+    CHECK(status("GET", at("users", f, NULL), NULL) == 404);                     /* nobody we know */
+    r = call("GET", "/api/v1/users/me", NULL, 1);
+    CHECK(r->status == 200 && member(r, "id", v, sizeof v) == 0 && !strcmp(v, my_id) && member(r, "link", v, sizeof v) == 0 && !strcmp(v, "null"));
+    r = call("GET", at("users", my_id, NULL), NULL, 1);
+    CHECK(r->status == 200 && member(r, "id", v, sizeof v) == 0 && !strcmp(v, my_id));
 
     /* ---- big entries: the page stops before the buffer does, and the next page carries on ---- */
     {
@@ -229,7 +258,7 @@ int main(void)
         int pages = 0;
         for (;;) {
             char t[100];
-            snprintf(t, sizeof t, "/api/v1/stream?state=pending_in&limit=200&offset=%zu", offset);
+            snprintf(t, sizeof t, "/api/v1/streams?state=pending_in&limit=200&offset=%zu", offset);
             r = call("GET", t, NULL, 1);
             CHECK(r->status == 200 && valid_body(r) && r->n < sizeof r->out - 1);
             seen += count_of(body_of(r), "\"state\"");
@@ -243,83 +272,77 @@ int main(void)
     }
 
     /* ---- accept ---- */
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", a);
     clock_now = T0 + 5000;
-    r = call("POST", "/api/v1/stream/accept", body, 1);
+    r = call("POST", at("streams", a, "accept"), NULL, 1);
     CHECK(r->status == 200 && valid_body(r) && member(r, "state", v, sizeof v) == 0 && !strcmp(v, "active"));
     CHECK(member(r, "updated_at", v, sizeof v) == 0 && atoll(v) == T0 + 5000);
     CHECK(state_is(a, PUDDLE_STREAM_ACTIVE, PUDDLE_OWED_APPROVED));              /* and the requester still has to be told */
-    CHECK(status("POST", "/api/v1/stream/accept", body) == 409);                 /* not waiting any more */
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", c);
-    CHECK(status("POST", "/api/v1/stream/accept", body) == 409);                 /* we asked them: nothing to accept */
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", f);
-    CHECK(status("POST", "/api/v1/stream/accept", body) == 404);
-    CHECK(status("POST", "/api/v1/stream/accept", "{}") == 400);
-    CHECK(status("POST", "/api/v1/stream/accept", "") == 400);
-    CHECK(status("POST", "/api/v1/stream/accept", "nonsense") == 400);
-    CHECK(status("POST", "/api/v1/stream/accept", "{\"stream\":\"../../x\"}") == 400);
-    CHECK(status("POST", "/api/v1/stream/accept", "{\"stream\":7}") == 400);
-    CHECK(status("POST", "/api/v1/stream/accept", "{\"stream\":\"zzzz\"}") == 400);
+    CHECK(status("POST", at("streams", a, "accept"), NULL) == 409);              /* not waiting any more */
+    CHECK(status("POST", at("streams", c, "accept"), NULL) == 409);              /* we asked them: nothing to accept */
+    CHECK(status("POST", at("streams", f, "accept"), NULL) == 404);
+    CHECK(status("POST", "/api/v1/streams/../../x/accept", NULL) == 404);        /* not an id: no such path */
+    CHECK(status("POST", "/api/v1/streams/zzzz/accept", NULL) == 404);
 
     /* ---- decline ---- */
     put(e, PUDDLE_STREAM_PENDING_IN, T0, "please", NULL, "10.0.0.2:1");
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", e);
-    r = call("POST", "/api/v1/stream/decline", body, 1);
-    CHECK(r->status == 204 && strstr(r->out, "204 No Content") && !strstr(r->out, "Content-Length") && !strstr(r->out, "Content-Type") &&
-          !strcmp(body_of(r), ""));
+    r = call("POST", at("streams", e, "decline"), NULL, 1);
+    CHECK(r->status == 200 && valid_body(r) && member(r, "state", v, sizeof v) == 0 && !strcmp(v, "closed"));
     CHECK(state_is(e, PUDDLE_STREAM_CLOSED, PUDDLE_OWED_DECLINED));
-    CHECK(status("POST", "/api/v1/stream/decline", body) == 409);                 /* once */
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", b);
-    CHECK(status("POST", "/api/v1/stream/decline", body) == 409);                 /* an active stream is deleted, not declined */
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", f);
-    CHECK(status("POST", "/api/v1/stream/decline", body) == 404);
-    CHECK(status("POST", "/api/v1/stream/decline", "{}") == 400);
+    CHECK(status("POST", at("streams", e, "decline"), NULL) == 409);             /* once */
+    CHECK(status("POST", at("streams", b, "decline"), NULL) == 409);             /* an active stream is deleted, not declined */
+    CHECK(status("POST", at("streams", f, "decline"), NULL) == 404);
 
     /* ---- delete ---- */
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", b);
     clock_now = T0 + 6000;
-    CHECK(status("POST", "/api/v1/stream/delete", body) == 204);
+    r = call("POST", at("streams", b, "delete"), NULL, 1);
+    CHECK(r->status == 200 && member(r, "state", v, sizeof v) == 0 && !strcmp(v, "closed"));
     CHECK(state_is(b, PUDDLE_STREAM_CLOSED, PUDDLE_OWED_CLOSED));
-    CHECK(status("POST", "/api/v1/stream/delete", body) == 409);                  /* already closed */
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", c);
-    CHECK(status("POST", "/api/v1/stream/delete", body) == 204);                  /* withdraw a request we made */
+    CHECK(status("POST", at("streams", b, "delete"), NULL) == 409);              /* already closed */
+    CHECK(status("POST", at("streams", c, "delete"), NULL) == 200);              /* withdraw a request we made */
     CHECK(state_is(c, PUDDLE_STREAM_CLOSED, PUDDLE_OWED_CLOSED));
     put(f, PUDDLE_STREAM_PENDING_IN, T0, NULL, NULL, NULL);
-    snprintf(body, sizeof body, "{\"stream\":\"%s\"}", f);
-    CHECK(status("POST", "/api/v1/stream/delete", body) == 409);                  /* a request waiting on us: decline it */
+    CHECK(status("POST", at("streams", f, "delete"), NULL) == 409);              /* a request waiting on us: decline it */
     {
         char z[64];
         fake_id(900, z);
-        snprintf(body, sizeof body, "{\"stream\":\"%s\"}", z);
-        CHECK(status("POST", "/api/v1/stream/delete", body) == 404);
+        CHECK(status("POST", at("streams", z, "delete"), NULL) == 404);
     }
 
     /* ---- blocks ---- */
-    CHECK(!strcmp(body_of(call("GET", "/api/v1/user/block", NULL, 1)), "{\"blocks\":[],\"next\":null}"));
-    snprintf(body, sizeof body, "{\"user\":\"%s\",\"note\":\"ignored\"}", a);
+    CHECK(!strcmp(body_of(call("GET", "/api/v1/blocks", NULL, 1)), "{\"items\":[],\"next\":null}"));
     clock_now = T0 + 7000;
-    r = call("POST", "/api/v1/user/block", body, 1);
-    CHECK(r->status == 201 && member(r, "user", v, sizeof v) == 0 && !strcmp(v, a) && member(r, "created_at", v, sizeof v) == 0 && atoll(v) == T0 + 7000);
+    r = call("POST", at("users", a, "block"), "{\"note\":\"ignored\"}", 1);
+    CHECK(r->status == 200 && member(r, "id", v, sizeof v) == 0 && !strcmp(v, a) && strstr(body_of(r), "\"blocked\":true") &&
+          strstr(body_of(r), "\"stream\":\"closed\""));
     CHECK(state_is(a, PUDDLE_STREAM_CLOSED, PUDDLE_OWED_NONE));                   /* closed, and nothing owed: a block is silent */
     clock_now = T0 + 8000;
-    r = call("POST", "/api/v1/user/block", body, 1);
-    CHECK(r->status == 201 && member(r, "created_at", v, sizeof v) == 0 && atoll(v) == T0 + 7000); /* the first time stands */
-    snprintf(body, sizeof body, "{\"user\":\"%s\"}", f);
-    CHECK(status("POST", "/api/v1/user/block", body) == 201);                     /* someone we have nothing with */
-    snprintf(body, sizeof body, "{\"user\":\"%s\"}", my_id);
-    CHECK(status("POST", "/api/v1/user/block", body) == 400);                     /* not ourselves */
-    CHECK(status("POST", "/api/v1/user/block", "{}") == 400 && status("POST", "/api/v1/user/block", "{\"user\":\"abc\"}") == 400);
-    r = call("GET", "/api/v1/user/block", NULL, 1);
+    CHECK(status("POST", at("users", a, "block"), NULL) == 200);
+    {
+        char z[64];
+        fake_id(901, z);
+        r = call("POST", at("users", z, "block"), NULL, 1);                      /* someone we have nothing with */
+        CHECK(r->status == 200 && strstr(body_of(r), "\"blocked\":true"));
+        CHECK(status("POST", at("users", z, "unblock"), NULL) == 200);
+        CHECK(status("GET", at("users", z, NULL), NULL) == 404);                 /* and now nobody we know */
+    }
+    CHECK(status("POST", at("users", f, "block"), NULL) == 200);
+    CHECK(status("POST", at("users", my_id, "block"), NULL) == 400);              /* not ourselves */
+    CHECK(status("POST", "/api/v1/users/abc/block", NULL) == 404);
+    r = call("GET", "/api/v1/blocks", NULL, 1);
     CHECK(r->status == 200 && valid_body(r) && count_of(body_of(r), "\"user\"") == 2 && strstr(body_of(r), a) < strstr(body_of(r), f));
-    r = call("GET", "/api/v1/user/block?limit=1", NULL, 1);
+    {
+        char want[200];
+        snprintf(want, sizeof want, "\"display_name\":\"Ann\"},\"created_at\":%lld", (long long)(T0 + 7000)); /* the first time stands */
+        CHECK(strstr(body_of(r), want) != NULL);
+    }
+    r = call("GET", "/api/v1/blocks?limit=1", NULL, 1);
     CHECK(count_of(body_of(r), "\"user\"") == 1 && member(r, "next", v, sizeof v) == 0 && !strcmp(v, "1"));
-    r = call("GET", "/api/v1/user/block?limit=1&offset=1", NULL, 1);
+    r = call("GET", "/api/v1/blocks?limit=1&offset=1", NULL, 1);
     CHECK(count_of(body_of(r), "\"user\"") == 1 && strstr(body_of(r), f) && member(r, "next", v, sizeof v) == 0 && !strcmp(v, "null"));
-    CHECK(status("GET", "/api/v1/user/block?state=x", NULL) == 400);
-    snprintf(body, sizeof body, "{\"user\":\"%s\"}", a);
-    CHECK(status("POST", "/api/v1/user/unblock", body) == 204);
-    CHECK(status("POST", "/api/v1/user/unblock", body) == 404);
-    CHECK(status("POST", "/api/v1/user/unblock", "{}") == 400);
+    CHECK(status("GET", "/api/v1/blocks?state=x", NULL) == 400);
+    r = call("POST", at("users", a, "unblock"), NULL, 1);
+    CHECK(r->status == 200 && !strstr(body_of(r), "blocked"));
+    CHECK(status("POST", at("users", a, "unblock"), NULL) == 404);
     CHECK(!puddle_streams_is_blocked(ss, a) && puddle_streams_is_blocked(ss, f));
 
     /* ---- a peer whose certificate changed ---- */
@@ -330,41 +353,38 @@ int main(void)
         fake_id(7, g);
         put(g, PUDDLE_STREAM_ACTIVE, T0 + 50000, NULL, NULL, "10.0.0.7:1");
         CHECK(puddle_streams_check_fingerprint(ss, g, fp) == 1);
-        snprintf(body, sizeof body, "{\"stream\":\"%s\"}", g);
-        CHECK(status("POST", "/api/v1/stream/trust", body) == 409);                  /* nothing to decide */
-        r = call("GET", "/api/v1/stream?state=active", NULL, 1);
+        CHECK(status("POST", at("streams", g, "trust"), NULL) == 409);              /* nothing to decide */
+        r = call("GET", "/api/v1/streams?state=active", NULL, 1);
         CHECK(!strstr(body_of(r), "certificate_changed"));
         CHECK(puddle_streams_check_fingerprint(ss, g, fp2) == 0);
-        r = call("GET", "/api/v1/stream?state=active", NULL, 1);
+        r = call("GET", "/api/v1/streams?state=active", NULL, 1);
         CHECK(strstr(body_of(r), "\"certificate_changed\":true"));                  /* the owner is told */
-        r = call("POST", "/api/v1/stream/trust", body, 1);
+        r = call("POST", at("streams", g, "trust"), NULL, 1);
         CHECK(r->status == 200 && valid_body(r) && !strstr(body_of(r), "certificate_changed"));
         CHECK(puddle_streams_check_fingerprint(ss, g, fp2) == 1);                    /* the new one is now the one */
-        CHECK(status("POST", "/api/v1/stream/trust", body) == 409);
-        CHECK(call("POST", "/api/v1/stream/trust", body, 0)->status == 404);
-        snprintf(body, sizeof body, "{\"stream\":\"%s\"}", f);
-        CHECK(status("POST", "/api/v1/stream/trust", body) == 409 || status("POST", "/api/v1/stream/trust", body) == 404);
-        CHECK(status("POST", "/api/v1/stream/trust", "{}") == 400);
+        CHECK(status("POST", at("streams", g, "trust"), NULL) == 409);
+        CHECK(call("POST", at("streams", g, "trust"), NULL, 0)->status == 404);
+        CHECK(status("POST", at("streams", f, "trust"), NULL) == 409 || status("POST", at("streams", f, "trust"), NULL) == 404);
         put(g, PUDDLE_STREAM_CLOSED, T0, NULL, NULL, NULL);
     }
 
     /* ---- the policy ---- */
-    r = call("GET", "/api/v1/stream/policy", NULL, 1);
+    r = call("GET", "/api/v1/streams/policy", NULL, 1);
     CHECK(r->status == 200 && !strcmp(body_of(r), "{\"access\":\"manual\"}"));
-    r = call("POST", "/api/v1/stream/policy", "{\"access\":\"open\"}", 1);
+    r = call("POST", "/api/v1/streams/policy/set", "{\"access\":\"open\"}", 1);
     CHECK(r->status == 200 && !strcmp(body_of(r), "{\"access\":\"open\"}") && puddle_streams_access(ss) == PUDDLE_ACCESS_OPEN);
-    CHECK(status("POST", "/api/v1/stream/policy", "{\"access\":\"closed\"}") == 200 && puddle_streams_access(ss) == PUDDLE_ACCESS_CLOSED);
-    CHECK(status("POST", "/api/v1/stream/policy", "{\"access\":\"Open\"}") == 400 && puddle_streams_access(ss) == PUDDLE_ACCESS_CLOSED);
-    CHECK(status("POST", "/api/v1/stream/policy", "{}") == 400 && status("POST", "/api/v1/stream/policy", "{\"access\":1}") == 400);
-    CHECK(status("POST", "/api/v1/stream/policy", "{\"access\":\"manual\"}") == 200);
+    CHECK(status("POST", "/api/v1/streams/policy/set", "{\"access\":\"closed\"}") == 200 && puddle_streams_access(ss) == PUDDLE_ACCESS_CLOSED);
+    CHECK(status("POST", "/api/v1/streams/policy/set", "{\"access\":\"Open\"}") == 400 && puddle_streams_access(ss) == PUDDLE_ACCESS_CLOSED);
+    CHECK(status("POST", "/api/v1/streams/policy/set", "{}") == 400 && status("POST", "/api/v1/streams/policy/set", "{\"access\":1}") == 400);
+    CHECK(status("POST", "/api/v1/streams/policy/set", "{\"access\":\"manual\"}") == 200);
 
     /* ---- invites ---- */
-    r = call("POST", "/api/v1/stream/invite", "", 1);
+    r = call("POST", "/api/v1/invites/create", "", 1);
     CHECK(r->status == 409 && strstr(body_of(r), "no_address") && strstr(body_of(r), "advertise"));  /* nowhere to point the link */
     CHECK(puddle_streams_invites(ss, clock_now, NULL, 0) == 0);                   /* and none was made */
     snprintf(cfg.advertise, sizeof cfg.advertise, "203.0.113.7:8443");
     clock_now = T0 + 10000;
-    r = call("POST", "/api/v1/stream/invite", "", 1);
+    r = call("POST", "/api/v1/invites/create", "", 1);
     CHECK(r->status == 201 && valid_body(r));
     char token[64], link[300];
     CHECK(member(r, "token", token, sizeof token) == 0 && puddle_invite_token_valid(token));
@@ -376,21 +396,22 @@ int main(void)
     }
     CHECK(member(r, "uses", v, sizeof v) == 0 && !strcmp(v, "1"));
     CHECK(member(r, "expires_at", v, sizeof v) == 0 && atoll(v) == T0 + 10000 + 604800000LL);
-    r = call("POST", "/api/v1/stream/invite", "{\"uses\":5,\"expires_in\":3600}", 1);
+    r = call("POST", "/api/v1/invites/create", "{\"uses\":5,\"expires_in\":3600}", 1);
     CHECK(r->status == 201 && member(r, "uses", v, sizeof v) == 0 && !strcmp(v, "5") && member(r, "expires_at", v, sizeof v) == 0 && atoll(v) == T0 + 10000 + 3600000LL);
     const char *bad_invites[] = { "{\"uses\":0}", "{\"uses\":1001}", "{\"uses\":\"2\"}", "{\"uses\":1.5}", "{\"expires_in\":59}",
                                   "{\"expires_in\":2592001}", "{\"expires_in\":\"x\"}", "nonsense", "[1]" };
     for (size_t i = 0; i < sizeof bad_invites / sizeof *bad_invites; i++)
-        if (status("POST", "/api/v1/stream/invite", bad_invites[i]) != 400) { fprintf(stderr, "FAIL invite %s accepted\n", bad_invites[i]); failures++; }
-    CHECK(status("POST", "/api/v1/stream/invite", "{\"uses\":1000,\"expires_in\":2592000}") == 201);
-    r = call("GET", "/api/v1/stream/invite", NULL, 1);
-    CHECK(r->status == 200 && valid_body(r) && count_of(body_of(r), "\"token\"") == 3 && strstr(body_of(r), token));
-    snprintf(body, sizeof body, "{\"token\":\"%s\"}", token);
-    CHECK(status("POST", "/api/v1/stream/invite/revoke", body) == 204);
-    CHECK(status("POST", "/api/v1/stream/invite/revoke", body) == 404);
-    CHECK(status("POST", "/api/v1/stream/invite/revoke", "{\"token\":\"junk\"}") == 404);
-    CHECK(status("POST", "/api/v1/stream/invite/revoke", "{}") == 400 && status("POST", "/api/v1/stream/invite/revoke", "{\"token\":5}") == 400);
-    CHECK(count_of(body_of(call("GET", "/api/v1/stream/invite", NULL, 1)), "\"token\"") == 2);
+        if (status("POST", "/api/v1/invites/create", bad_invites[i]) != 400) { fprintf(stderr, "FAIL invite %s accepted\n", bad_invites[i]); failures++; }
+    CHECK(status("POST", "/api/v1/invites/create", "{\"uses\":1000,\"expires_in\":2592000}") == 201);
+    r = call("GET", "/api/v1/invites", NULL, 1);
+    CHECK(r->status == 200 && valid_body(r) && count_of(body_of(r), "\"token\"") == 3 && strstr(body_of(r), token) && strstr(body_of(r), "\"next\":null"));
+    snprintf(body, sizeof body, "/api/v1/invites/%s/revoke", token);
+    r = call("POST", body, NULL, 1);
+    CHECK(r->status == 200 && member(r, "token", v, sizeof v) == 0 && !strcmp(v, token) && member(r, "uses", v, sizeof v) == 0 && !strcmp(v, "0"));
+    CHECK(status("POST", body, NULL) == 404);
+    CHECK(status("POST", "/api/v1/invites/junk/revoke", NULL) == 404);
+    CHECK(status("POST", "/api/v1/invites/a.b/revoke", NULL) == 404);
+    CHECK(count_of(body_of(call("GET", "/api/v1/invites", NULL, 1)), "\"token\"") == 2);
     /* a token made here is one a stranger's request can spend */
     {
         puddle_invite live[PUDDLE_MAX_INVITES];

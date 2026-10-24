@@ -36,7 +36,7 @@ or looks like it conflicts with this list, ask rather than guess.
 
 ## Where things are
 
-- `src/core/`: config, TLS, HTTP, listener, storage (plain C, shared by both programs)
+- `src/core/`: config, TLS, HTTP, listener, storage (C++20 with C-callable headers, shared by both programs); `objects/` the owner API's objects (User, Stream, Conversation, Message, Group), `api/` the owner routes that use them
 - `src/service/`: `puddled`, the headless Puddle
 - `src/gui/`: `Puddle`, the desktop app (Qt Quick): `app/` is the C++ behind the window, `qml/` the screens by topic, `qml/theme/Theme.qml` every colour and size; see `src/gui/README.md`
 - `api/openapi.yaml`: API for phone clients and the desktop app. `api/federation.yaml`: streams.

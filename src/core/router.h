@@ -64,6 +64,9 @@ typedef struct {
     char mime[40];
 } puddle_blob;
 
+#define PUDDLE_PATH_PARAMS 3
+#define PUDDLE_PARAM_MAX 72 /* an event id (64 hex) is the longest value a path segment carries */
+
 typedef struct {
     puddle_ctx *ctx;
     puddle_blob *blob;                     /* set to answer with a file instead of JSON */
@@ -72,7 +75,13 @@ typedef struct {
     size_t body_len;
     puddle_auth_kind auth;
     const char *sender;                    /* PEER/CHAIN: the authenticated sender's user id; NULL for OWNER */
+    /* the `{name:type}` segments of the route's path, in order, already checked against their type */
+    char param_name[PUDDLE_PATH_PARAMS][16];
+    char param[PUDDLE_PATH_PARAMS][PUDDLE_PARAM_MAX];
 } puddle_call;
+
+/* The value of the path segment `{name:...}`; "" if the route has none by that name. */
+const char *puddle_param(const puddle_call *call, const char *name);
 
 /* Write the JSON answer into `w` and return the HTTP status; write nothing for an empty body. */
 typedef int (*puddle_handler)(const puddle_call *call, puddle_jw *w);
@@ -82,6 +91,11 @@ typedef int (*puddle_handler)(const puddle_call *call, puddle_jw *w);
 typedef int (*puddle_chain_key_fn)(puddle_ctx *ctx, const unsigned char *body, size_t body_len,
                                    const char *sender_id, const char *kid, unsigned char sign_pub[32]);
 
+/* A route's path is literal segments and typed `{name:type}` ones. A segment only matches a value of its type, so a
+ * malformed id is answered like a path that does not exist:
+ *   id     a user id or a group id (52 characters of base32)
+ *   event  an event id (64 hex)
+ *   token  an invite token (letters, digits, '-' and '_', up to 64) */
 typedef struct {
     const char *method;                    /* "GET" or "POST" only */
     const char *path;
@@ -129,7 +143,7 @@ int puddle_query_parse(const char *target, const char *const *keys, size_t nkeys
 /* Helper for handlers: write {"error":"<code>"} and return `status`. */
 int puddle_fail(puddle_jw *w, int status, const char *code);
 
-/* The Puddle's own routes (routes.c). */
+/* The Puddle's own routes (routes.cpp). */
 extern const puddle_route puddle_routes[];
 extern const size_t puddle_routes_count;
 

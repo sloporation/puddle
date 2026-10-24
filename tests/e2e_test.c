@@ -227,7 +227,7 @@ static void request(node *from, node *to, const char *message, const char *link_
 {
     char body[900];
     snprintf(body, sizeof body, "{\"target\":\"%s\",\"message\":\"%s\"}", link_override ? link_override : to->link, message);
-    int st = post(from, "/api/v1/stream/request", body);
+    int st = post(from, "/api/v1/streams/request", body);
     if (st != expect) { fprintf(stderr, "FAIL request %s->%s: %d %s\n", from->name, to->name, st, resp); failures++; }
 }
 
@@ -318,13 +318,32 @@ static const char *status_of(node *to, puddle_identity *who, const char *who_id)
     return state;
 }
 
-static void stream_body(char *out, size_t cap, const char *id) { snprintf(out, cap, "{\"stream\":\"%s\"}", id); }
+/* The owner API names what it acts on in the path. stream_body() picks the stream (and leaves an empty body);
+ * sp("accept") is then "/api/v1/streams/<it>/accept". dm_to and dm_msg do the same for a conversation and a message. */
+static char sid[64];
+static const char *dm_to, *dm_msg;
+static void stream_body(char *out, size_t cap, const char *id) { snprintf(sid, sizeof sid, "%s", id); snprintf(out, cap, "{}"); }
+static const char *path_of(const char *kind, const char *id, const char *rest)
+{
+    static char buf[4][400];
+    static int k;
+    k = (k + 1) % 4;
+    snprintf(buf[k], sizeof buf[k], "/api/v1/%s/%s%s%s", kind, id, rest ? "/" : "", rest ? rest : "");
+    return buf[k];
+}
+static const char *sp(const char *verb) { return path_of("streams", sid, verb); }
+static const char *msg_path(const char *verb)
+{
+    char rest[120];
+    snprintf(rest, sizeof rest, "messages/%s/%s", dm_msg, verb);
+    return path_of("conversations", dm_to, rest);
+}
 
 /* has this node asked someone at an address, and not heard who it is yet? */
 static int has_provisional(node *n)
 {
     char body[8000];
-    return api(n, "GET", "/api/v1/stream?state=pending_out", NULL, body, sizeof body) == 200 && strstr(body, "\"provisional\":true") != NULL;
+    return api(n, "GET", "/api/v1/streams?state=pending_out", NULL, body, sizeof body) == 200 && strstr(body, "\"provisional\":true") != NULL;
 }
 
 static int json_has(const char *needle) { return strstr(resp, needle) != NULL; }
@@ -350,13 +369,13 @@ int main(void)
     request(&bob, &alice, "hi, it is Bob", NULL, 201);
     CHECK(json_has("\"state\":\"pending_out\"") && json_has("\"message\":\"hi, it is Bob\""));
     CHECK(wait_state(&alice, bob.uid, PUDDLE_STREAM_PENDING_IN));                                 /* it arrived, and waits for her */
-    CHECK(get(&alice, "/api/v1/stream?state=pending_in") == 200 && json_has(bob.uid) && json_has("\"message\":\"hi, it is Bob\"") &&
+    CHECK(get(&alice, "/api/v1/streams?state=pending_in") == 200 && json_has(bob.uid) && json_has("\"message\":\"hi, it is Bob\"") &&
           json_has("\"display_name\":\"Bob\""));
     {
         CHECK(has_provisional(&bob));                                                              /* Bob does not know yet, nor who she is */
     }
     stream_body(body, sizeof body, bob.uid);
-    CHECK(post(&alice, "/api/v1/stream/accept", body) == 200 && json_has("\"state\":\"active\""));
+    CHECK(post(&alice, sp("accept"), body) == 200 && json_has("\"state\":\"active\""));
     CHECK(wait_state(&bob, alice.uid, PUDDLE_STREAM_ACTIVE));                                     /* told, and verified */
     CHECK(wait_owed_cleared(&alice, bob.uid));                                                    /* ...so it is no longer owed */
     {
@@ -368,29 +387,29 @@ int main(void)
               strstr(st.profile ? st.profile : "", "Bob"));
         puddle_stream_free(&st);
     }
-    CHECK(get(&bob, "/api/v1/stream?state=active") == 200 && json_has(alice.uid) && json_has("\"display_name\":\"Alice\""));
+    CHECK(get(&bob, "/api/v1/streams?state=active") == 200 && json_has(alice.uid) && json_has("\"display_name\":\"Alice\""));
     CHECK(outbox_count(&alice, NULL, NULL) == 0 && outbox_count(&bob, NULL, NULL) == 0);        /* nothing left waiting anywhere */
 
     /* ---- messages between the two ---- */
     {
         char body2[600], url[300];
-        snprintf(body2, sizeof body2, "{\"to\":\"%s\",\"body\":\"hello Alice, it's Bob\"}", alice.uid);
-        CHECK(post(&bob, "/api/v1/dm/send", body2) == 201 && json_has("\"outgoing\":true"));
-        snprintf(url, sizeof url, "/api/v1/dm/messages?user=%s", bob.uid);
+        snprintf(body2, sizeof body2, "{\"body\":\"hello Alice, it's Bob\"}"); dm_to = alice.uid;
+        CHECK(post(&bob, path_of("conversations", dm_to, "messages/send"), body2) == 201 && json_has("\"outgoing\":true"));
+        snprintf(url, sizeof url, "/api/v1/conversations/%s/messages", bob.uid);
         int arrived = 0;
         for (int i = 0; i < 100 && !arrived; i++) {
             arrived = get(&alice, url) == 200 && json_has("hello Alice, it's Bob");
             if (!arrived) usleep(50000);
         }
         CHECK(arrived && json_has("\"outgoing\":false") && json_has(bob.uid));                  /* it came in, from Bob */
-        snprintf(body2, sizeof body2, "{\"to\":\"%s\",\"body\":\"hi Bob \\u2014 caf\\u00e9 \\ud83d\\ude42\"}", bob.uid);
-        CHECK(post(&alice, "/api/v1/dm/send", body2) == 201);
+        snprintf(body2, sizeof body2, "{\"body\":\"hi Bob \\u2014 caf\\u00e9 \\ud83d\\ude42\"}"); dm_to = bob.uid;
+        CHECK(post(&alice, path_of("conversations", dm_to, "messages/send"), body2) == 201);
         char msg_id[80] = "";
         {
             const char *ip = strstr(resp, "\"id\":\"");
             if (ip) snprintf(msg_id, sizeof msg_id, "%.64s", ip + 6);
         }
-        snprintf(url, sizeof url, "/api/v1/dm/messages?user=%s", alice.uid);
+        snprintf(url, sizeof url, "/api/v1/conversations/%s/messages", alice.uid);
         int back = 0;
         for (int i = 0; i < 100 && !back; i++) {
             back = get(&bob, url) == 200 && json_has("caf\xC3\xA9 \xF0\x9F\x99\x82");
@@ -400,28 +419,28 @@ int main(void)
         CHECK(json_has("hello Alice, it's Bob") && json_has("\"outgoing\":true") && json_has("\"outgoing\":false"));
         CHECK(strstr(resp, "hello Alice") < strstr(resp, "hi Bob"));                              /* in the order they were said */
         /* Alice corrects it, and Bob sees the correction; she takes it back, and Bob sees that */
-        snprintf(body2, sizeof body2, "{\"user\":\"%s\",\"message\":\"%s\",\"body\":\"hi Bob (corrected)\"}", bob.uid, msg_id);
-        CHECK(post(&alice, "/api/v1/dm/edit", body2) == 200 && json_has("\"edited\":true"));
+        snprintf(body2, sizeof body2, "{\"body\":\"hi Bob (corrected)\"}"); dm_to = bob.uid; dm_msg = msg_id;
+        CHECK(post(&alice, msg_path("edit"), body2) == 200 && json_has("\"edited_at\""));
         int edited = 0;
         for (int i = 0; i < 100 && !edited; i++) {
-            edited = get(&bob, url) == 200 && json_has("hi Bob (corrected)") && json_has("\"edited\":true");
+            edited = get(&bob, url) == 200 && json_has("hi Bob (corrected)") && json_has("\"edited_at\"");
             if (!edited) usleep(50000);
         }
         CHECK(edited && !json_has("caf\xC3\xA9"));
-        snprintf(body2, sizeof body2, "{\"user\":\"%s\",\"message\":\"%s\"}", bob.uid, msg_id);
-        CHECK(post(&alice, "/api/v1/dm/delete", body2) == 204);
+        snprintf(body2, sizeof body2, "{}"); dm_to = bob.uid; dm_msg = msg_id;
+        CHECK(post(&alice, msg_path("delete"), NULL) == 200);
         int gone = 0;
         for (int i = 0; i < 100 && !gone; i++) {
             gone = get(&bob, url) == 200 && json_has("\"deleted\":true");
             if (!gone) usleep(50000);
         }
         CHECK(gone && !json_has("hi Bob") && json_has("hello Alice, it's Bob"));
-        snprintf(body2, sizeof body2, "{\"user\":\"%s\",\"message\":\"%s\"}", alice.uid, msg_id);
-        CHECK(post(&bob, "/api/v1/dm/delete", body2) == 404);                                      /* Bob cannot take back what Alice said */
+        snprintf(body2, sizeof body2, "{}"); dm_to = alice.uid; dm_msg = msg_id;
+        CHECK(post(&bob, msg_path("delete"), NULL) == 404);                                      /* Bob cannot take back what Alice said */
         CHECK(outbox_count(&alice, NULL, NULL) == 0 && outbox_count(&bob, NULL, NULL) == 0);     /* delivered, nothing waiting */
         /* someone with no stream cannot be sent to, nor send */
-        snprintf(body2, sizeof body2, "{\"to\":\"%s\",\"body\":\"hello\"}", eve.uid);
-        CHECK(post(&alice, "/api/v1/dm/send", body2) == 403 && json_has("no_stream"));
+        snprintf(body2, sizeof body2, "{\"body\":\"hello\"}"); dm_to = eve.uid;
+        CHECK(post(&alice, path_of("conversations", dm_to, "messages/send"), body2) == 404);                 /* no stream: no conversation */
         CHECK(stream_state(&bob, alice.uid, &(puddle_stream_state){0}));
     }
 
@@ -443,27 +462,27 @@ int main(void)
         snprintf(url, sizeof url, "/api/v1/media?hash=%s", ah_main);
         CHECK(api(&bob, "GET", url, NULL, resp, sizeof resp) == 200);                              /* and Bob's app can show it */
         CHECK(outbox_count(&alice, NULL, NULL) == 0 && outbox_count(&bob, NULL, NULL) == 0);
-        CHECK(get(&bob, "/api/v1/stream?state=active") == 200 && json_has(ah_main) && json_has("\"color\"") == 0);   /* its reference, with the profile */
-        CHECK(get(&alice, "/api/v1/profile") == 200 && json_has("Alice (work)") && json_has("\"color\":{\"colors\":[\"#336699\"]}") && json_has(ah_work));
+        CHECK(get(&bob, "/api/v1/streams?state=active") == 200 && json_has(ah_main) && json_has("\"color\"") == 0);   /* its reference, with the profile */
+        CHECK(get(&alice, "/api/v1/profiles") == 200 && json_has("Alice (work)") && json_has("\"color\":{\"colors\":[\"#336699\"]}") && json_has(ah_work));
 
         /* Alice shows Bob her work profile: he is told, learns of the new picture, and fetches it */
         CHECK(!puddle_media_have(bob.cfg.data_dir, ah_work));
-        snprintf(body2, sizeof body2, "{\"stream\":\"%s\",\"profile\":\"work\"}", bob.uid);
-        CHECK(post(&alice, "/api/v1/stream/profile", body2) == 200 && json_has("\"profile\":\"work\""));
+        snprintf(body2, sizeof body2, "{\"profile\":\"work\"}");
+        CHECK(post(&alice, path_of("streams", bob.uid, "profile"), body2) == 200 && json_has("\"profile\":\"work\""));
         int seen = 0;
         for (int i = 0; i < 200 && !seen; i++) {
-            seen = get(&bob, "/api/v1/stream?state=active") == 200 && json_has("Alice (work)") && puddle_media_have(bob.cfg.data_dir, ah_work);
+            seen = get(&bob, "/api/v1/streams?state=active") == 200 && json_has("Alice (work)") && puddle_media_have(bob.cfg.data_dir, ah_work);
             if (!seen) usleep(50000);
         }
         CHECK(seen && json_has("#336699"));
         snprintf(url, sizeof url, "/api/v1/media?hash=%s", ah_work);
         CHECK(api(&bob, "GET", url, NULL, resp, sizeof resp) == 200);
         /* and back to the default */
-        snprintf(body2, sizeof body2, "{\"stream\":\"%s\",\"profile\":null}", bob.uid);
-        CHECK(post(&alice, "/api/v1/stream/profile", body2) == 200);
+        snprintf(body2, sizeof body2, "{\"profile\":null}");
+        CHECK(post(&alice, path_of("streams", bob.uid, "profile"), body2) == 200);
         int back = 0;
         for (int i = 0; i < 200 && !back; i++) {
-            back = get(&bob, "/api/v1/stream?state=active") == 200 && !json_has("Alice (work)") && json_has("\"display_name\":\"Alice\"");
+            back = get(&bob, "/api/v1/streams?state=active") == 200 && !json_has("Alice (work)") && json_has("\"display_name\":\"Alice\"");
             if (!back) usleep(50000);
         }
         CHECK(back);
@@ -491,8 +510,8 @@ int main(void)
     {
         node_down(&bob);
         char body2[600], url[300], buf[400];
-        snprintf(body2, sizeof body2, "{\"to\":\"%s\",\"body\":\"sent before I changed keys\"}", bob.uid);
-        CHECK(post(&alice, "/api/v1/dm/send", body2) == 201);                                      /* Bob is away: it waits, signed by the old key */
+        snprintf(body2, sizeof body2, "{\"body\":\"sent before I changed keys\"}"); dm_to = bob.uid;
+        CHECK(post(&alice, path_of("conversations", dm_to, "messages/send"), body2) == 201);                                      /* Bob is away: it waits, signed by the old key */
         usleep(1000000);
         int queued;
         CHECK(outbox_count(&alice, bob.uid, &queued) == 1 && queued == 1);
@@ -508,7 +527,7 @@ int main(void)
         CHECK(outbox_count(&alice, bob.uid, NULL) == 2);                                           /* the news of the new keys, ahead of the message */
         CHECK(node_up(&bob) == 0);
         puddle_outbox_retry_now(puddle_server_outbox(alice.srv), bob.uid);
-        snprintf(url, sizeof url, "/api/v1/dm/messages?user=%s", alice.uid);
+        snprintf(url, sizeof url, "/api/v1/conversations/%s/messages", alice.uid);
         int arrived = 0;
         for (int i = 0; i < 200 && !arrived; i++) {
             arrived = get(&bob, url) == 200 && json_has("sent before I changed keys");
@@ -527,19 +546,19 @@ int main(void)
         CHECK(puddle_streams_get(puddle_server_streams(alice.srv), bob.uid, &st) == 0 && st.chain_sent == 1);   /* and Alice knows he does */
         puddle_stream_free(&st);
         /* from now on, plain sailing, both ways */
-        snprintf(body2, sizeof body2, "{\"to\":\"%s\",\"body\":\"after the change\"}", bob.uid);
-        CHECK(post(&alice, "/api/v1/dm/send", body2) == 201);
+        snprintf(body2, sizeof body2, "{\"body\":\"after the change\"}"); dm_to = bob.uid;
+        CHECK(post(&alice, path_of("conversations", dm_to, "messages/send"), body2) == 201);
         int again = 0;
-        snprintf(url, sizeof url, "/api/v1/dm/messages?user=%s", alice.uid);
+        snprintf(url, sizeof url, "/api/v1/conversations/%s/messages", alice.uid);
         for (int i = 0; i < 100 && !again; i++) {
             again = get(&bob, url) == 200 && json_has("after the change");
             if (!again) usleep(50000);
         }
         CHECK(again);
-        snprintf(body2, sizeof body2, "{\"to\":\"%s\",\"body\":\"and back\"}", alice.uid);
-        CHECK(post(&bob, "/api/v1/dm/send", body2) == 201);
+        snprintf(body2, sizeof body2, "{\"body\":\"and back\"}"); dm_to = alice.uid;
+        CHECK(post(&bob, path_of("conversations", dm_to, "messages/send"), body2) == 201);
         int back = 0;
-        snprintf(url, sizeof url, "/api/v1/dm/messages?user=%s", bob.uid);
+        snprintf(url, sizeof url, "/api/v1/conversations/%s/messages", bob.uid);
         for (int i = 0; i < 100 && !back; i++) {
             back = get(&alice, url) == 200 && json_has("and back");
             if (!back) usleep(50000);
@@ -586,10 +605,10 @@ int main(void)
     request(&carol, &alice, "may I?", NULL, 201);
     CHECK(wait_state(&alice, carol.uid, PUDDLE_STREAM_PENDING_IN));
     stream_body(body, sizeof body, carol.uid);
-    CHECK(post(&alice, "/api/v1/stream/decline", body) == 204);
+    CHECK(post(&alice, sp("decline"), body) == 200);
     CHECK(wait_state(&carol, alice.uid, PUDDLE_STREAM_CLOSED));                                   /* Carol is told */
     CHECK(wait_owed_cleared(&alice, carol.uid));
-    CHECK(get(&carol, "/api/v1/stream?state=closed") == 200 && json_has(alice.uid));
+    CHECK(get(&carol, "/api/v1/streams?state=closed") == 200 && json_has(alice.uid));
     CHECK(send_as(&alice, puddle_server_identity(carol.srv), "/stream/v1/close", "{}", 2) == 4030);  /* closed: nothing to close */
     request(&carol, &alice, "please?", NULL, 201);                                                 /* a closed stream may be asked for again */
     CHECK(wait_state(&alice, carol.uid, PUDDLE_STREAM_PENDING_IN));
@@ -600,12 +619,12 @@ int main(void)
     request(&bob, &alice, "already friends", NULL, 409);                                           /* a stream that is open */
     CHECK(json_has("already_streaming"));
     stream_body(body, sizeof body, carol.uid);
-    CHECK(post(&alice, "/api/v1/stream/decline", body) == 204);
+    CHECK(post(&alice, sp("decline"), body) == 200);
     CHECK(wait_state(&carol, alice.uid, PUDDLE_STREAM_CLOSED));
     CHECK(wait_owed_cleared(&alice, carol.uid));
 
     /* ---- an invite is let in at once ---- */
-    CHECK(post(&alice, "/api/v1/stream/invite", "{\"uses\":1}") == 201);
+    CHECK(post(&alice, "/api/v1/invites/create", "{\"uses\":1}") == 201);
     char invite_link[400];
     {
         const char *l = strstr(resp, "\"link\":\"");
@@ -616,12 +635,12 @@ int main(void)
     CHECK(wait_state(&alice, dave.uid, PUDDLE_STREAM_ACTIVE));                                    /* no one clicked anything */
     CHECK(wait_state(&dave, alice.uid, PUDDLE_STREAM_ACTIVE));
     CHECK(wait_owed_cleared(&alice, dave.uid));
-    CHECK(get(&alice, "/api/v1/stream/invite") == 200 && !json_has("\"token\""));                  /* the single use is spent */
+    CHECK(get(&alice, "/api/v1/invites") == 200 && !json_has("\"token\""));                  /* the single use is spent */
 
     /* ---- someone who is blocked, and a Puddle that is not taking requests, look just like one that is deciding ---- */
     stream_body(body, sizeof body, eve.uid);
     snprintf(body, sizeof body, "{\"user\":\"%s\"}", eve.uid);
-    CHECK(post(&alice, "/api/v1/user/block", body) == 201);
+    CHECK(post(&alice, path_of("users", eve.uid, "block"), NULL) == 200);
     request(&eve, &alice, "let me in", NULL, 201);
     usleep(700000);
     {
@@ -630,7 +649,7 @@ int main(void)
         CHECK(!stream_state(&alice, eve.uid, &s));                                                /* and Alice holds nothing of Eve */
     }
     CHECK(wait_owed_cleared(&eve, alice.uid) || 1);
-    CHECK(post(&alice, "/api/v1/stream/policy", "{\"access\":\"closed\"}") == 200);
+    CHECK(post(&alice, "/api/v1/streams/policy/set", "{\"access\":\"closed\"}") == 200);
     {
         node *gina = &carol;                                                                      /* Carol asks again while Alice is closed */
         request(gina, &alice, "knock", NULL, 201);
@@ -639,7 +658,7 @@ int main(void)
         CHECK(stream_state(&alice, carol.uid, &s) && s == PUDDLE_STREAM_CLOSED);                  /* nothing new recorded */
         CHECK(has_provisional(gina));
     }
-    CHECK(post(&alice, "/api/v1/stream/policy", "{\"access\":\"manual\"}") == 200);
+    CHECK(post(&alice, "/api/v1/streams/policy/set", "{\"access\":\"manual\"}") == 200);
     /* what the question "is my request still waiting?" gets: pending for a block, a closed door and a stranger alike */
     {
         char fdir[900], phrase[PUDDLE_PHRASE_LEN + 1], uid[PUDDLE_USER_ID_LEN + 1];
@@ -649,9 +668,9 @@ int main(void)
         puddle_identity_id(frank, uid);
         CHECK(!strcmp(status_of(&alice, frank, uid), "pending"));                                   /* never heard of */
         CHECK(!strcmp(status_of(&alice, puddle_server_identity(eve.srv), eve.uid), "pending"));     /* blocked */
-        CHECK(post(&alice, "/api/v1/stream/policy", "{\"access\":\"closed\"}") == 200);
+        CHECK(post(&alice, "/api/v1/streams/policy/set", "{\"access\":\"closed\"}") == 200);
         CHECK(!strcmp(status_of(&alice, frank, uid), "pending"));                                   /* a closed door */
-        CHECK(post(&alice, "/api/v1/stream/policy", "{\"access\":\"manual\"}") == 200);
+        CHECK(post(&alice, "/api/v1/streams/policy/set", "{\"access\":\"manual\"}") == 200);
         CHECK(!strcmp(status_of(&alice, puddle_server_identity(bob.srv), bob.uid), "approved"));    /* the one who was let in */
         CHECK(!strcmp(status_of(&alice, puddle_server_identity(carol.srv), carol.uid), "declined")); /* the one who was turned down */
         puddle_identity_close(frank);
@@ -659,22 +678,22 @@ int main(void)
 
     /* ---- closing ---- */
     stream_body(body, sizeof body, alice.uid);
-    CHECK(post(&bob, "/api/v1/stream/delete", body) == 204);
+    CHECK(post(&bob, sp("delete"), body) == 200);
     CHECK(wait_state(&alice, bob.uid, PUDDLE_STREAM_CLOSED));                                     /* she is told */
     CHECK(wait_owed_cleared(&bob, alice.uid));
     request(&bob, &alice, "back again", NULL, 201);                                                /* and can be asked again */
     CHECK(wait_state(&alice, bob.uid, PUDDLE_STREAM_PENDING_IN));
     stream_body(body, sizeof body, bob.uid);
-    CHECK(post(&alice, "/api/v1/stream/accept", body) == 200);
+    CHECK(post(&alice, sp("accept"), body) == 200);
     CHECK(wait_state(&bob, alice.uid, PUDDLE_STREAM_ACTIVE));
     CHECK(wait_owed_cleared(&alice, bob.uid));
-    CHECK(post(&alice, "/api/v1/stream/delete", "{\"stream\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}") == 404);
+    CHECK(post(&alice, "/api/v1/streams/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/delete", NULL) == 404);
 
     /* ---- a Puddle that is away when it is answered ---- */
     {
         node_down(&dave);
         stream_body(body, sizeof body, dave.uid);
-        CHECK(post(&alice, "/api/v1/stream/delete", body) == 204);                                 /* Dave is down: the news has to wait */
+        CHECK(post(&alice, sp("delete"), body) == 200);                                 /* Dave is down: the news has to wait */
         usleep(1500000);
         int queued;
         CHECK(outbox_count(&alice, dave.uid, &queued) == 1 && queued == 1);
@@ -716,11 +735,11 @@ int main(void)
         }
         CHECK(learned);                                                                            /* Bob told Alice, signed, before anyone asked */
         CHECK(owed_of(&bob, alice.uid) == PUDDLE_OWED_NONE);
-        CHECK(get(&alice, "/api/v1/stream?state=active") == 200 && !json_has("certificate_changed"));
+        CHECK(get(&alice, "/api/v1/streams?state=active") == 200 && !json_has("certificate_changed"));
         char b2[300], url[300];
-        snprintf(b2, sizeof b2, "{\"to\":\"%s\",\"body\":\"still me, new certificate\"}", bob.uid);
-        CHECK(post(&alice, "/api/v1/dm/send", b2) == 201);                                         /* and nothing is held up */
-        snprintf(url, sizeof url, "/api/v1/dm/messages?user=%s", alice.uid);
+        snprintf(b2, sizeof b2, "{\"body\":\"still me, new certificate\"}"); dm_to = bob.uid;
+        CHECK(post(&alice, path_of("conversations", dm_to, "messages/send"), b2) == 201);                                         /* and nothing is held up */
+        snprintf(url, sizeof url, "/api/v1/conversations/%s/messages", alice.uid);
         int got = 0;
         for (int i = 0; i < 100 && !got; i++) {
             got = get(&bob, url) == 200 && json_has("still me, new certificate");
@@ -741,7 +760,7 @@ int main(void)
         remove(path);                                                                              /* as if restored from a backup: no memory of having announced */
         CHECK(node_up(&bob) == 0);
         stream_body(body, sizeof body, bob.uid);
-        CHECK(post(&alice, "/api/v1/stream/delete", body) == 204);
+        CHECK(post(&alice, sp("delete"), body) == 200);
         int held = 0;
         for (int i = 0; i < 100 && !held; i++) {
             puddle_ob_item *l;
@@ -752,10 +771,10 @@ int main(void)
             if (!held) usleep(50000);
         }
         CHECK(held);
-        CHECK(get(&alice, "/api/v1/stream?state=closed") == 200 && json_has("\"certificate_changed\":true"));
+        CHECK(get(&alice, "/api/v1/streams?state=closed") == 200 && json_has("\"certificate_changed\":true"));
         puddle_stream_state s;
         CHECK(stream_state(&bob, alice.uid, &s) && s == PUDDLE_STREAM_ACTIVE);                    /* nothing reached Bob */
-        CHECK(post(&alice, "/api/v1/stream/trust", body) == 200 && !json_has("certificate_changed"));
+        CHECK(post(&alice, sp("trust"), body) == 200 && !json_has("certificate_changed"));
         CHECK(wait_state(&bob, alice.uid, PUDDLE_STREAM_CLOSED));                                 /* now it did */
         CHECK(wait_owed_cleared(&alice, bob.uid));
     }
@@ -772,7 +791,7 @@ int main(void)
         snprintf(l, sizeof l, "127.0.0.1:%u", free_port());
         request(&alice, &bob, "to nobody", l, 201);                                                /* nothing there: waits, and is not a failure */
         usleep(800000);
-        CHECK(get(&alice, "/api/v1/stream?state=pending_out") == 200 && json_has(l) && json_has("\"provisional\":true"));
+        CHECK(get(&alice, "/api/v1/streams?state=pending_out") == 200 && json_has(l) && json_has("\"provisional\":true"));
         request(&alice, &bob, "to nobody again", l, 409);                                          /* once is enough */
         CHECK(json_has("already_requested"));
     }
@@ -780,14 +799,14 @@ int main(void)
         /* blocking is by id, which is only known once someone answers: Alice blocks Eve, then asks at Eve's address; Eve says yes,
          * and Alice drops it on seeing whose answer it is */
         snprintf(body, sizeof body, "{\"user\":\"%s\"}", eve.uid);
-        CHECK(post(&alice, "/api/v1/user/block", body) == 201);
+        CHECK(post(&alice, path_of("users", eve.uid, "block"), NULL) == 200);
         request(&alice, &eve, "who are you", eve.link, 201);
         CHECK(wait_state(&eve, alice.uid, PUDDLE_STREAM_ACTIVE));                                  /* Eve had asked Alice too: both asked, so yes */
         usleep(1000000);
         puddle_stream_state s;
         CHECK(!stream_state(&alice, eve.uid, &s));                                                 /* Alice holds nothing of Eve */
         snprintf(body, sizeof body, "{\"user\":\"%s\"}", eve.uid);
-        CHECK(post(&alice, "/api/v1/user/unblock", body) == 204);
+        CHECK(post(&alice, path_of("users", eve.uid, "unblock"), NULL) == 200);
     }
 
     /* ---- strangers ---- */

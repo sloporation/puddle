@@ -191,17 +191,18 @@ int main(void)
     char body[1500], gid[53], url[300];
 
     /* nothing is open to anyone but the owner */
-    CHECK(call_m("GET", "/api/v1/gm", "", NULL, 0)->status == 404);
-    CHECK(call_m("POST", "/api/v1/gm/create", "{\"name\":\"x\"}", NULL, 0)->status == 404);
-    CHECK(own("GET", "/api/v1/gm", NULL)->status == 200 && has_text(own("GET", "/api/v1/gm", NULL), "\"groups\":[]"));
+    CHECK(call_m("GET", "/api/v1/groups", "", NULL, 0)->status == 404);
+    CHECK(call_m("POST", "/api/v1/groups/create", "{\"name\":\"x\"}", NULL, 0)->status == 404);
+    CHECK(own("GET", "/api/v1/groups", NULL)->status == 200 && has_text(own("GET", "/api/v1/groups", NULL), "\"items\":[]"));
 
     /* ---- create ---- */
-    CHECK(own("POST", "/api/v1/gm/create", "{}")->status == 400);
-    CHECK(own("POST", "/api/v1/gm/create", "{\"name\":\"\"}")->status == 400);
-    CHECK(own("POST", "/api/v1/gm/create", "{\"name\":\"x\",\"members\":\"alice\"}")->status == 400);
+    CHECK(own("POST", "/api/v1/groups/create", "{}")->status == 400);
+    CHECK(own("POST", "/api/v1/groups/create", "{\"name\":\"\"}")->status == 400);
+    CHECK(own("POST", "/api/v1/groups/create", "{\"name\":\"x\",\"members\":\"alice\"}")->status == 400);
     snprintf(body, sizeof body, "{\"name\":\"Weekend\",\"members\":[\"%s\",\"%s\",\"nope\",\"%s\"]}", alice.uid, dave.uid, erin.uid);
-    r = own("POST", "/api/v1/gm/create", body);
-    CHECK(r->status == 201 && has_text(r, "\"name\":\"Weekend\"") && has_text(r, "\"my\":\"in\"") && has_text(r, "\"creator\":\"") && has_text(r, alice.uid));
+    r = own("POST", "/api/v1/groups/create", body);
+    CHECK(r->status == 201 && has_text(r, "\"group\":{\"id\":\"") && has_text(r, "\"name\":\"Weekend\"") && has_text(r, "\"my\":\"in\"") &&
+          has_text(r, "\"creator\":{\"id\":\"") && has_text(r, alice.uid));
     CHECK(has_text(r, "\"not_invited\":[{\"user\":\"") && has_text(r, "\"reason\":\"no_stream\"") && count_in(body_of(r), "no_stream") == 2); /* dave is no friend; erin is no one */
     {
         const char *at = strstr(body_of(r), "\"id\":\"");
@@ -209,10 +210,18 @@ int main(void)
         gid[52] = 0;
         CHECK(puddle_id_valid(gid) && in_state(gid, alice.uid, PUDDLE_GM_INVITED) && queued(alice.uid, "group_invite") == 1);
     }
-    r = own("GET", "/api/v1/gm", NULL);
-    CHECK(r->status == 200 && has_text(r, gid) && has_text(r, "\"state\":\"invited\"") && has_text(r, "\"state\":\"member\""));
-    CHECK(own("GET", "/api/v1/gm?limit=0", NULL)->status == 400 && own("GET", "/api/v1/gm?offset=x", NULL)->status == 400);
-    CHECK(own("POST", "/api/v1/gm", "{}")->status == 405);
+    r = own("GET", "/api/v1/groups", NULL);
+    CHECK(r->status == 200 && has_text(r, gid) && has_text(r, "\"state\":\"invited\"") && has_text(r, "\"state\":\"member\"") &&
+          has_text(r, "\"members\":[{\"user\":{\"id\":\"") && has_text(r, "\"since\":"));
+    CHECK(own("GET", "/api/v1/groups?limit=0", NULL)->status == 400 && own("GET", "/api/v1/groups?offset=x", NULL)->status == 400);
+    CHECK(own("POST", "/api/v1/groups", "{}")->status == 405);
+    char gpath[200], cpath[200];
+    snprintf(gpath, sizeof gpath, "/api/v1/groups/%s", gid);
+    snprintf(cpath, sizeof cpath, "/api/v1/conversations/%s", gid);
+#define G(verb) (snprintf(url, sizeof url, "%s/%s", gpath, verb), url)
+#define C(rest) (snprintf(url, sizeof url, "%s/%s", cpath, rest), url)
+    r = own("GET", gpath, NULL);
+    CHECK(r->status == 200 && has_text(r, "\"name\":\"Weekend\""));
 
     /* alice joins (an event, as she is a friend) */
     {
@@ -223,25 +232,23 @@ int main(void)
     }
 
     /* ---- invite, rename, leave, accept, decline ---- */
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"user\":\"%s\"}", gid, bob.uid);
-    CHECK(own("POST", "/api/v1/gm/invite", body)->status == 204 && in_state(gid, bob.uid, PUDDLE_GM_INVITED));
-    CHECK(own("POST", "/api/v1/gm/invite", body)->status == 409);
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"user\":\"%s\"}", gid, dave.uid);
-    CHECK(own("POST", "/api/v1/gm/invite", body)->status == 403);
-    CHECK(own("POST", "/api/v1/gm/invite", "{\"group\":\"x\",\"user\":\"y\"}")->status == 400);
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"name\":\"Weekend away\"}", gid);
-    r = own("POST", "/api/v1/gm/rename", body);
+    snprintf(body, sizeof body, "{\"user\":\"%s\"}", bob.uid);
+    r = own("POST", G("invite"), body);
+    CHECK(r->status == 200 && has_text(r, bob.uid) && in_state(gid, bob.uid, PUDDLE_GM_INVITED));
+    CHECK(own("POST", G("invite"), body)->status == 409);
+    snprintf(body, sizeof body, "{\"user\":\"%s\"}", dave.uid);
+    CHECK(own("POST", G("invite"), body)->status == 403);
+    CHECK(own("POST", G("invite"), "{\"user\":\"y\"}")->status == 400);
+    CHECK(own("POST", "/api/v1/groups/x/invite", "{\"user\":\"y\"}")->status == 404);
+    r = own("POST", G("rename"), "{\"name\":\"Weekend away\"}");
     CHECK(r->status == 200 && has_text(r, "\"name\":\"Weekend away\""));
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"name\":\"\"}", gid);
-    CHECK(own("POST", "/api/v1/gm/rename", body)->status == 400);
-    snprintf(body, sizeof body, "{\"group\":\"%s\"}", gid);
-    CHECK(own("POST", "/api/v1/gm/accept", body)->status == 409 && own("POST", "/api/v1/gm/decline", body)->status == 409);   /* we are in it, not invited */
-    CHECK(own("POST", "/api/v1/gm/accept", "{\"group\":\"eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}")->status == 404);
+    CHECK(own("POST", G("rename"), "{\"name\":\"\"}")->status == 400);
+    CHECK(own("POST", G("accept"), NULL)->status == 409 && own("POST", G("decline"), NULL)->status == 409);   /* we are in it, not invited */
+    CHECK(own("POST", "/api/v1/groups/eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/accept", NULL)->status == 404);
 
     /* ---- messages ---- */
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"body\":\"  hello group  \"}", gid);
-    CHECK(own("POST", "/api/v1/gm/send", "{\"group\":\"x\",\"body\":\"y\"}")->status == 400);
-    r = own("POST", "/api/v1/gm/send", body);
+    CHECK(own("POST", "/api/v1/conversations/x/messages/send", "{\"body\":\"y\"}")->status == 404);
+    r = own("POST", C("messages/send"), "{\"body\":\"  hello group  \"}");
     CHECK(r->status == 201 && has_text(r, "\"body\":\"  hello group  \"") && has_text(r, "\"outgoing\":true") && has_text(r, gid));
     char first[65];
     {
@@ -250,15 +257,12 @@ int main(void)
         first[64] = 0;
     }
     CHECK(queued(alice.uid, "events") >= 1);
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"body\":\"second\",\"reply_to\":\"%s\"}", gid, first);
-    r = own("POST", "/api/v1/gm/send", body);
+    snprintf(body, sizeof body, "{\"body\":\"second\",\"reply_to\":\"%s\"}", first);
+    r = own("POST", C("messages/send"), body);
     CHECK(r->status == 201 && has_text(r, "\"reply_to\":\"") && has_text(r, first));
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"body\":\"\"}", gid);
-    CHECK(own("POST", "/api/v1/gm/send", body)->status == 400);
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"body\":\"bad\\u0007\"}", gid);
-    CHECK(own("POST", "/api/v1/gm/send", body)->status == 400);
-    snprintf(body, sizeof body, "{\"group\":\"eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"body\":\"hi\"}");
-    CHECK(own("POST", "/api/v1/gm/send", body)->status == 404);
+    CHECK(own("POST", C("messages/send"), "{\"body\":\"\"}")->status == 400);
+    CHECK(own("POST", C("messages/send"), "{\"body\":\"bad\\u0007\"}")->status == 400);
+    CHECK(own("POST", "/api/v1/conversations/eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/messages/send", "{\"body\":\"hi\"}")->status == 404);
     /* a member's message arrives */
     {
         char ev[800];
@@ -266,48 +270,48 @@ int main(void)
         CHECK(puddle_message_build(gid, alice.uid, clock_now, "hi from alice", 13, NULL, ev, sizeof ev) > 0);
         CHECK(has_text(deliver_one(&alice, gid, &alice, ev), "\"accepted\":[\""));
     }
-    snprintf(url, sizeof url, "/api/v1/gm/messages?group=%s", gid);
-    r = own("GET", url, NULL);
-    CHECK(r->status == 200 && has_text(r, "\"messages\":[{") && has_text(r, "hello group") && has_text(r, "hi from alice") && has_text(r, "\"next\":null"));
+    r = own("GET", C("messages"), NULL);
+    CHECK(r->status == 200 && has_text(r, "\"items\":[{") && has_text(r, "hello group") && has_text(r, "hi from alice") && has_text(r, "\"next\":null"));
     CHECK(has_text(r, "\"delivery\":{\"state\":\"queued\""));                                 /* ours has not gone yet */
-    CHECK(has_text(r, "\"notices\":[{") && has_text(r, "\"type\":\"create\"") && has_text(r, "\"type\":\"invite\"") && has_text(r, "\"type\":\"join\"") && has_text(r, "\"type\":\"rename\""));
-    CHECK(strstr(body_of(r), "\"type\":\"create\"") < strstr(body_of(r), "\"type\":\"join\""));
-    snprintf(url, sizeof url, "/api/v1/gm/messages?group=%s&limit=1", gid);
-    r = own("GET", url, NULL);
-    CHECK(r->status == 200 && count_in(body_of(r), "\"chat\":\"") == 1 && has_text(r, "hi from alice") && !has_text(r, "\"next\":null"));
-    CHECK(has_text(r, "\"notices\":[") && !has_text(r, "\"type\":\"create\""));                /* an older page's notices are not here */
-    CHECK(own("GET", "/api/v1/gm/messages?group=nope", NULL)->status == 400);
-    CHECK(own("GET", "/api/v1/gm/messages?group=eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", NULL)->status == 404);
-    snprintf(url, sizeof url, "/api/v1/gm/messages?group=%s&limit=0", gid);
-    CHECK(own("GET", url, NULL)->status == 400);
+    /* what happened to the group is in the same list, in its place */
+    CHECK(has_text(r, "\"type\":\"group_create\"") && has_text(r, "\"type\":\"group_invite\"") && has_text(r, "\"type\":\"group_join\"") &&
+          has_text(r, "\"type\":\"group_rename\"") && has_text(r, "\"name\":\"Weekend away\""));
+    CHECK(strstr(body_of(r), "\"type\":\"group_create\"") < strstr(body_of(r), "\"type\":\"group_join\""));
+    CHECK(strstr(body_of(r), "\"type\":\"group_rename\"") < strstr(body_of(r), "hello group"));
+    r = own("GET", C("messages?limit=1"), NULL);
+    CHECK(r->status == 200 && count_in(body_of(r), "\"type\":\"default\"") == 1 && has_text(r, "hi from alice") && !has_text(r, "\"next\":null"));
+    CHECK(!has_text(r, "\"type\":\"group_create\""));                                         /* an older page's notices are not here */
+    CHECK(own("GET", "/api/v1/conversations/nope/messages", NULL)->status == 404);
+    CHECK(own("GET", "/api/v1/conversations/eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/messages", NULL)->status == 404);
+    CHECK(own("GET", C("messages?limit=0"), NULL)->status == 400);
 
     /* ---- edit and delete ---- */
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"message\":\"%s\",\"body\":\"hello again\"}", gid, first);
-    r = own("POST", "/api/v1/gm/edit", body);
-    CHECK(r->status == 200 && has_text(r, "\"body\":\"hello again\"") && has_text(r, "\"edited\":true"));
-    snprintf(url, sizeof url, "/api/v1/gm/messages?group=%s", gid);
-    r = own("GET", url, NULL);
+    char mpath[300];
+    snprintf(mpath, sizeof mpath, "messages/%s/edit", first);
+    r = own("POST", C(mpath), "{\"body\":\"hello again\"}");
+    CHECK(r->status == 200 && has_text(r, "\"body\":\"hello again\"") && has_text(r, "\"edited_at\":"));
+    r = own("GET", C("messages"), NULL);
     CHECK(has_text(r, "hello again") && !has_text(r, "hello group"));
     {
         /* someone else's message is not ours to touch */
         const char *at = strstr(body_of(r), "hi from alice");
         char theirs[65] = "";
         for (const char *q = at; q > body_of(r); q--)
-            if (!strncmp(q, "{\"id\":\"", 7)) { memcpy(theirs, q + 7, 64); break; }
+            if (!strncmp(q, "{\"id\":\"", 7) && !strncmp(q + 71, "\",\"conversation\"", 16)) { memcpy(theirs, q + 7, 64); break; }
         CHECK(strlen(theirs) == 64);
-        snprintf(body, sizeof body, "{\"group\":\"%s\",\"message\":\"%s\",\"body\":\"mine\"}", gid, theirs);
-        CHECK(own("POST", "/api/v1/gm/edit", body)->status == 404);
-        snprintf(body, sizeof body, "{\"group\":\"%s\",\"message\":\"%s\"}", gid, theirs);
-        CHECK(own("POST", "/api/v1/gm/delete", body)->status == 404);
+        snprintf(mpath, sizeof mpath, "messages/%s/edit", theirs);
+        CHECK(own("POST", C(mpath), "{\"body\":\"mine\"}")->status == 404);
+        snprintf(mpath, sizeof mpath, "messages/%s/delete", theirs);
+        CHECK(own("POST", C(mpath), NULL)->status == 404);
     }
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"message\":\"%s\"}", gid, first);
-    CHECK(own("POST", "/api/v1/gm/delete", body)->status == 204 && own("POST", "/api/v1/gm/delete", body)->status == 204);   /* again: nothing more to say */
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"message\":\"%s\",\"body\":\"too late\"}", gid, first);
-    CHECK(own("POST", "/api/v1/gm/edit", body)->status == 409);
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"message\":\"short\",\"body\":\"x\"}", gid);
-    CHECK(own("POST", "/api/v1/gm/edit", body)->status == 400);
-    snprintf(url, sizeof url, "/api/v1/gm/messages?group=%s", gid);
-    r = own("GET", url, NULL);
+    snprintf(mpath, sizeof mpath, "messages/%s/delete", first);
+    r = own("POST", C(mpath), NULL);
+    CHECK(r->status == 200 && has_text(r, "\"deleted\":true"));
+    CHECK(own("POST", C(mpath), NULL)->status == 200);                                       /* again: nothing more to say */
+    snprintf(mpath, sizeof mpath, "messages/%s/edit", first);
+    CHECK(own("POST", C(mpath), "{\"body\":\"too late\"}")->status == 409);
+    CHECK(own("POST", C("messages/short/edit"), "{\"body\":\"x\"}")->status == 404);
+    r = own("GET", C("messages"), NULL);
     CHECK(has_text(r, "\"deleted\":true") && !has_text(r, "hello again"));
 
     /* ---- what became of a message that went to several: the worst of it ---- */
@@ -316,15 +320,13 @@ int main(void)
         clock_now += 1000;
         CHECK(puddle_group_join_build(gid, bob.uid, clock_now, ev, sizeof ev) > 0);
         CHECK(has_text(deliver_one(&bob, gid, &bob, ev), "\"accepted\":[\""));
-        snprintf(body, sizeof body, "{\"group\":\"%s\",\"body\":\"to both\"}", gid);
-        CHECK(own("POST", "/api/v1/gm/send", body)->status == 201);
+        CHECK(own("POST", C("messages/send"), "{\"body\":\"to both\"}")->status == 201);
         puddle_outbox_poll(ob);                                                                 /* no way to reach anyone: both fail */
-        snprintf(url, sizeof url, "/api/v1/gm/messages?group=%s", gid);
-        r = own("GET", url, NULL);
+        r = own("GET", C("messages"), NULL);
         CHECK(has_text(r, "\"delivery\":{\"state\":\"failed\""));
-        snprintf(body, sizeof body, "{\"user\":\"%s\"}", alice.uid);
-        CHECK(own("POST", "/api/v1/dm/retry", body)->status == 204);                            /* alice's goes again; bob's has still failed */
-        r = own("GET", url, NULL);
+        snprintf(url, sizeof url, "/api/v1/conversations/%s/retry", alice.uid);
+        CHECK(own("POST", url, NULL)->status == 200);                                          /* alice's goes again; bob's has still failed */
+        r = own("GET", C("messages"), NULL);
         {
             const char *at = strstr(body_of(r), "to both");
             CHECK(at && strstr(at, "\"state\":\"failed\""));
@@ -334,25 +336,27 @@ int main(void)
 
     /* ---- the conversation list has the group, with what is unread ---- */
     r = own("GET", "/api/v1/conversations", NULL);
-    CHECK(r->status == 200 && has_text(r, "\"kind\":\"group\"") && has_text(r, "\"name\":\"Weekend away\"") && has_text(r, "\"members\":3") && has_text(r, "\"unread\":1"));
-    snprintf(body, sizeof body, "{\"group\":\"%s\"}", gid);
-    CHECK(own("POST", "/api/v1/dm/read", body)->status == 204);
+    CHECK(r->status == 200 && has_text(r, "\"kind\":\"group\"") && has_text(r, "\"name\":\"Weekend away\"") && has_text(r, "\"member_count\":3") &&
+          has_text(r, "\"unread\":1"));
+    r = own("POST", C("read"), NULL);
+    CHECK(r->status == 200 && has_text(r, "\"unread\":0"));
     r = own("GET", "/api/v1/conversations", NULL);
     CHECK(has_text(r, "\"unread\":0"));
     /* a group nobody has spoken in yet is there too */
-    CHECK(own("POST", "/api/v1/gm/create", "{\"name\":\"Quiet\"}")->status == 201);
+    CHECK(own("POST", "/api/v1/groups/create", "{\"name\":\"Quiet\"}")->status == 201);
     r = own("GET", "/api/v1/conversations", NULL);
     CHECK(has_text(r, "\"name\":\"Quiet\"") && count_in(body_of(r), "\"kind\":\"group\"") == 2);
 
     /* ---- leave ---- */
-    snprintf(body, sizeof body, "{\"group\":\"%s\"}", gid);
-    CHECK(own("POST", "/api/v1/gm/leave", body)->status == 204 && own("POST", "/api/v1/gm/leave", body)->status == 409);
+    r = own("POST", G("leave"), NULL);
+    CHECK(r->status == 200 && has_text(r, "\"my\":\"left\"") && own("POST", G("leave"), NULL)->status == 409);
     r = own("GET", "/api/v1/conversations", NULL);
     CHECK(!has_text(r, "Weekend away"));                                                       /* a group we left is no conversation */
-    r = own("GET", "/api/v1/gm", NULL);
+    r = own("GET", "/api/v1/groups", NULL);
     CHECK(!has_text(r, "Weekend away") && has_text(r, "Quiet"));
-    snprintf(body, sizeof body, "{\"group\":\"%s\",\"body\":\"gone\"}", gid);
-    CHECK(own("POST", "/api/v1/gm/send", body)->status == 409);
+    CHECK(own("POST", C("messages/send"), "{\"body\":\"gone\"}")->status == 409);
+#undef G
+#undef C
 
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
     return failures ? 1 : 0;

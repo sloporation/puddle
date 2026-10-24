@@ -60,7 +60,7 @@ doesn't know is a request for a stream, and its answer to that is always the sam
    - **valid invite token:** approve at once (tokens expire and have a use count)
    - **policy `open`:** approve at once
    - **policy `manual`** (the default): record `pending_in` and tell the owner
-4. When approved (immediately, or when the owner accepts with `POST /api/v1/stream/accept`), B becomes
+4. When approved (immediately, or when the owner accepts with `POST /api/v1/streams/{id}/accept`), B becomes
    `active` and its outbox calls A's `POST /stream/v1/access/result` with its own chain and profile, retrying
    on the schedule in `roadmap.md` (3.4) if A is away; what B still owes is kept on the stream (`owed`), so a
    restart loses nothing. B puts the requester's ticket in the answer. A accepts it only if the ticket is one
