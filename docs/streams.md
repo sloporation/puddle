@@ -5,11 +5,11 @@ is sent between two Puddles without one, apart from asking for one. This describ
 endpoints are in `api/openapi.yaml` (what the owner's app calls) and `api/federation.yaml` (what
 Puddles call on each other).
 
-Built so far: the identity, its recovery phrase and rolling (`src/core/identity.c`), and request
-signing and checking (`src/core/reqsig.c`: Alice's side signs, Bob's side runs the checks below in
-order, with a bounded nonce memory), and the route table that applies them (`src/core/router.c`), the stream store (`src/core/streams.c`: peer
+Built so far: the identity, its recovery phrase and rolling (`src/core/identity.cpp`), and request
+signing and checking (`src/http/reqsig.cpp`: Alice's side signs, Bob's side runs the checks below in
+order, with a bounded nonce memory), and the route table that applies them (`src/http/router.cpp`), the stream store (`src/api/streams.cpp`: peer
 records, blocks, invite tokens, the access setting, and the key lookup the signature check uses) and the link parser
-(`src/core/link.c`). The requests and endpoints that use them are described below.
+(`src/core/link.cpp`). The requests and endpoints that use them are described below.
 
 ## What each side keeps
 
@@ -163,7 +163,7 @@ Events inside chats are signed separately, over their exact bytes, and name the 
 
 ## Keys
 
-Built in `src/core/identity.c` and `phrase.c`; the plan and status are in `roadmap.md` (phase 1).
+Built in `src/core/identity.cpp` and `phrase.c`; the plan and status are in `roadmap.md` (phase 1).
 
 **Creation.** On first run the Puddle makes a **recovery phrase** (eight groups of four characters),
 shows it to the owner once, and derives three keys from it: an Ed25519 signing key, an X25519

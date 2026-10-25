@@ -1,6 +1,6 @@
-#include "phrase.h"
+#include "core/phrase.h"
 
-#include "encoding.h"
+#include "base/encoding.h"
 
 #include <stdio.h>
 #include <string.h>

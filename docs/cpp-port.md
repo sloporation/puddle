@@ -168,3 +168,118 @@ another thread writes without taking the lock. Those files are unchanged tonight
 - **C-style casts:** the 163 casts added in step 2 are still C-style. They go as each module is modernised.
 - `docs/objects.md` was the draft for this, and its route table has been built as written. Its "Order of work"
   section is now partly done: see the steps above.
+
+## Next: the layout from test_structure
+
+The code is C++ but still sits in `src/core/`. These steps move it into the layers from `test_structure/README.md`,
+one at a time, each leaving the build and all tests passing. Tick a step off when it is done.
+
+Where today's files go:
+
+| Layer | Files |
+|---|---|
+| `platform/` | parts of `fsutil` and `clock`; the socket and lock code in `client`, `server`, `store` |
+| `core/` | `config`, `yamltree`, `identity`, `phrase`, `hash`, `encoding`, `json`, `log`, `profile`, `streams`, `group` (records), `outbox` (the queue), `ratelimit`, `link` |
+| `storage/` | `store`, and the file writing in `streams`, `group`, `outbox`, `profile` |
+| `wire/` | `wireprofile`, the id checks |
+| `events/` | the event halves of `message` and `group` |
+| `objects/` | `src/core/objects/` |
+| `http/` | `http`, `tls`, `serve`, `server`, `router`, `client`, `reqsig` |
+| `api/` | `src/core/api/`, and the owner routes in `routes` and `profiles_api` |
+| `federation/` | `inbound`, `access`, `flow`, `keysync`, `groupflow`, `groupapi`, `messages`, `media`, the peer half of `profiles_api` |
+| `service/`, `app/` | `src/service/`, `src/gui/` |
+| `client/` | new |
+
+- [x] **L1. Move the files.** Each file goes to its layer's folder unchanged; includes name the folder
+  (`"core/identity.h"`). No behaviour changes. *Done:* `src/core/` was split into `platform/`, `core/`, `storage/`,
+  `wire/`, `events/`, `http/`, `objects/`, `api/`, `federation/` and `service/`. Three changes to the table above:
+  `server` went to `service/` (it builds the whole running Puddle), `media` to `storage/` (images kept by their hash),
+  and `error.hpp` to `core/` (both `http/` and the objects use it). One library target still holds them all; that
+  splits in L2. 37 of 37 tests pass.
+- [x] **L2. One CMake target per layer**, linking only the layers below it. *Done:* `puddle_platform`, `_core`,
+  `_storage`, `_wire`, `_events`, `_objects`, `_http`, `_api`, `_federation` and `_service`. `puddled`, the app and the
+  tests link `puddle_service`. To get there, every include that went up a layer was moved or turned around:
+  - `puddle_ctx` moved to `core/context.h`. It names the store, streams, outbox and the rest without including them,
+    so the objects no longer include `http/router.h`. (Both APIs still share the one context: splitting it was in the
+    plan, but turned out unnecessary once it stopped pulling in the layers above.)
+  - **The courier** (`puddle_courier` in `core/context.h`): the owner's actions that other Puddles must hear about
+    (asking for a stream, answering, group news, profile pushes, rolled keys) are a table of functions the context
+    carries. `federation/courier.cpp` fills it (`puddle_federation_courier`) and `service/server.cpp` sets it, so the
+    objects and the identity routes call it without knowing about federation. Tests that build a context by hand
+    set it too.
+  - The list of every route table moved to `service/routes.cpp`. `/stream/v1/access`, which sat in the owner's
+    identity table, moved to a federation table of its own.
+  - Small ones: `puddle_clean_text` to `core/text`, `puddle_my_address` and `puddle_make_link` to `core/link`,
+    and `PUDDLE_PATH_MAX` to `platform/fsutil.h`.
+- [x] **L3. Split the mixed modules.** *Done:*
+  - `message` turned out to be only about events (signing, building, parsing, folding a chat) and stays whole in
+    `events/`.
+  - `group`: the ids, the five events and the rules that fold them into who is in it are now
+    `events/group_events.{h,cpp}`. The record, its helpers (including `puddle_group_add_member`, now public) and its
+    store stay in `core/group`.
+  - `profiles_api`: the owner's routes (`/api/v1/profiles`, `/api/v1/media`) are now `api/profiles.cpp`. What peers
+    call, and pushing our profile out, stay in `federation/`. Both read `?hash=` and answer with an image through
+    two shared helpers in `http/router` (`puddle_query_media_hash`, `puddle_answer_media`).
+  - Also fixed: the `e2e` test that failed some of the time (see step 8) now waits up to 10 seconds for both
+    outboxes to empty instead of checking at once. It still fails if anything stays stuck. Three runs under
+    `ctest -j6` are clean.
+- [x] **L4. The outbox only queues.** *Done, ahead of L3, because it was the last cycle in L2:* `core/outbox`
+  queues, saves, schedules, retries and runs a thread per peer, but no longer knows HTTP. How an item travels is its
+  `send` hook, which `federation/sender.cpp` provides (`puddle_federation_send`, the old `attempt`). What came of a
+  delivery (`puddle_net_reply`) is plain data in `core/delivery.h`. The `done` callbacks already lived in
+  `federation/` and are set by `service/`. The timeouts stay in `hooks.net`, under the same field names.
+- [x] **L5. `tests/layers.cmake`:** a `ctest` test (`layers`) that reads every `#include` in `src/` and fails on
+  one a layer may not use. It catches what linking can't (a header-only include). Checked by planting two wrong
+  includes in a scratch copy: it named both and failed. `src/gui/` isn't checked: the app embeds the whole Puddle and
+  links `puddle_service`.
+- [x] **L6. Platform.** *Done on POSIX. The Windows half is written but not yet built or tested* (no Windows machine
+  or cross-compiler here; each Windows file says so at the top). Nothing outside `src/platform/` includes a system
+  header for files, sockets, signals or the terminal, or checks the OS. Each platform file ends in `_posix` or
+  `_windows`, and `CMakeLists.txt` is the one place that picks:
+  - `fsutil.h`: plain descriptors (`puddle_fd_open/read/write/close/end/truncate/size/lock`), paths
+    (`exists`/`is_dir`/`is_file`/`size`/`remove`/`rename`), `mkdir -p`, the atomic write, directory listing. On
+    Windows: the C runtime's `_wsopen_s` family on UTF-16 paths, `LockFileEx`, `MoveFileExW`. Used by `store`,
+    `identity`, `profile`, `media`, `outbox`, `streams` and `tls`.
+  - `net.h`: resolve to address bytes, dial (each address the caller's `allowed` rule accepts, with a timeout),
+    listen, accept, poll, finish (half-close and drain), close, and a waker that any thread or a stop signal can
+    trip (a socket pair, so Windows' `WSAPoll` can wait on it). The rule for which addresses may be dialled stays
+    in `http/client.cpp`. The server's stop pipe is now a waker.
+  - `process.h`: process id, "is this a terminal", echo off while the recovery phrase is typed, the stop signal
+    (`sigaction` / `SetConsoleCtrlHandler`), ignoring `SIGPIPE`.
+  - `paths.h`: the per-user config and data folders, the login name, resolving a path, the separator. Moved from
+    `core/config.cpp`, which has no `#ifdef _WIN32` left.
+  - Also changed: the TLS key and certificate are written through a memory BIO and `puddle_fd_open(..., EXCL)`.
+    That replaces `fdopen` and avoids passing a `FILE *` into OpenSSL, which crashes on Windows when OpenSSL was
+    built with a different C runtime. `strncasecmp` became `puddle_ascii_ncasecmp` (`core/text`), and an `off_t`
+    became `int64_t`.
+  - Fixed a bug that predates tonight: the atomic write named its temporary file `.tmp-<pid>`, the same for every
+    thread. `streams` and the profile assignments both write into `state/` under different locks, so two writes
+    at once could clobber each other's temporary file. The name now adds a counter.
+  - Checked: 38 of 38 tests, twice under `-j6`, and ThreadSanitizer on `outbox`, `serve`, `client`, `e2e`,
+    `group_e2e`, `messages`, `streams` and `store`. No races in the core; the two in test code are as before.
+  - **What a Windows build still needs**, beyond checking these files:
+    - CMake finding OpenSSL 3 and libyaml (vcpkg is the usual way).
+    - The tests use POSIX directly (`mkdtemp`, `nftw`, `unistd.h`), so they won't build there until they go
+      through `platform/` too.
+    - The app's `dock_mac.mm` is already macOS-only.
+    - Running `puddled` as a Windows service (as opposed to a console program) is still to write
+      (`test_structure/platform/windows/service.cpp`).
+- [x] **L7. Storage:** the stores write through `storage/` (a files driver, keeping today's on-disk layout, and a
+  memory driver for tests). Then the `people` and `conversations` records from `test_structure/model/records/`.
+  - `storage/storage.h`: records in collections, plus secrets; a files driver (same paths as before) and a memory
+    driver. auth, profile assignments, groups, the outbox and streams take `*_open_with(storage)`.
+  - `core/people`: the profile a peer's Puddle sent, one record per person (`state/people/<id>.json`). It is no
+    longer part of the stream record. At startup, `puddle_streams_take_profiles` moves any profile still in an old
+    stream record into its person record and rewrites the stream record without it (runs once; logged).
+  - `core/conversations`: a summary per conversation (`state/conversations/<id>.json`) plus the owner's `read_at`.
+    The chat log store reports each append (`puddle_store_on_append`). A summary built before its chat's latest
+    append is stale and is rebuilt from the log on the next read. After a start, every summary is stale once.
+    Read markers now live here; `read.tsv` is read only for a conversation with no record yet.
+  - Still on their own interfaces: chat logs and media (files only). Identity and TLS use `platform/` files directly.
+  - Checked: 41 of 41 tests (new: `storage`, `people`, `conversations`), a clean `scripts/build.sh --clean`, and
+    ThreadSanitizer on streams, people, conversations, messages, e2e, group_e2e and storage with no races.
+  - Not tried yet: starting against a real data folder from before this change (the profile move is covered by
+    `people_test` only).
+- [ ] **L8. The client library:** `client/`, one Qt object per id, and the app moved onto it.
+
+L1–L5 move code without changing what it does, and the tests cover them. L6–L8 change behaviour.

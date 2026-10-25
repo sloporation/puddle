@@ -1,9 +1,15 @@
-#include "profiles_api.h"
+#include "federation/profiles_api.h"
+#include "core/people.h"
+#include "core/group.h"
 
-#include "hash.h"
-#include "media.h"
-#include "phrase.h"
-#include "wireprofile.h"
+#include "base/hash.h"
+#include "storage/media.h"
+#include "core/phrase.h"
+#include "wire/wireprofile.h"
+#include "service/routes.h"
+#include "federation/courier.h"
+#include "federation/sender.h"
+#include "http/client.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -26,8 +32,26 @@ static person me, alice, carol;
 static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
+static puddle_people *ps;
+static puddle_groups *gs;
+static char place_alice[PUDDLE_PLACE_MAX], place_carol[PUDDLE_PLACE_MAX];
+#define GROUP "gggggggggggggggggggggggggggggggggggggggggggggggggggq"
+
+/* the profile their Puddle sent us, or "" */
+static const char *their_profile(const char *id)
+{
+    static char buf[20000];
+    char *json;
+    size_t len;
+    buf[0] = '\0';
+    if (puddle_people_profile(ps, id, PUDDLE_PEOPLE_DM, &json, &len) == 0) {
+        snprintf(buf, sizeof buf, "%s", json);
+        free(json);
+    }
+    return buf;
+}
 static puddle_outbox *ob;
-static puddle_profiles profiles;
+static puddle_profiles *profiles;
 static puddle_assignments *as;
 static puddle_config cfg;
 static char avatar_main[65], avatar_work[65], banner_work[65];
@@ -99,7 +123,7 @@ static void set_peer(person *p, puddle_stream_state state, const char *profile)
     CHECK(puddle_stream_set_chain(&rec, chain, cl) == 0);
     free(chain);
     CHECK(puddle_stream_add_address(&rec, "203.0.113.9:8443") == 0);
-    if (profile) CHECK(puddle_stream_set_profile(&rec, profile, strlen(profile)) == 0);
+    if (profile) CHECK(puddle_people_set_profile(ps, p->uid, PUDDLE_PEOPLE_DM, profile, strlen(profile), NULL, T0) == 0);
     CHECK(puddle_streams_put(ss, &rec, err, sizeof err) == 0);
     puddle_stream_free(&rec);
 }
@@ -122,7 +146,7 @@ static void drop_outbox(void)
     char path[900], err[200];
     snprintf(path, sizeof path, "%s/state/outbox", data);
     nftw(path, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
-    puddle_outbox_hooks h = { .identity = me.id, .now_ms = now_cb };
+    puddle_outbox_hooks h = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb };
     ob = puddle_outbox_open(data, &h, err, sizeof err);
     ctx.outbox = ob;
 }
@@ -142,12 +166,7 @@ static char *error_of(person *p)
 static char profile_of_peer[2000];
 static const char *peer_profile(person *p)
 {
-    puddle_stream st;
-    profile_of_peer[0] = 0;
-    if (puddle_streams_get(ss, p->uid, &st) == 0) {
-        if (st.profile) snprintf(profile_of_peer, sizeof profile_of_peer, "%s", st.profile);
-        puddle_stream_free(&st);
-    }
+    snprintf(profile_of_peer, sizeof profile_of_peer, "%s", their_profile(p->uid));
     return profile_of_peer;
 }
 
@@ -181,17 +200,29 @@ int main(void)
     cfg.port = 8443;
     snprintf(cfg.profile_files[0], PUDDLE_PATH_MAX, "%s", path);
     cfg.nprofile_files = 1;
-    if (puddle_profiles_load(&profiles, &cfg, err, sizeof err) != 0) { fprintf(stderr, "profiles: %s\n", err); return 2; }
-    snprintf(avatar_main, sizeof avatar_main, "%s", profiles.items[0].avatar.hash);
-    snprintf(avatar_work, sizeof avatar_work, "%s", profiles.items[1].avatar.hash);
-    snprintf(banner_work, sizeof banner_work, "%s", profiles.items[1].banner.hash);
+    char old_default[PUDDLE_PROFILE_ID_MAX + 1];
+    if (!(profiles = puddle_profiles_open(&cfg, old_default, err, sizeof err))) { fprintf(stderr, "profiles: %s\n", err); return 2; }
+    {
+        puddle_profile pm, pw;
+        CHECK(puddle_profiles_get(profiles, "main", &pm) == 0 && puddle_profiles_get(profiles, "work", &pw) == 0);
+        snprintf(avatar_main, sizeof avatar_main, "%s", pm.avatar.hash);
+        snprintf(avatar_work, sizeof avatar_work, "%s", pw.avatar.hash);
+        snprintf(banner_work, sizeof banner_work, "%s", pw.banner.hash);
+        puddle_profile_free(&pm);
+        puddle_profile_free(&pw);
+    }
+    puddle_place_dm(alice.uid, place_alice);
+    puddle_place_dm(carol.uid, place_carol);
     CHECK(avatar_main[0] && avatar_work[0] && banner_work[0] && strcmp(avatar_main, avatar_work) != 0);
 
     ss = puddle_streams_open(data, err, sizeof err);
+
+    if (!ps) ps = puddle_people_open(data, err, sizeof err);
     as = puddle_assignments_open(data, err, sizeof err);
-    puddle_outbox_hooks hooks = { .identity = me.id, .now_ms = now_cb };
+    gs = puddle_groups_open(data, err, sizeof err);
+    puddle_outbox_hooks hooks = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb };
     ob = puddle_outbox_open(data, &hooks, err, sizeof err);
-    ctx = (puddle_ctx){ .config = &cfg, .identity = me.id, .profiles = &profiles, .assignments = as, .streams = ss, .outbox = ob,
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .config = &cfg, .identity = me.id, .profiles = profiles, .assignments = as, .streams = ss, .people = ps, .groups = gs, .outbox = ob,
                         .replay = puddle_replay_new(4096), .now_ms = now_cb, .peer_key = puddle_streams_peer_key, .peer_key_user = ss };
     R = (puddle_router){ .ctx = &ctx };
     R.routes = puddle_all_routes(&R.count);
@@ -200,10 +231,10 @@ int main(void)
 
     /* ---- the owner's profiles ---- */
     r = owner_call("GET", "/api/v1/profiles", NULL);
-    CHECK(r->status == 200 && puddle_json_valid_object("{}", 2) && body_of(r)[0] == '[');
-    CHECK(strstr(body_of(r), "\"id\":\"main\",\"default\":true,\"display_name\":\"Me\",\"blurb\":\"the default\",\"avatar\":{\"hash\":\"") &&
-          strstr(body_of(r), "\"id\":\"work\",\"default\":false,\"display_name\":\"Me at work\"") && strstr(body_of(r), "\"color\":{\"colors\":[\"#112233\",\"#445566\"],\"angle\":135}") &&
-          strstr(body_of(r), avatar_work) && strstr(body_of(r), banner_work));
+    CHECK(r->status == 200 && !strncmp(body_of(r), "{\"items\":[{\"id\":\"main\",\"display_name\":\"Me\",\"blurb\":\"the default\",\"avatar\":{\"hash\":\"", 70) &&
+          strstr(body_of(r), "\"places\":[]},{\"id\":\"work\",\"display_name\":\"Me at work\"") && strstr(body_of(r), "\"color\":{\"colors\":[\"#112233\",\"#445566\"],\"angle\":135}") &&
+          strstr(body_of(r), avatar_work) && strstr(body_of(r), banner_work) && strstr(body_of(r), "\"next\":null"));
+    CHECK(!strcmp(old_default, "main"));
     CHECK(call("GET", "/api/v1/profiles", NULL, NULL, 0)->status == 404);
 
     /* ---- the owner fetches a picture ---- */
@@ -266,6 +297,8 @@ int main(void)
     /* ---- a friend asks for our pictures ---- */
     set_peer(&alice, PUDDLE_STREAM_ACTIVE, NULL);
     snprintf(t, sizeof t, "/stream/v1/media?hash=%s", avatar_main);
+    CHECK(peer_call(&alice, "GET", t, NULL)->status == 404);                                     /* nothing chosen for her: nothing of ours is hers to see */
+    CHECK(puddle_assignments_set(as, place_alice, "main", err, sizeof err) == 0);
     r = peer_call(&alice, "GET", t, NULL);
     CHECK(r->status == 200 && strstr(r->out, "image/png") && !memcmp(strstr(r->out, "\r\n\r\n") + 4, "\x89PNG", 4));
     snprintf(t, sizeof t, "/stream/v1/media?hash=%s", avatar_work);
@@ -290,7 +323,7 @@ int main(void)
     CHECK(r->status == 200 && strstr(body_of(r), "\"profile\":\"work\""));
     {
         char pr[PUDDLE_PROFILE_ID_MAX + 1];
-        CHECK(puddle_assignments_get(as, alice.uid, pr) == 0 && !strcmp(pr, "work"));
+        CHECK(puddle_assignments_get(as, place_alice, pr) == 0 && !strcmp(pr, "work"));
     }
     CHECK(queued(alice.uid, "profile") == 1);                                                    /* and she is told */
     {
@@ -300,7 +333,10 @@ int main(void)
         CHECK(n == 1 && !strcmp(l[0].path, "/stream/v1/profile") && !strcmp(l[0].method, "POST"));
         char *clean = malloc(PUDDLE_WIRE_PROFILE_MAX + 8);
         puddle_span pv;
-        CHECK(puddle_json_member(l[0].body, l[0].body_len, "profile", &pv) == 0 && puddle_profile_wire_clean(pv.p, pv.len, clean, PUDDLE_WIRE_PROFILE_MAX + 8) == 0);
+        char notes[PUDDLE_WIRE_NOTES_MAX];
+        CHECK(puddle_json_member(l[0].body, l[0].body_len, "profile", &pv) == 0 &&
+              puddle_profile_wire_clean(pv.p, pv.len, clean, PUDDLE_WIRE_PROFILE_MAX + 8, notes, sizeof notes) == 0 && !notes[0]);
+        CHECK(!strstr(l[0].body, "\"group\"") && !strstr(l[0].body, "\"work\""));             /* a direct one; and the id is ours alone */
         CHECK(strstr(clean, "\"display_name\":\"Me at work\"") && strstr(clean, avatar_work) && strstr(clean, banner_work) && !strstr(clean, avatar_main) &&
               strstr(clean, "\"color\":{\"colors\":[\"#112233\",\"#445566\"],\"angle\":135}"));  /* what she receives passes her own checks, unchanged */
         free(clean);
@@ -316,8 +352,15 @@ int main(void)
     CHECK(r->status == 200 && !strstr(body_of(r), "\"profile\":\"work\"") && queued(alice.uid, "profile") == 2);
     {
         char pr[PUDDLE_PROFILE_ID_MAX + 1];
-        CHECK(puddle_assignments_get(as, alice.uid, pr) == 1);                                   /* back to the default */
+        CHECK(puddle_assignments_get(as, place_alice, pr) == 1);                                 /* nothing shown to her now */
+        puddle_ob_item *l;
+        size_t n;
+        puddle_outbox_list(ob, &l, &n);
+        CHECK(n == 2 && strstr(l[1].body, "\"profile\":null"));                                  /* and she is told to forget it */
+        puddle_outbox_list_free(l, n);
     }
+    snprintf(t, sizeof t, "/stream/v1/media?hash=%s", avatar_work);
+    CHECK(peer_call(&alice, "GET", t, NULL)->status == 404);
     /* what it refuses */
     CHECK(owner_call("POST", pp, "{\"profile\":\"nope\"}")->status == 400);
     CHECK(owner_call("POST", pp, "{\"profile\":5}")->status == 400);
@@ -330,7 +373,7 @@ int main(void)
     CHECK(owner_call("POST", pp, "{\"profile\":\"work\"}")->status == 200 && queued(carol.uid, NULL) == before);
     {
         char pr[PUDDLE_PROFILE_ID_MAX + 1];
-        CHECK(puddle_assignments_get(as, carol.uid, pr) == 0 && !strcmp(pr, "work"));
+        CHECK(puddle_assignments_get(as, place_carol, pr) == 0 && !strcmp(pr, "work"));
     }
 
     /* ---- a friend tells us which profile we see ---- */
@@ -358,13 +401,30 @@ int main(void)
         CHECK(puddle_media_want(&ctx, alice.uid) == 0);                                          /* already asked: not again */
         /* the same push again changes nothing and asks for nothing more */
         CHECK(peer_call(&alice, "POST", "/stream/v1/profile", bodyj)->status == 204 && queued(alice.uid, "media") == 2);
-        /* what it refuses */
+        /* what it refuses: no profile in it at all */
         CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{}")->status == 400);
         CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "nonsense")->status == 400);
-        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"profile\":{}}")->status == 400);
-        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"profile\":{\"display_name\":\"x\",\"avatar\":{\"hash\":\"zz\"}}}")->status == 400);
-        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"profile\":[1]}")->status == 400);
+        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"profile\":{},\"group\":7}")->status == 400);
+        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"profile\":[1]}")->status == 204);  /* not a profile: set aside, nothing to retry */
         CHECK(strstr(peer_profile(&alice), "Alice (new)"));                                      /* none of those changed it */
+        /* what is wrong in it is left out, with a note, and the rest kept */
+        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"profile\":{\"display_name\":\"Al\",\"color\":{\"colors\":[\"#12345g\"]},"
+                                                               "\"avatar\":{\"hash\":\"zz\"}}}")->status == 204);
+        CHECK(!strcmp(peer_profile(&alice), "{\"display_name\":\"Al\"}"));
+        {
+            puddle_person who;
+            CHECK(puddle_people_get(ps, alice.uid, &who) == 0 && who.nprofiles == 1 && who.profiles[0].notes &&
+                  strstr(who.profiles[0].notes, "color: \"#12345g\" is not a colour") && strstr(who.profiles[0].notes, "avatar:"));
+            puddle_person_free(&who);
+            snprintf(t, sizeof t, "/api/v1/users/%s/profiles", alice.uid);
+            r = owner_call("GET", t, NULL);                                                      /* the owner can see what was left out */
+            CHECK(r->status == 200 && strstr(body_of(r), "\"place\":\"dm\",\"display_name\":\"Al\"") && strstr(body_of(r), "\"notes\":[\"color: "));
+        }
+        /* an empty one is a profile with nothing in it: they are shown by their id */
+        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"profile\":{}}")->status == 204 && !strcmp(peer_profile(&alice), "{}"));
+        /* taken back */
+        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"profile\":null}")->status == 204 && !peer_profile(&alice)[0]);
+        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", bodyj)->status == 204 && strstr(peer_profile(&alice), "Alice (new)"));
         set_peer(&alice, PUDDLE_STREAM_CLOSED, NULL);
         CHECK(peer_call(&alice, "POST", "/stream/v1/profile", bodyj)->status == 403);            /* no open stream */
         set_peer(&alice, PUDDLE_STREAM_PENDING_IN, NULL);
@@ -482,10 +542,142 @@ int main(void)
         CHECK(strstr(error_of(&alice), "could not be told about your profile"));
     }
 
+    /* ---- groups: a profile for each, sent to its members ---- */
+    {
+        drop_outbox();
+        set_peer(&alice, PUDDLE_STREAM_SCOPED, NULL);
+        set_peer(&carol, PUDDLE_STREAM_ACTIVE, NULL);
+        CHECK(puddle_assignments_set(as, place_carol, NULL, err, sizeof err) == 0); /* Carol: a friend shown nothing of ours */
+        puddle_group g;
+        memset(&g, 0, sizeof g);
+        snprintf(g.id, sizeof g.id, GROUP);
+        snprintf(g.name, sizeof g.name, "Raid night");
+        snprintf(g.creator, sizeof g.creator, "%s", me.uid);
+        g.my = PUDDLE_GROUP_IN;
+        puddle_group_add_member(&g, me.uid)->state = PUDDLE_GM_MEMBER;
+        puddle_group_add_member(&g, alice.uid)->state = PUDDLE_GM_MEMBER;
+        CHECK(puddle_groups_put(gs, &g, err, sizeof err) == 0);
+        puddle_group_free(&g);
+        char gp[200];
+        snprintf(gp, sizeof gp, "/api/v1/groups/%s/profile", GROUP);
+        r = owner_call("POST", gp, "{\"profile\":\"work\"}");
+        CHECK(r->status == 200 && strstr(body_of(r), "\"profile\":\"work\""));
+        CHECK(queued(alice.uid, "profile") == 1 && queued(carol.uid, "profile") == 0);           /* the members, and only them */
+        {
+            puddle_ob_item *l;
+            size_t n;
+            puddle_outbox_list(ob, &l, &n);
+            CHECK(n == 1 && strstr(l[0].body, "\"group\":\"" GROUP "\"") && strstr(l[0].body, "Me at work"));
+            puddle_outbox_list_free(l, n);
+        }
+        snprintf(t, sizeof t, "/stream/v1/media?hash=%s", avatar_work);
+        CHECK(peer_call(&alice, "GET", t, NULL)->status == 200);                                 /* a member sees the group's pictures */
+        CHECK(peer_call(&carol, "GET", t, NULL)->status == 404);                                 /* nobody else does */
+        CHECK(puddle_profile_push_to(&ctx, alice.uid, "group:" GROUP) == 0 && queued(alice.uid, "profile") == 2);
+        CHECK(puddle_profile_push_groups_to(&ctx, alice.uid) == 1);
+        CHECK(puddle_profile_push_groups_to(&ctx, carol.uid) == 0);
+        CHECK(owner_call("POST", gp, "{\"profile\":\"nope\"}")->status == 400);
+
+        /* what a member shows us there is kept for the group, beside what they show us directly */
+        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"group\":\"" GROUP "\",\"profile\":{\"display_name\":\"Ali the raider\"}}")->status == 204);
+        char *json;
+        size_t len;
+        CHECK(puddle_people_profile(ps, alice.uid, "group:" GROUP, &json, &len) == 0 && strstr(json, "Ali the raider"));
+        free(json);
+        CHECK(peer_profile(&alice)[0] && !strstr(peer_profile(&alice), "raider"));              /* what she shows us directly is untouched */
+        snprintf(t, sizeof t, "/api/v1/groups/%s", GROUP);
+        r = owner_call("GET", t, NULL);
+        CHECK(r->status == 200 && strstr(body_of(r), "Ali the raider"));                         /* shown as she is there */
+        /* for a group we do not share with them: set aside */
+        CHECK(peer_call(&carol, "POST", "/stream/v1/profile", "{\"group\":\"" GROUP "\",\"profile\":{\"display_name\":\"Sneaky\"}}")->status == 204);
+        CHECK(puddle_people_profile(ps, carol.uid, "group:" GROUP, &json, &len) == 1);
+        /* taken back, for the group only */
+        CHECK(peer_call(&alice, "POST", "/stream/v1/profile", "{\"group\":\"" GROUP "\",\"profile\":null}")->status == 204);
+        CHECK(puddle_people_profile(ps, alice.uid, "group:" GROUP, &json, &len) == 1 && peer_profile(&alice)[0]);
+        /* and nothing chosen for the group any more: they are told to forget ours */
+        CHECK(owner_call("POST", gp, "{\"profile\":null}")->status == 200 && queued(alice.uid, "profile") == 4);
+        snprintf(t, sizeof t, "/stream/v1/media?hash=%s", avatar_work);
+        CHECK(peer_call(&alice, "GET", t, NULL)->status == 404);                                 /* and the pictures go with it */
+    }
+
+    /* ---- the owner makes, edits and deletes profiles ---- */
+    {
+        drop_outbox();
+        set_peer(&alice, PUDDLE_STREAM_ACTIVE, NULL);
+        /* a picture first */
+        unsigned char png[64];
+        memcpy(png, "\x89PNG\r\n\x1a\n", 8);
+        memset(png + 8, 'u', sizeof png - 8);
+        char upload[PUDDLE_PROFILE_JSON_MAX];
+        memcpy(upload, png, sizeof png);
+        upload[sizeof png] = 0;
+        puddle_request rq;
+        memset(&rq, 0, sizeof rq);
+        snprintf(rq.method, sizeof rq.method, "POST");
+        snprintf(rq.target, sizeof rq.target, "/api/v1/media/upload");
+        snprintf(rq.path, sizeof rq.path, "/api/v1/media/upload");
+        rq.content_length = sizeof png;
+        static reply up;
+        up.n = puddle_router_handle(&R, &rq, 1, png, sizeof png, up.out, sizeof up.out - 1, &up.status);
+        char hash[65];
+        puddle_sha256_hex(png, sizeof png, hash);
+        CHECK(up.status == 201 && strstr(body_of(&up), hash) && strstr(body_of(&up), "\"mime\":\"image/png\"") && puddle_media_have(data, hash));
+        CHECK(owner_call("POST", "/api/v1/media/upload", "not a picture")->status == 400);
+        CHECK(call("POST", "/api/v1/media/upload", "x", NULL, 0)->status == 404);
+
+        char b[2000];
+        snprintf(b, sizeof b, "{\"id\":\"gaming\",\"display_name\":\"Ali\",\"blurb\":\"gg\",\"avatar\":\"%s\",\"color\":\"#FF0000\","
+                 "\"links\":[{\"text\":\"Battle.net: Ali#1234\"},{\"text\":\"Steam\",\"url\":\"https://steamcommunity.com/id/ali\"}]}", hash);
+        r = owner_call("POST", "/api/v1/profiles/create", b);
+        CHECK(r->status == 201 && strstr(body_of(r), "\"id\":\"gaming\"") && strstr(body_of(r), "\"colors\":[\"#ff0000\"]") &&
+              strstr(body_of(r), "\"links\":[{\"text\":\"Battle.net: Ali#1234\"},{\"text\":\"Steam\",\"url\":\"https://steamcommunity.com/id/ali\"}]") &&
+              strstr(body_of(r), hash) && strstr(body_of(r), "\"places\":[]"));
+        CHECK(owner_call("POST", "/api/v1/profiles/create", b)->status == 409);                  /* the id is taken */
+        CHECK(queued(alice.uid, NULL) == 0);                                                     /* made: shown nowhere yet, sent nowhere */
+        snprintf(path, sizeof path, "%s/profiles/gaming.yaml", data);
+        CHECK(access(path, F_OK) == 0);
+        /* what it refuses, and why */
+        r = owner_call("POST", "/api/v1/profiles/create", "{\"id\":\"x\",\"display_name\":\"x\",\"links\":[{\"text\":\"t\",\"url\":\"javascript:1\"}]}");
+        CHECK(r->status == 400 && strstr(body_of(r), "http://"));
+        CHECK(owner_call("POST", "/api/v1/profiles/create", "{\"id\":\"x\",\"display_name\":\"x\",\"color\":\"red\"}")->status == 400);
+        CHECK(owner_call("POST", "/api/v1/profiles/create", "{\"id\":\"x\"}")->status == 400);
+        CHECK(owner_call("POST", "/api/v1/profiles/create", "{\"id\":\"Bad Id\",\"display_name\":\"x\"}")->status == 400);
+        CHECK(owner_call("POST", "/api/v1/profiles/create", "{\"id\":\"x\",\"display_name\":\"x\",\"avatar\":\"1111111111111111111111111111111111111111111111111111111111111111\"}")->status == 400);
+        {
+            char longb[400];
+            snprintf(longb, sizeof longb, "{\"id\":\"x\",\"display_name\":\"x\",\"blurb\":\"%0161d\"}", 0);
+            r = owner_call("POST", "/api/v1/profiles/create", longb);
+            CHECK(r->status == 400 && strstr(body_of(r), "too_long") && strstr(body_of(r), "161 characters; the limit is 160"));
+        }
+        CHECK(owner_call("GET", "/api/v1/profiles/x", NULL)->status == 404);
+
+        /* shown to Alice, then edited: she hears of it */
+        snprintf(pp, sizeof pp, "/api/v1/streams/%s/profile", alice.uid);
+        CHECK(owner_call("POST", pp, "{\"profile\":\"gaming\"}")->status == 200 && queued(alice.uid, "profile") == 1);
+        r = owner_call("GET", "/api/v1/profiles/gaming", NULL);
+        CHECK(r->status == 200 && strstr(body_of(r), "\"places\":[\"dm:"));
+        r = owner_call("POST", "/api/v1/profiles/gaming/edit", "{\"blurb\":null,\"pronouns\":\"he/him\"}");
+        CHECK(r->status == 200 && !strstr(body_of(r), "blurb") && strstr(body_of(r), "\"pronouns\":\"he/him\"") && strstr(body_of(r), "Battle.net"));
+        CHECK(queued(alice.uid, "profile") == 2);
+        CHECK(owner_call("POST", "/api/v1/profiles/gaming/edit", "{\"display_name\":null}")->status == 400);
+        CHECK(owner_call("POST", "/api/v1/profiles/nope/edit", "{}")->status == 404);
+        CHECK(call("POST", "/api/v1/profiles/gaming/edit", "{}", NULL, 0)->status == 404);
+
+        /* deleted: Alice is told to forget it, and sees nothing of us now */
+        CHECK(owner_call("POST", "/api/v1/profiles/gaming/delete", NULL)->status == 204);
+        CHECK(queued(alice.uid, "profile") == 3 && access(path, F_OK) != 0);
+        char pr[PUDDLE_PROFILE_ID_MAX + 1];
+        CHECK(puddle_assignments_get(as, place_alice, pr) == 1);
+        CHECK(owner_call("POST", "/api/v1/profiles/gaming/delete", NULL)->status == 404);
+        CHECK(owner_call("GET", "/api/v1/profiles/gaming", NULL)->status == 404);
+    }
+
     puddle_outbox_close(ob);
+    puddle_groups_close(gs);
     puddle_assignments_close(as);
+    puddle_people_close(ps);
     puddle_streams_close(ss);
-    puddle_profiles_free(&profiles);
+    puddle_profiles_close(profiles);
     puddle_replay_free(ctx.replay);
     puddle_identity_close(me.id); puddle_identity_close(alice.id); puddle_identity_close(carol.id);
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);

@@ -1,9 +1,9 @@
-#include "message.h"
+#include "events/message.h"
 
-#include "encoding.h"
-#include "hash.h"
-#include "link.h"
-#include "phrase.h"
+#include "base/encoding.h"
+#include "base/hash.h"
+#include "core/link.h"
+#include "core/phrase.h"
 
 #include <ftw.h>
 #include <stdio.h>

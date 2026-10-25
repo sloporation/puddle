@@ -1,7 +1,10 @@
-#include "router.h"
+#include "http/router.h"
+#include "core/people.h"
 
-#include "encoding.h"
-#include "phrase.h"
+#include "base/encoding.h"
+#include "core/phrase.h"
+#include "service/routes.h"
+#include "federation/courier.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -25,6 +28,8 @@ static char my_id[PUDDLE_USER_ID_LEN + 1];
 static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
+static puddle_people *ps;
+
 static puddle_config cfg;
 
 typedef struct { int status; char out[40000]; size_t n; } reply;
@@ -86,7 +91,7 @@ static void put(const char *id, puddle_stream_state st, int64_t updated, const c
     char err[300];
     CHECK(puddle_stream_init(&rec, id, st, updated) == 0);
     if (note) snprintf(rec.note, sizeof rec.note, "%s", note);
-    if (profile) CHECK(puddle_stream_set_profile(&rec, profile, strlen(profile)) == 0);
+    if (profile) CHECK(puddle_people_set_profile(ps, id, PUDDLE_PEOPLE_DM, profile, strlen(profile), NULL, updated) == 0);
     if (addr) CHECK(puddle_stream_add_address(&rec, addr) == 0);
     CHECK(puddle_streams_put(ss, &rec, err, sizeof err) == 0);
     puddle_stream_free(&rec);
@@ -133,10 +138,11 @@ int main(void)
     puddle_identity_id(me, my_id);
     snprintf(dir, sizeof dir, "%s/data", root);
     ss = puddle_streams_open(dir, err, sizeof err);
+    if (!ps) ps = puddle_people_open(dir, err, sizeof err);
     memset(&cfg, 0, sizeof cfg);
     snprintf(cfg.address, sizeof cfg.address, "::");
     cfg.port = 8443;
-    ctx = (puddle_ctx){ .config = &cfg, .identity = me, .streams = ss, .now_ms = now_cb };
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .config = &cfg, .identity = me, .streams = ss, .people = ps, .now_ms = now_cb };
     R = (puddle_router){ .ctx = &ctx };
     R.routes = puddle_all_routes(&R.count);
 
@@ -224,7 +230,8 @@ int main(void)
     /* the profile we show them */
     {
         char e2[200];
-        CHECK(puddle_assignments_set(as, a, "default", e2, sizeof e2) == 0);
+        char place[PUDDLE_PLACE_MAX];
+        CHECK(puddle_place_dm(a, place) == 0 && puddle_assignments_set(as, place, "default", e2, sizeof e2) == 0);
         r = call("GET", "/api/v1/streams?state=pending_in", NULL, 1);
         CHECK(strstr(body_of(r), "\"profile\":\"default\""));
     }
@@ -420,6 +427,7 @@ int main(void)
     }
 
     puddle_assignments_close(as);
+    puddle_people_close(ps);
     puddle_streams_close(ss);
     puddle_identity_close(me);
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);

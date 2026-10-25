@@ -41,7 +41,7 @@ api/objects.yaml          every object, defined once (data only)
 
 src/core/objects/         C: build each object from the store/streams/groups, write it as JSON
    ▲
-src/core/api/             C: route handlers by resource; parse input, act, return an object
+src/api/api/             C: route handlers by resource; parse input, act, return an object
 
 src/client/               C++/Qt: one class per object, with properties and methods, cached by id
    ▲
@@ -231,7 +231,7 @@ static int user_block(const puddle_call *c, puddle_jw *w)
 }
 ```
 
-The handler files move to `src/core/api/` by resource (`users.c`, `streams.c`, `conversations.c`,
+The handler files move to `src/api/api/` by resource (`users.c`, `streams.c`, `conversations.c`,
 `groups.c`, `identity.c`, `profiles.c`, `events.c`), replacing `messages.c`, `groupapi.c`, `profiles_api.c`,
 `owner_streams.c` and the owner half of `routes.c`. The domain code (`store`, `streams`, `group`, `message`,
 `outbox`) doesn't change.

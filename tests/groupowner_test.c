@@ -1,11 +1,16 @@
-#include "groupapi.h"
-#include "groupflow.h"
+#include "federation/groupapi.h"
+#include "federation/groupflow.h"
 
-#include "encoding.h"
-#include "hash.h"
-#include "message.h"
-#include "messages.h"
-#include "phrase.h"
+#include "base/encoding.h"
+#include "base/hash.h"
+#include "events/message.h"
+#include "federation/messages.h"
+#include "core/phrase.h"
+#include "service/routes.h"
+#include "federation/courier.h"
+#include "federation/sender.h"
+#include "http/client.h"
+#include "events/group_events.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -178,9 +183,9 @@ int main(void)
     memset(&cfg, 0, sizeof cfg);
     snprintf(cfg.address, sizeof cfg.address, "127.0.0.1");
     cfg.port = 8443;
-    puddle_outbox_hooks hooks = { .identity = me.id, .now_ms = now_cb };
+    puddle_outbox_hooks hooks = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb };
     ob = puddle_outbox_open(data, &hooks, err, sizeof err);
-    ctx = (puddle_ctx){ .config = &cfg, .identity = me.id, .store = store, .streams = ss, .groups = gs, .outbox = ob, .replay = puddle_replay_new(4096), .now_ms = now_cb,
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .config = &cfg, .identity = me.id, .store = store, .streams = ss, .groups = gs, .outbox = ob, .replay = puddle_replay_new(4096), .now_ms = now_cb,
                         .peer_key = puddle_streams_peer_key, .peer_key_user = ss };
     R = (puddle_router){ .ctx = &ctx };
     R.routes = puddle_all_routes(&R.count);

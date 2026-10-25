@@ -56,7 +56,7 @@ Until pairing is built, the owner API has one credential: a random 64-hex **owne
 run in `<data_dir>/state/owner-token` (mode 0600), presented as `Authorization: Bearer <token>`. The
 Puddle's own app and the owner's tools read it from that file. Paired phones will get tokens of
 their own. Without a valid token every route, including `/health`, answers `404` as if it did not exist.
-(`src/core/auth.c`.)
+(`src/core/auth.cpp`.)
 
 ## Rotation (in v1, optional, owner-triggered)
 
@@ -79,12 +79,12 @@ a new phrase. Authority to roll comes from a **roll key**, derived from the phra
   is written down. After it commits, the old phrase recovers nothing.
 - Events carry the id of the key that signed them (`kid`), so history signed before a roll still verifies.
 
-Built in `src/core/identity.c`; run it with `puddled --roll`, or over the owner API while the Puddle runs (`POST /api/v1/identity/roll`, then `/confirm`). If it is interrupted, the next start finishes it:
+Built in `src/core/identity.cpp`; run it with `puddled --roll`, or over the owner API while the Puddle runs (`POST /api/v1/identity/roll`, then `/confirm`). If it is interrupted, the next start finishes it:
 the signed record and the new keys are written together to a journal before either real file changes.
 
 ## Restoring on a new computer
 
-Built in `src/core/identity.c` (`puddle_identity_restore`) and run with `puddled --restore --chain FILE`.
+Built in `src/core/identity.cpp` (`puddle_identity_restore`) and run with `puddled --restore --chain FILE`.
 It needs two things:
 
 - the owner's **latest** recovery phrase, the one written down at the most recent roll (or at the start, if

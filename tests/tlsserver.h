@@ -3,11 +3,12 @@
 #ifndef PUDDLE_TEST_TLSSERVER_H
 #define PUDDLE_TEST_TLSSERVER_H
 
-#include "hash.h"
-#include "http.h"
-#include "serve.h"
-#include "fsutil.h"
-#include "tls.h"
+#include "base/hash.h"
+#include "http/http.h"
+#include "http/serve.h"
+#include "platform/fsutil.h"
+#include "http/tls.h"
+#include "http/client.h"
 
 #include <netinet/in.h>
 #include <openssl/pem.h>

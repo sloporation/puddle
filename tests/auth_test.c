@@ -1,4 +1,4 @@
-#include "auth.h"
+#include "core/auth.h"
 
 #include <ftw.h>
 #include <stdio.h>

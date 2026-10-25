@@ -1,24 +1,32 @@
 $schema: https://json-schema.org/draft/2020-12/schema
 title: Person
 description: |
-  Someone this Puddle knows of, and the profile their Puddle sent us. Collection "people", key = user id.
-  Kept by core/people.hpp.
+  Someone this Puddle knows of, and the profiles their Puddle sent us: one for each place we share. Collection "people",
+  key = user id. Kept by src/core/people.h.
 
-  The profile arrives over federation, from their Puddle, in three places: an access request (AccessRequest.requester),
-  the answer to one (AccessResult.responder), and POST /stream/v1/profile whenever they change it. Whichever comes
-  last replaces what we held. It is the profile they chose to show us, which may not be the one they show others.
+  A place is "dm" (what they show us directly) or "group:<group id>" (what they show the members of that group; Ponds
+  will add "pond:<id>"). Each arrives from their Puddle: with their request for a stream or their answer to ours (the
+  direct one only), and with POST /stream/v1/profile whenever their choice or the profile changes. Whichever comes last
+  for a place replaces what we held for it; `profile: null` takes it back and it is forgotten. Each was cleaned when it
+  came (src/wire/wireprofile.h): what was wrong in it was left out, and `notes` says what.
 type: object
-required: [id, first_seen]
+required: [v, id, first_seen, profiles]
 properties:
+  v: { const: 2, description: "1 held a single `profile` and `profile_at`: read as the \"dm\" place" }
   id: { $ref: "../wire/ids.yaml#/$defs/UserId" }
-  profile:
-    $ref: "../wire/profile.yaml"
-    description: Exactly as their Puddle sent it; absent until one has arrived
-  profile_at: { $ref: "../wire/ids.yaml#/$defs/Timestamp", description: When it arrived }
-  first_seen: { $ref: "../wire/ids.yaml#/$defs/Timestamp", description: "When we first heard of them: a request, an answer, or a group" }
+  first_seen: { $ref: "../wire/ids.yaml#/$defs/Timestamp", description: "When we first heard of them" }
+  profiles:
+    type: array
+    maxItems: 64
+    items:
+      type: object
+      required: [place, profile, at]
+      properties:
+        place: { type: string, pattern: "^(dm|group:[a-z2-7]{52})$" }
+        profile: { $ref: "../wire/profile.yaml", description: As cleaned on arrival }
+        at: { $ref: "../wire/ids.yaml#/$defs/Timestamp", description: When it arrived }
+        notes: { type: string, description: "What was left out or cut short, one line each; absent if nothing" }
 x-fields:
   derived: []
   owners-own: []
-  from-peer: [profile, profile_at]
-x-source:
-  today: "The profile is a field of the stream record (puddle_stream.profile), written by src/core/access.c and src/core/inbound.c through puddle_stream_set_profile. Someone with no stream has nowhere to keep one."
+  from-peer: [profiles]

@@ -1,22 +1,19 @@
 /* puddled: headless Puddle. Logs to stderr (journald / launchd). */
-#include "config.h"
-#include "identity.h"
-#include "log.h"
-#include "server.h"
-#include "store.h"
+#include "core/config.h"
+#include "core/identity.h"
+#include "base/log.h"
+#include "platform/process.h"
+#include "service/server.h"
+#include "storage/store.h"
 
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
-#include <termios.h>
-#include <unistd.h>
 
 static puddle_server *volatile g_server;
 
-static void on_signal(int sig)
+static void on_stop(void)
 {
-    (void)sig;
-    puddle_server_stop(g_server);
+    puddle_server_stop(g_server); /* only wakes the server: safe in a signal handler */
 }
 
 static void usage(FILE *out)
@@ -63,18 +60,12 @@ static void show_phrase(const char *phrase, int interactive)
 /* Read a line from the terminal without showing it. */
 static int read_secret(const char *prompt, char *out, size_t cap)
 {
-    struct termios old, quiet;
-    int have = tcgetattr(STDIN_FILENO, &old) == 0;
     printf("%s", prompt);
     fflush(stdout);
-    if (have) {
-        quiet = old;
-        quiet.c_lflag &= (tcflag_t)~ECHO;
-        tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
-    }
+    int quiet = puddle_console_echo(0);
     char *got = fgets(out, (int)cap, stdin);
-    if (have)
-        tcsetattr(STDIN_FILENO, TCSANOW, &old);
+    if (quiet)
+        puddle_console_echo(1);
     printf("\n");
     if (!got)
         return -1;
@@ -87,7 +78,7 @@ static int read_secret(const char *prompt, char *out, size_t cap)
 static int roll_keys(const puddle_config *cfg)
 {
     char err[512];
-    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+    if (!puddle_console_interactive()) {
         fprintf(stderr, "puddled: --roll needs a terminal: it asks for your recovery phrase and shows a new one.\n");
         return 1;
     }
@@ -153,7 +144,7 @@ static int restore_identity(const puddle_config *cfg, const char *chain_path)
                         "secret; keep one somewhere safe). Without a copy, a friend's Puddle can give you one.\n");
         return 2;
     }
-    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+    if (!puddle_console_interactive()) {
         fprintf(stderr, "puddled: --restore needs a terminal: it asks for your recovery phrase.\n");
         return 1;
     }
@@ -240,7 +231,7 @@ int main(int argc, char **argv)
 
     int unfinished = puddle_identity_unconfirmed(cfg.data_dir);
     if (!puddle_identity_exists(cfg.data_dir) || unfinished) {
-        int interactive = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+        int interactive = puddle_console_interactive();
         if (!init && !interactive) {
             fprintf(stderr,
                     "puddled: this Puddle has no usable identity yet. Run `puddled --init` in a terminal once: "
@@ -279,12 +270,7 @@ int main(int argc, char **argv)
     }
     g_server = srv;
 
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_signal;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
+    puddle_on_stop_signal(on_stop);
 
     int rc = puddle_server_run(srv);
     puddle_server_destroy(srv);

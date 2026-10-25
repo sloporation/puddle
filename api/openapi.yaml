@@ -30,7 +30,7 @@ tags:
   - { name: conversations, description: DMs and groups alike, and their messages }
   - { name: groups, description: Group chats }
   - { name: identity, description: This Puddle's keys }
-  - { name: profiles, description: The owner's profiles (defined in profiles.yaml) }
+  - { name: profiles, description: "The owner's profiles: files in the data folder, each shown only where the owner chooses (docs/profiles.md)" }
   - { name: invites, description: Links that are accepted automatically }
   - { name: updates, description: Objects as they change }
 
@@ -55,6 +55,14 @@ paths:
       summary: A person this Puddle knows
       responses:
         "200": { $ref: "#/components/responses/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/users/{user}/profiles:
+    parameters: [{ $ref: "#/components/parameters/User" }]
+    get:
+      tags: [users]
+      summary: Every profile they show us, one per place we share (directly, and in each group), with notes on what was left out
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { allOf: [{ $ref: "page.yaml" }, { properties: { items: { items: { $ref: "objects/received_profile.yaml" } } } }] } } } }
         "404": { $ref: "#/components/responses/NotFound" }
   /api/v1/users/{user}/block:
     parameters: [{ $ref: "#/components/parameters/User" }]
@@ -99,7 +107,7 @@ paths:
               properties:
                 target: { type: string, description: "An address, optionally puddle://, optionally with ?invite=" }
                 message: { type: string, maxLength: 500 }
-                profile: { type: string, description: Which profile to introduce yourself with }
+                profile: { type: string, description: "Which of the owner's profiles they will see; absent: none, and they see only the id" }
       responses:
         "200": { $ref: "#/components/responses/Stream" }
   /api/v1/streams/{user}:
@@ -111,7 +119,11 @@ paths:
         "200": { $ref: "#/components/responses/Stream" }
   /api/v1/streams/{user}/accept:
     parameters: [{ $ref: "#/components/parameters/User" }]
-    post: { tags: [streams], summary: Say yes to their request, responses: { "200": { $ref: "#/components/responses/Stream" } } }
+    post:
+      tags: [streams]
+      summary: Say yes to their request
+      requestBody: { content: { application/json: { schema: { type: object, properties: { profile: { type: string, description: "Which of the owner's profiles they will see; absent: none (they see only the id)" } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Stream" } }
   /api/v1/streams/{user}/decline:
     parameters: [{ $ref: "#/components/parameters/User" }]
     post: { tags: [streams], summary: Say no to their request, responses: { "200": { $ref: "#/components/responses/Stream" } } }
@@ -125,8 +137,8 @@ paths:
     parameters: [{ $ref: "#/components/parameters/User" }]
     post:
       tags: [streams]
-      summary: Choose which of the owner's profiles they see
-      requestBody: { content: { application/json: { schema: { type: object, required: [profile], properties: { profile: { type: [string, "null"], description: "null: back to the default" } } } } } }
+      summary: Choose which of the owner's profiles they see directly; they are told
+      requestBody: { content: { application/json: { schema: { type: object, required: [profile], properties: { profile: { type: [string, "null"], description: "null: none; they are told to forget the one they had" } } } } } }
       responses: { "200": { $ref: "#/components/responses/Stream" } }
   /api/v1/streams/policy:
     get:
@@ -220,6 +232,7 @@ paths:
               properties:
                 name: { type: string, minLength: 1, maxLength: 100 }
                 members: { type: array, items: { $ref: "wire/ids.yaml#/$defs/UserId" } }
+                profile: { type: string, description: "Which of the owner's profiles the members will see; absent: none" }
       responses:
         "201":
           description: Made
@@ -245,7 +258,18 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Group" } }
   /api/v1/groups/{group}/accept:
     parameters: [{ $ref: "#/components/parameters/Group" }]
-    post: { tags: [groups], summary: Say yes to an invitation, responses: { "200": { $ref: "#/components/responses/Group" } } }
+    post:
+      tags: [groups]
+      summary: Say yes to an invitation
+      requestBody: { content: { application/json: { schema: { type: object, properties: { profile: { type: string, description: "Which of the owner's profiles the members will see; absent: none (they see only the id)" } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Group" } }
+  /api/v1/groups/{group}/profile:
+    parameters: [{ $ref: "#/components/parameters/Group" }]
+    post:
+      tags: [groups]
+      summary: Choose which of the owner's profiles the members see; they are told
+      requestBody: { content: { application/json: { schema: { type: object, required: [profile], properties: { profile: { type: [string, "null"], description: "null: none; they are told to forget the one they had" } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Group" } }
   /api/v1/groups/{group}/decline:
     parameters: [{ $ref: "#/components/parameters/Group" }]
     post: { tags: [groups], summary: Say no to an invitation, responses: { "200": { $ref: "#/components/responses/Group" } } }
@@ -276,14 +300,47 @@ paths:
   /api/v1/profiles:
     get:
       tags: [profiles]
-      summary: The owner's profiles
-      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "objects/own_profile.yaml" } } } } } }
+      summary: The owner's profiles, by id (one page holds them all)
+      responses: { "200": { description: OK, content: { application/json: { schema: { allOf: [{ $ref: "page.yaml" }, { properties: { items: { items: { $ref: "objects/own_profile.yaml" } } } }] } } } } }
+  /api/v1/profiles/create:
+    post:
+      tags: [profiles]
+      summary: A new profile, shown nowhere until it is chosen somewhere
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "objects/profile_fields.yaml"
+                - { type: object, required: [id, display_name], properties: { id: { type: string, pattern: "^[a-z0-9_-]{1,32}$" } } }
+      responses:
+        "201": { description: Made, content: { application/json: { schema: { $ref: "objects/own_profile.yaml" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/profiles/{profile}:
+    parameters: [{ $ref: "#/components/parameters/Profile" }]
+    get: { tags: [profiles], summary: One profile, responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "objects/own_profile.yaml" } } } } } }
+  /api/v1/profiles/{profile}/edit:
+    parameters: [{ $ref: "#/components/parameters/Profile" }]
+    post:
+      tags: [profiles]
+      summary: Change the fields given (null clears one); every place showing it is told
+      requestBody: { content: { application/json: { schema: { $ref: "objects/profile_fields.yaml" } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "objects/own_profile.yaml" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/profiles/{profile}/delete:
+    parameters: [{ $ref: "#/components/parameters/Profile" }]
+    post:
+      tags: [profiles]
+      summary: Delete it; every place it was shown is told to forget it, and sees nothing of the owner there any more
+      responses: { "204": { description: Deleted } }
   /api/v1/profiles/reload:
     post:
       tags: [profiles]
       x-status: not built yet (docs/discuss-later.md, 2)
-      summary: Read profiles.yaml again
-      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "objects/own_profile.yaml" } } } } } }
+      summary: Read the profile files again, after editing them by hand
+      responses: { "200": { description: OK, content: { application/json: { schema: { allOf: [{ $ref: "page.yaml" }, { properties: { items: { items: { $ref: "objects/own_profile.yaml" } } } }] } } } } }
   /api/v1/invites:
     get:
       tags: [invites]
@@ -305,6 +362,14 @@ paths:
       summary: An image by hash
       parameters: [{ name: hash, in: query, required: true, schema: { type: string, pattern: "^[0-9a-f]{64}$" } }]
       responses: { "200": { description: The file, content: { image/*: {} } } }
+  /api/v1/media/upload:
+    post:
+      tags: [profiles]
+      summary: Keep a picture for the owner's profiles (the bytes of a png, jpg, gif or webp, up to 25 MiB)
+      requestBody: { content: { image/*: {} } }
+      responses:
+        "201": { description: Kept, content: { application/json: { schema: { $ref: "wire/media_ref.yaml" } } } }
+        "400": { $ref: "#/components/responses/Error" }
 
   # ---- updates ----
   /api/v1/updates:
@@ -342,6 +407,7 @@ components:
       schema: { $ref: "wire/ids.yaml#/$defs/ChatId" }
     Group: { name: group, in: path, required: true, schema: { $ref: "wire/ids.yaml#/$defs/ChatId" } }
     Message: { name: message, in: path, required: true, schema: { $ref: "wire/ids.yaml#/$defs/EventId" } }
+    Profile: { name: profile, in: path, required: true, description: One of the owner's profile ids, schema: { type: string, pattern: "^[a-z0-9_-]{1,32}$" } }
     Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
     Offset: { name: offset, in: query, description: "Where to start: a page's `next`", schema: { type: integer, minimum: 0, default: 0 } }
 

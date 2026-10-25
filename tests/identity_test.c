@@ -1,7 +1,7 @@
-#include "identity.h"
+#include "core/identity.h"
 
-#include "encoding.h"
-#include "hash.h"
+#include "base/encoding.h"
+#include "base/hash.h"
 
 #include <dirent.h>
 #include <ftw.h>

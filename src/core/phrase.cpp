@@ -1,6 +1,6 @@
-#include "phrase.h"
+#include "core/phrase.h"
 
-#include "hash.h"
+#include "base/hash.h"
 
 #include <string.h>
 

@@ -1,4 +1,4 @@
-#include "config.h"
+#include "core/config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,14 +27,14 @@ int main(void)
     char err[256], expect[700];
     puddle_config c;
 
-    /* missing file: created with defaults, plus a starter profiles file */
+    /* missing file: created with defaults; profiles start in the data folder, so there is no profiles file beside it */
     CHECK(puddle_config_load(&c, path, err, sizeof err) == 0);
     CHECK(strcmp(c.address, "127.0.0.1") == 0 && c.port == 8443);
     CHECK(access(path, F_OK) == 0);
     snprintf(expect, sizeof expect, "%s/profiles.yaml", dir);
-    CHECK(access(expect, F_OK) == 0);
+    CHECK(access(expect, F_OK) != 0);
     CHECK(strcmp(c.dir, dir) == 0);
-    CHECK(c.nprofile_files == 1 && strcmp(c.profile_files[0], expect) == 0);
+    CHECK(c.nprofile_files == 0);
     char def[PUDDLE_PATH_MAX];
     CHECK(puddle_config_default_data_dir(def, sizeof def) == 0 && strcmp(c.data_dir, def) == 0);
     CHECK(puddle_config_load(&c, path, err, sizeof err) == 0); /* what it wrote loads back */

@@ -17,10 +17,10 @@
 #include "../src/gui/app/chats.h"
 
 extern "C" {
-#include "config.h"
-#include "identity.h"
-#include "phrase.h"
-#include "server.h"
+#include "core/config.h"
+#include "core/identity.h"
+#include "core/phrase.h"
+#include "service/server.h"
 }
 
 inline bool until(const std::function<bool()> &cond, int ms = 15000)

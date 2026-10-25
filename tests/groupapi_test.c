@@ -1,11 +1,17 @@
-#include "groupapi.h"
-#include "groupflow.h"
+#include "federation/groupapi.h"
+#include "core/people.h"
+#include "federation/groupflow.h"
 
-#include "encoding.h"
-#include "hash.h"
-#include "message.h"
-#include "messages.h"
-#include "phrase.h"
+#include "base/encoding.h"
+#include "base/hash.h"
+#include "events/message.h"
+#include "federation/messages.h"
+#include "core/phrase.h"
+#include "service/routes.h"
+#include "federation/courier.h"
+#include "federation/sender.h"
+#include "http/client.h"
+#include "events/group_events.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -28,6 +34,21 @@ static person me, alice, bob, carol, dave, erin, ivy, jon;
 static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
+static puddle_people *ps;
+
+/* the profile their Puddle sent us, or "" */
+static const char *their_profile(const char *id)
+{
+    static char buf[20000];
+    char *json;
+    size_t len;
+    buf[0] = '\0';
+    if (puddle_people_profile(ps, id, PUDDLE_PEOPLE_DM, &json, &len) == 0) {
+        snprintf(buf, sizeof buf, "%s", json);
+        free(json);
+    }
+    return buf;
+}
 static puddle_groups *gs;
 static puddle_store *store;
 static puddle_outbox *ob;
@@ -326,13 +347,14 @@ int main(void)
     snprintf(data, sizeof data, "%s/data", root);
     store = puddle_store_open(data, err, sizeof err);
     ss = puddle_streams_open(data, err, sizeof err);
+    if (!ps) ps = puddle_people_open(data, err, sizeof err);
     gs = puddle_groups_open(data, err, sizeof err);
     memset(&cfg, 0, sizeof cfg);
     snprintf(cfg.address, sizeof cfg.address, "127.0.0.1");
     cfg.port = 8443;
-    puddle_outbox_hooks hooks = { .identity = me.id, .now_ms = now_cb };
+    puddle_outbox_hooks hooks = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb };
     ob = puddle_outbox_open(data, &hooks, err, sizeof err);
-    ctx = (puddle_ctx){ .config = &cfg, .identity = me.id, .store = store, .streams = ss, .groups = gs, .outbox = ob, .replay = puddle_replay_new(4096), .now_ms = now_cb,
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .config = &cfg, .identity = me.id, .store = store, .streams = ss, .people = ps, .groups = gs, .outbox = ob, .replay = puddle_replay_new(4096), .now_ms = now_cb,
                         .peer_key = puddle_streams_peer_key, .peer_key_user = ss };
     R = (puddle_router){ .ctx = &ctx };
     R.routes = puddle_all_routes(&R.count);
@@ -805,7 +827,7 @@ int main(void)
             char *res = who_json(&ivy, "responder", "198.51.100.77:8443", "Ivy", "\"approved\":true,\"scoped\":true");
             CHECK(post_as(&ivy, "/stream/v1/access/result", res)->status == 202);
             free(res);
-            CHECK(puddle_streams_get(ss, ivy.uid, &st) == 0 && st.state == PUDDLE_STREAM_SCOPED && st.group_ok && !st.scoped_req && st.chain && st.profile && strstr(st.profile, "Ivy"));
+            CHECK(puddle_streams_get(ss, ivy.uid, &st) == 0 && st.state == PUDDLE_STREAM_SCOPED && st.group_ok && !st.scoped_req && st.chain && strstr(their_profile(ivy.uid), "Ivy"));
             puddle_stream_free(&st);
             CHECK(puddle_group_open_with(&ctx, ivy.uid));
         }

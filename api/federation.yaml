@@ -118,8 +118,8 @@ paths:
         like a path that does not exist. One that does is **always answered `202` with an empty body,
         whatever is decided**: blocked, refused by policy, rate-limited, over capacity, approved at once or
         left waiting for the owner are indistinguishable, and dropped ones are dropped silently. The
-        requester's `profile` is read for `display_name`, `blurb`, `about` and `pronouns` only (cleaned and
-        length-limited); pictures and colors come later, over the stream. At most 96 KiB. The outcome arrives later at the requester's `access/result`, or by polling
+        requester's `profile` is there only if they chose one to show the target directly; it is cleaned like any
+        received profile (see `pushProfile`), and its pictures are fetched once the stream is open. At most 96 KiB. The outcome arrives later at the requester's `access/result`, or by polling
         `access/status`. Set `scope` to ask for a group-only connection: the requester's own signed `member.join` for a group is the proof, and
         the target approves if it is in that group, the requester is invited to it (or already in), the join is the requester's own and signed by the
         key in the chain sent, and the requester is not blocked.
@@ -243,12 +243,21 @@ paths:
     post:
       tags: [delivery]
       operationId: pushProfile
-      summary: The sender changed the profile you see
+      summary: The profile the sender shows you, in a place you share
       description: |
-        Sent when the owner assigns you a different profile. Needs an open stream (`403 no_stream`). The profile is rebuilt
-        from the fields we understand, each checked (`400` if any is wrong: a colour that is not `#rrggbb`, a picture
-        reference with a malformed hash, a kind of image we do not take, a size over the cap), and the pictures it points
-        at that we do not hold are then fetched from the sender.
+        A profile is shown per place: directly (no `group`), or in a group both are in (`group`; Ponds will add their
+        own). The sender's owner chose it for that place, and that choice is their consent for it to go there; nothing
+        is sent where nothing was chosen. Sent when the choice or the profile changes, when a stream opens, and when
+        someone joins a group. `profile: null` takes it back: forget what you held for that place. Needs an open stream
+        (`403 no_stream`).
+
+        The receiver rebuilds the profile from the fields it understands and **never refuses it for what is in it**: a
+        field that is wrong (a colour that is not `#rrggbb`, a picture reference with a malformed hash, a kind of image
+        it does not take, a link that is not http or https) is left out, text over its limit is cut to it, and a short
+        note says what was done; fields it does not know are skipped without a word. Only something that is not a JSON
+        object is set aside (`204`, nothing kept). A profile for a group the receiver does not share with the sender is
+        set aside the same way. The pictures it points at that the receiver does not hold are then fetched from the
+        sender.
       requestBody:
         required: true
         content:
@@ -257,9 +266,11 @@ paths:
               type: object
               required: [profile]
               properties:
-                profile: { $ref: "#/components/schemas/Profile" }
+                profile:
+                  oneOf: [{ $ref: "#/components/schemas/Profile" }, { type: "null" }]
+                group: { $ref: "#/components/schemas/UserId", description: The group it is shown in; absent for the direct one }
       responses:
-        "204": { description: Recorded }
+        "204": { description: Recorded (or set aside) }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
@@ -269,7 +280,8 @@ paths:
       operationId: getMedia
       summary: An image from the sender's profile
       description: |
-        Only images in the profile the owner shows *you* are served, and only over an open stream; anything else is `404`,
+        Only images in a profile the owner shows *you* (directly, or in a group you share) are served, and only over an
+        open stream; anything else is `404`,
         as if it did not exist. The hash is the SHA-256 of the file; the fetcher checks it, the size and the kind of
         image against what the profile said, and keeps nothing that does not match. The size cap is a placeholder
         (25 MiB), and what a receiver does about oversized or booby-trapped images is still open.
@@ -369,11 +381,12 @@ components:
     Profile:
       type: object
       description: |
-        How a person appears to someone they share a stream with. Everything but `display_name` is
-        optional. Limits (characters): display_name 64, blurb 160, about 2000, pronouns 32.
-      required: [display_name]
+        How a person appears in one place they share with someone (docs/profiles.md). Every field is optional; one
+        with no `display_name` is shown by the user id. Limits (characters): display_name 64, blurb 160, about 2000,
+        pronouns 32, a link's text 64; a link's url is at most 512 bytes. See `pushProfile` for what a receiver does
+        with what does not keep to them.
       properties:
-        display_name: { type: string, minLength: 1, maxLength: 64 }
+        display_name: { type: string, maxLength: 64 }
         avatar: { $ref: "#/components/schemas/MediaRef" }
         blurb: { type: string, maxLength: 160, description: A short line }
         about: { type: string, maxLength: 2000, description: The longer description }
@@ -381,6 +394,16 @@ components:
         color: { $ref: "#/components/schemas/Color" }
         banner: { $ref: "#/components/schemas/MediaRef" }
         background: { $ref: "#/components/schemas/MediaRef" }
+        links:
+          type: array
+          maxItems: 10
+          description: Where else to find them, such as a game tag; the url is optional
+          items:
+            type: object
+            required: [text]
+            properties:
+              text: { type: string, minLength: 1, maxLength: 64 }
+              url: { type: string, maxLength: 512, pattern: "^[Hh][Tt][Tt][Pp][Ss]?://" }
 
 
     Chain:
@@ -410,10 +433,12 @@ components:
 
     Peer:
       type: object
-      required: [id, profile, address, chain]
+      required: [id, address, chain]
       properties:
         id: { $ref: "#/components/schemas/UserId" }
-        profile: { $ref: "#/components/schemas/Profile" }
+        profile:
+          $ref: "#/components/schemas/Profile"
+          description: The one the sender shows the receiver directly; absent if they chose none
         address:
           type: string
           description: host:port this Puddle can be reached at

@@ -27,6 +27,11 @@ QString path(const QString &kind, const QString &id, const QString &rest = QStri
 
 QString idOf(const QJsonValue &person) { return person.toObject().value("id").toString(); }
 
+// A person as an answer wrote them (a PartialUser): as they show themselves where it was written, so a group's members and
+// messages show each person as they are in that group, not as they show themselves to us directly.
+QString nameIn(const QJsonValue &person) { return person.toObject().value("display_name").toString(); }
+QString avatarIn(const QJsonValue &person) { return person.toObject().value("avatar").toObject().value("hash").toString(); }
+
 // A page of a conversation holds its messages and what happened to the group, in one list told apart by `type`. The window keeps the two
 // apart and in the shape it reads: who said it as `sender`, and an `edited` flag beside `edited_at`.
 QJsonObject asMessage(QJsonObject m)
@@ -145,13 +150,15 @@ void Chats::refreshProfiles()
     busy_[4] = true;
     api_.get(QStringLiteral("/api/v1/profiles"), [this](int status, const QJsonDocument &doc) {
         busy_[4] = false;
-        if (status != 200 || !doc.isArray())
+        if (status != 200 || !doc.isObject())
             return;
         QList<QJsonObject> rows;
-        for (const QJsonValue &v : doc.array()) {
+        const QJsonArray items = doc.object().value("items").toArray();
+        for (const QJsonValue &v : items) {
             QJsonObject p = v.toObject();
             p.insert("avatar", p.value("avatar").toObject().value("hash").toString());
-            if (p.value("default").toBool()) {
+            p.insert("default", rows.isEmpty()); // the first is how the owner sees themselves
+            if (rows.isEmpty()) {
                 myName_ = p.value("display_name").toString();
                 myAvatar_ = p.value("avatar").toString();
             }
@@ -590,8 +597,9 @@ void Chats::renderMessages()
             m.insert("deliveryReason", d.value("reason"));
             m.insert("deliveryNext", d.value("next_at"));
         }
-        m.insert("senderName", mine ? tr("You") : nameOf(sender));
-        m.insert("avatar", mine ? myAvatar_ : avatars_.value(sender));
+        const QJsonValue author = m.value("author");
+        m.insert("senderName", mine ? tr("You") : !nameIn(author).isEmpty() ? nameIn(author) : nameOf(sender));
+        m.insert("avatar", mine ? myAvatar_ : author.isObject() ? avatarIn(author) : avatars_.value(sender));
         m.insert("tint", mine ? QString() : colors_.value(sender));
         m.insert("grouped", !first && !newDay && prev.value("kind").toString() == QLatin1String("message") && prev.value("sender") == m.value("sender") &&
                                 !m.contains("reply_to") && ts - qint64(prev.value("ts").toDouble()) < 7 * 60 * 1000);
@@ -600,7 +608,7 @@ void Chats::renderMessages()
             if (r.isEmpty()) {
                 m.insert("replyMissing", true);
             } else {
-                m.insert("replyName", r.value("outgoing").toBool() ? tr("You") : nameOf(r.value("sender").toString()));
+                m.insert("replyName", r.value("outgoing").toBool() ? tr("You") : !nameIn(r.value("author")).isEmpty() ? nameIn(r.value("author")) : nameOf(r.value("sender").toString()));
                 m.insert("replyText", r.value("deleted").toBool() ? QString() : r.value("body").toString().simplified().left(100));
             }
         }
@@ -723,7 +731,15 @@ void Chats::remove(const QString &messageId)
     post(path("conversations", current_, QStringLiteral("messages/%1/delete").arg(messageId)), QJsonObject{}, tr("The message could not be deleted."));
 }
 
-void Chats::accept(const QString &u) { post(path("streams", u, "accept"), QJsonObject{}, tr("Could not accept.")); }
+// who they will see us as, if the owner chose: nothing goes without that choice
+static QJsonObject withProfile(QJsonObject o, const QString &profile)
+{
+    if (!profile.isEmpty())
+        o.insert("profile", profile);
+    return o;
+}
+
+void Chats::accept(const QString &u, const QString &profile) { post(path("streams", u, "accept"), withProfile({}, profile), tr("Could not accept.")); }
 void Chats::decline(const QString &u) { post(path("streams", u, "decline"), QJsonObject{}, tr("Could not decline.")); }
 void Chats::cancel(const QString &u) { post(path("streams", u, "delete"), QJsonObject{}, tr("Could not remove.")); }
 void Chats::block(const QString &u) { post(path("users", u, "block"), QJsonObject{}, tr("Could not block.")); }
@@ -735,9 +751,7 @@ void Chats::request(const QString &link, const QString &note, const QString &pro
     QJsonObject o{ { "target", link } };
     if (!note.isEmpty())
         o.insert("message", note);
-    if (!profile.isEmpty())
-        o.insert("profile", profile);
-    post(QStringLiteral("/api/v1/streams/request"), o, tr("The request could not be sent. Check the link."));
+    post(QStringLiteral("/api/v1/streams/request"), withProfile(o, profile), tr("The request could not be sent. Check the link."));
 }
 
 // ---- groups ----
@@ -898,8 +912,8 @@ void Chats::rebuildMembers()
             QJsonObject r;
             r.insert("id", id);
             const bool me = !self_.isEmpty() && id == self_;
-            r.insert("name", me ? tr("You") : nameOf(id));
-            r.insert("avatar", me ? myAvatar_ : avatars_.value(id));
+            r.insert("name", me ? tr("You") : !nameIn(m.value("user")).isEmpty() ? nameIn(m.value("user")) : nameOf(id));
+            r.insert("avatar", me ? myAvatar_ : avatarIn(m.value("user")));
             r.insert("color", me ? QString() : colors_.value(id));
             r.insert("state", m.value("state"));
             r.insert("isMe", me);
@@ -954,12 +968,12 @@ void Chats::refreshGroups()
     });
 }
 
-void Chats::createGroup(const QString &name, const QStringList &friends)
+void Chats::createGroup(const QString &name, const QStringList &friends, const QString &profile)
 {
     QJsonArray members;
     for (const QString &f : friends)
         members.append(f);
-    api_.post(QStringLiteral("/api/v1/groups/create"), QJsonObject{ { "name", name.trimmed() }, { "members", members } }, [this](int status, const QJsonDocument &doc) {
+    api_.post(QStringLiteral("/api/v1/groups/create"), withProfile(QJsonObject{ { "name", name.trimmed() }, { "members", members } }, profile), [this](int status, const QJsonDocument &doc) {
         if (status != 201 || !doc.isObject()) {
             emit failed(tr("The group could not be made."));
             return;
@@ -978,9 +992,9 @@ void Chats::inviteToGroup(const QString &userId)
     post(path("groups", current_, "invite"), QJsonObject{ { "user", userId } }, tr("They could not be invited."));
 }
 
-void Chats::acceptGroup(const QString &groupId)
+void Chats::acceptGroup(const QString &groupId, const QString &profile)
 {
-    post(path("groups", groupId, "accept"), QJsonObject{}, tr("The group could not be joined."));
+    post(path("groups", groupId, "accept"), withProfile({}, profile), tr("The group could not be joined."));
 }
 
 void Chats::declineGroup(const QString &groupId)

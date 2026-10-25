@@ -19,8 +19,10 @@
  * side by side (each on its own thread, up to PUDDLE_OUTBOX_PARALLEL), so a slow or dead peer holds up only
  * itself. The hooks below are therefore called from several threads and must be safe for that. */
 
-#include "client.h"
-#include "identity.h"
+#include "core/delivery.h"
+#include "core/link.h"
+#include "storage/storage.h"
+#include "core/identity.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -61,7 +63,19 @@ typedef enum {
     PUDDLE_OB_HOLD        /* the peer's certificate changed; the peer's items are held */
 } puddle_ob_outcome;
 
+/* How long one delivery may take, in seconds; 0 = the sender's default. */
 typedef struct {
+    int connect_timeout_s;
+    int io_timeout_s;
+    int total_timeout_s;
+} puddle_ob_timeouts;
+
+typedef struct puddle_outbox_hooks puddle_outbox_hooks;
+struct puddle_outbox_hooks {
+    /* Send one item to its peer and say what came of it in `reply`. The outbox only queues, schedules and keeps
+     * count; how an item travels is this hook's (federation/sender.h: puddle_federation_send). NULL: nothing is
+     * ever sent, and each attempt fails. */
+    void (*send)(const puddle_outbox_hooks *hooks, const puddle_ob_item *item, puddle_net_reply *reply);
     puddle_identity *identity;                                   /* signs everything */
     /* where to reach `peer`, best first; returns how many (0 = we do not know where) */
     int (*addresses)(void *user, const char *peer, puddle_address *out, int max);
@@ -71,14 +85,16 @@ typedef struct {
     void (*done)(void *user, const puddle_ob_item *item, puddle_ob_outcome outcome, const puddle_net_reply *reply);
     void *user;
     int64_t (*now_ms)(void);                                     /* NULL = the clock */
-    puddle_net_opts net;                                         /* timeouts */
+    puddle_ob_timeouts net;                                      /* for the sender */
     int max_queued, max_failed;                                  /* 0 = the defaults above; tests use small ones */
-} puddle_outbox_hooks;
+};
 
 typedef struct puddle_outbox puddle_outbox;
 
 /* Read what is waiting from <data_dir>/state/outbox/. A damaged file is skipped with a warning. */
 puddle_outbox *puddle_outbox_open(const char *data_dir, const puddle_outbox_hooks *hooks, char *err, size_t errlen);
+/* As puddle_outbox_open, kept in any storage, which must outlive it. */
+puddle_outbox *puddle_outbox_open_with(puddle_storage *storage, const puddle_outbox_hooks *hooks, char *err, size_t errlen);
 void puddle_outbox_close(puddle_outbox *ob); /* stops the worker first */
 
 /* Start (and stop, via close) a thread that delivers things as they fall due. */

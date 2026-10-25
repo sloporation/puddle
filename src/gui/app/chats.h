@@ -101,16 +101,17 @@ public:
     // Empty if there is no such stream.
     Q_INVOKABLE QVariantMap person(const QString &userId) const; // how many friends have `filter` (any case) in their name; all of them if empty
     Q_INVOKABLE bool isGroupMember(const QString &userId) const { for (const QJsonObject &m : members_.items()) if (m.value("id").toString() == userId) return true; return false; }
-    Q_INVOKABLE void createGroup(const QString &name, const QStringList &friends);
+    // `profile`, in these four, is which of the owner's profiles they will see; empty: none (they see only the id)
+    Q_INVOKABLE void createGroup(const QString &name, const QStringList &friends, const QString &profile = QString());
     Q_INVOKABLE void inviteToGroup(const QString &userId);   // into the open group
-    Q_INVOKABLE void acceptGroup(const QString &groupId);
+    Q_INVOKABLE void acceptGroup(const QString &groupId, const QString &profile = QString());
     Q_INVOKABLE void declineGroup(const QString &groupId);
     Q_INVOKABLE void leaveGroup();                           // the open one
     Q_INVOKABLE void leaveGroup(const QString &groupId);     // any group we are in (from a menu on its row)
     Q_INVOKABLE void renameGroup(const QString &name);       // the open one
     Q_INVOKABLE void renameGroup(const QString &groupId, const QString &name);
 
-    Q_INVOKABLE void accept(const QString &userId);
+    Q_INVOKABLE void accept(const QString &userId, const QString &profile = QString());
     Q_INVOKABLE void decline(const QString &userId);
     Q_INVOKABLE void cancel(const QString &userId);      // withdraw our own request, or end a stream we no longer want
     Q_INVOKABLE void block(const QString &userId);

@@ -1,8 +1,11 @@
-#include "access.h"
-#include "flow.h"
-#include "inbound.h"
+#include "federation/access.h"
+#include "core/people.h"
+#include "federation/flow.h"
+#include "federation/inbound.h"
 
-#include "phrase.h"
+#include "core/phrase.h"
+#include "service/routes.h"
+#include "federation/courier.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -25,6 +28,21 @@ static person bob, alice, carol, dave, erin;
 static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
+static puddle_people *ps;
+
+/* the profile their Puddle sent us, or "" */
+static const char *their_profile(const char *id)
+{
+    static char buf[20000];
+    char *json;
+    size_t len;
+    buf[0] = '\0';
+    if (puddle_people_profile(ps, id, PUDDLE_PEOPLE_DM, &json, &len) == 0) {
+        snprintf(buf, sizeof buf, "%s", json);
+        free(json);
+    }
+    return buf;
+}
 
 static void make(person *p, const char *name)
 {
@@ -162,15 +180,17 @@ int main(void)
     char err[300], dd[700];
     snprintf(dd, sizeof dd, "%s/bob-data", root);
     ss = puddle_streams_open(dd, err, sizeof err);
+    if (!ps) ps = puddle_people_open(dd, err, sizeof err);
     puddle_config cfg;
     memset(&cfg, 0, sizeof cfg);
     snprintf(cfg.address, sizeof cfg.address, "127.0.0.1");
     cfg.port = 8443;
     snprintf(cfg.dir, sizeof cfg.dir, "%s", root);
     snprintf(cfg.data_dir, sizeof cfg.data_dir, "%s", dd);
-    puddle_profiles profiles;
-    if (puddle_profiles_load(&profiles, &cfg, err, sizeof err) != 0) { fprintf(stderr, "profiles: %s\n", err); return 2; }
-    ctx = (puddle_ctx){ .config = &cfg, .profiles = &profiles, .identity = bob.id, .streams = ss, .replay = puddle_replay_new(4096), .now_ms = now_cb,
+    puddle_profiles *profiles;
+    char old_default[PUDDLE_PROFILE_ID_MAX + 1];
+    if (!(profiles = puddle_profiles_open(&cfg, old_default, err, sizeof err))) { fprintf(stderr, "profiles: %s\n", err); return 2; }
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .config = &cfg, .profiles = profiles, .identity = bob.id, .streams = ss, .people = ps, .replay = puddle_replay_new(4096), .now_ms = now_cb,
                         .peer_key = puddle_streams_peer_key, .peer_key_user = ss };
     R = (puddle_router){ .ctx = &ctx };
     R.routes = puddle_all_routes(&R.count);
@@ -228,7 +248,7 @@ int main(void)
         CHECK(puddle_streams_get(ss, pid, &rec) == 1);                                              /* the made-up id is gone */
         CHECK(count_all() == before);                                                               /* refiled, not added */
         CHECK(puddle_streams_get(ss, dave.uid, &rec) == 0 && !rec.provisional && rec.ticket[0] == '\0' && !strcmp(rec.note, "hello there") &&
-              rec.chain && rec.profile && strstr(rec.profile, "Them") && !strcmp(rec.addresses[0], "198.51.100.5:8443"));
+              rec.chain && strstr(their_profile(dave.uid), "Them") && !strcmp(rec.addresses[0], "198.51.100.5:8443"));
         puddle_stream_free(&rec);
         /* the ticket is spent: someone else answering with it gets nothing */
         b = with_ticket(&erin, "responder", "\"approved\":true", ticket);
@@ -329,8 +349,10 @@ int main(void)
     /* ---- the provisional record survives a restart, and is not a peer ---- */
     {
         ask_at("198.51.100.11:8443", ticket, pid, PUDDLE_STREAM_PENDING_OUT);
-        puddle_streams_close(ss);
+        puddle_people_close(ps);
+    puddle_streams_close(ss);
         ss = puddle_streams_open(dd, err, sizeof err);
+        if (!ps) ps = puddle_people_open(dd, err, sizeof err);
         ctx.streams = ss; ctx.peer_key_user = ss;
         CHECK(puddle_streams_find_ticket(ss, ticket, &rec) == 0 && !strcmp(rec.id, pid) && rec.provisional);
         puddle_stream_free(&rec);

@@ -1,7 +1,11 @@
-#include "access.h"
+#include "federation/access.h"
+#include "core/people.h"
 
-#include "encoding.h"
-#include "phrase.h"
+#include "base/text.h"
+#include "base/encoding.h"
+#include "core/phrase.h"
+#include "service/routes.h"
+#include "federation/courier.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -39,6 +43,21 @@ static person bob, alice, carol, dave;
 static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
+static puddle_people *ps;
+
+/* the profile their Puddle sent us, or "" */
+static const char *their_profile(const char *id)
+{
+    static char buf[20000];
+    char *json;
+    size_t len;
+    buf[0] = '\0';
+    if (puddle_people_profile(ps, id, PUDDLE_PEOPLE_DM, &json, &len) == 0) {
+        snprintf(buf, sizeof buf, "%s", json);
+        free(json);
+    }
+    return buf;
+}
 
 typedef struct { int status; char out[2048]; size_t n; } reply;
 
@@ -144,6 +163,7 @@ static void reopen(void)
     puddle_streams_close(ss);
     snprintf(dd, sizeof dd, "%s/bob-data", root);
     ss = puddle_streams_open(dd, err, sizeof err);
+    if (!ps) ps = puddle_people_open(dd, err, sizeof err);
     ctx.streams = ss;
 }
 
@@ -157,7 +177,8 @@ int main(void)
     char err[300], dd[700];
     snprintf(dd, sizeof dd, "%s/bob-data", root);
     ss = puddle_streams_open(dd, err, sizeof err);
-    ctx = (puddle_ctx){ .identity = bob.id, .streams = ss, .replay = puddle_replay_new(1024), .now_ms = now_cb,
+    if (!ps) ps = puddle_people_open(dd, err, sizeof err);
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .identity = bob.id, .streams = ss, .people = ps, .replay = puddle_replay_new(1024), .now_ms = now_cb,
                         .anon_bucket = puddle_bucket_new(50, 100), .access_limit = puddle_keyed_new(64, 1000, 3600 * 1000LL) };
     R = (puddle_router){ .ctx = &ctx };
     R.routes = puddle_all_routes(&R.count);
@@ -175,7 +196,7 @@ int main(void)
     CHECK(puddle_streams_get(ss, alice.uid, &rec) == 0);
     CHECK(!strcmp(rec.note, "hey it's Alice\nfrom work") && rec.naddr == 1 && !strcmp(rec.addresses[0], "203.0.113.7:8443"));
     CHECK(rec.chain && rec.chain_len > 0 && rec.created_ms == T0);
-    CHECK(rec.profile && !strcmp(rec.profile, "{\"display_name\":\"Alice\",\"blurb\":\"hi\",\"color\":{\"colors\":[\"#aabbcc\",\"#001122\"],\"angle\":90},"
+    CHECK(!strcmp(their_profile(alice.uid), "{\"display_name\":\"Alice\",\"blurb\":\"hi\",\"color\":{\"colors\":[\"#aabbcc\",\"#001122\"],\"angle\":90},"
                                               "\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":1234}}"));
     /* ...rebuilt from the fields we know: the unknown one is gone, the color is in one spelling */
     puddle_stream_free(&rec);
@@ -243,29 +264,13 @@ int main(void)
         free(good);
 
         /* malformed in every way a request can be */
+        /* malformed: where they say they are, or what they say, cannot be used */
         struct { const char *profile, *addr, *extra; } bad[] = {
-            { "{}", "203.0.113.7:8443", NULL },                                         /* no display name */
-            { "{\"display_name\":\"\"}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"  \\u202e  \"}", "203.0.113.7:8443", NULL },         /* nothing left once cleaned */
-            { "{\"display_name\":7}", "203.0.113.7:8443", NULL },
-            { "[1]", "203.0.113.7:8443", NULL },
             { "{\"display_name\":\"Carol\"}", "not an address", NULL },
             { "{\"display_name\":\"Carol\"}", "", NULL },
-            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"zz\",\"mime\":\"image/png\",\"size\":5}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":5}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/svg+xml\",\"size\":5}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":0}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/png\",\"size\":99999999999}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"banner\":\"nope\"}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[]}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[\"red\"]}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[\"#000000\",\"#111111\",\"#222222\",\"#333333\",\"#444444\",\"#555555\"]}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[\"#000000\",\"#111111\"],\"angle\":361}}", "203.0.113.7:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"color\":\"#000000\"}", "203.0.113.7:8443", NULL },
             { "{\"display_name\":\"Carol\"}", "0.0.0.0:8443", NULL },                    /* somewhere we would never connect */
             { "{\"display_name\":\"Carol\"}", "169.254.169.254:80", NULL },
             { "{\"display_name\":\"Carol\"}", "[fe80::1]:8443", NULL },
-            { "{\"display_name\":\"Carol\",\"blurb\":7}", "203.0.113.7:8443", NULL },
             { "{\"display_name\":\"Carol\"}", "203.0.113.7:8443", "\"message\":7" },
             { "{\"display_name\":\"Carol\"}", "203.0.113.7:8443", "\"message\":\"x\",\"message\":\"y\"" },
         };
@@ -276,17 +281,43 @@ int main(void)
             if (r.status != 404) { fprintf(stderr, "FAIL malformed #%zu answered %d\n", i, r.status); failures++; }
             free(b);
         }
-        char longname[200], prof[300];
-        memset(longname, 'n', 65); longname[65] = 0;
-        snprintf(prof, sizeof prof, "{\"display_name\":\"%s\"}", longname);
-        char *b = body_for(&carol, prof, "203.0.113.7:8443", NULL, NULL);
-        sign_for(&carol, b, sig, sizeof sig);
-        CHECK(post(b, sig).status == 404);                                                       /* 65 characters */
-        free(b);
+        /* a profile with something wrong in it does not make the request malformed: what is wrong is left out, with a note */
+        struct { const char *profile, *kept, *noted; } lenient[] = {
+            { "{}", "{}", "" },                                                                 /* no display name: shown by their id */
+            { "{\"display_name\":\"\"}", "{}", "" },
+            { "{\"display_name\":\"  \\u202e  \"}", "{}", "" },                            /* nothing left once cleaned */
+            { "{\"display_name\":7}", "{}", "display_name: not text" },
+            { "[1]", "", "profile: not something we can read" },
+            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"zz\",\"mime\":\"image/png\",\"size\":5}}", "{\"display_name\":\"Carol\"}", "avatar:" },
+            { "{\"display_name\":\"Carol\",\"avatar\":{\"hash\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"mime\":\"image/svg+xml\",\"size\":5}}", "{\"display_name\":\"Carol\"}", "avatar:" },
+            { "{\"display_name\":\"Carol\",\"banner\":\"nope\"}", "{\"display_name\":\"Carol\"}", "banner:" },
+            { "{\"display_name\":\"Carol\",\"color\":{\"colors\":[\"red\"]}}", "{\"display_name\":\"Carol\"}", "color: \"red\" is not a colour" },
+            { "{\"display_name\":\"Carol\",\"color\":\"#000000\"}", "{\"display_name\":\"Carol\"}", "color: not a list" },
+            { "{\"display_name\":\"Carol\",\"blurb\":7}", "{\"display_name\":\"Carol\"}", "blurb: not text" },
+            { "{\"display_name\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\"}",
+              "{\"display_name\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\"}", "cut short" },     /* 65 characters, cut to 64 */
+        };
+        for (size_t i = 0; i < sizeof lenient / sizeof lenient[0]; i++) {
+            char obj[1000];
+            snprintf(obj, sizeof obj, "{\"id\":\"%s\",\"address\":\"203.0.113.7:8443\",\"profile\":%s,\"chain\":\"x\"}", carol.uid, lenient[i].profile);
+            puddle_peer_info pi;
+            int ok = puddle_peer_parse(obj, strlen(obj), &pi) == 0 && !strcmp(pi.profile, lenient[i].kept) &&
+                     (lenient[i].noted[0] ? strstr(pi.profile_notes, lenient[i].noted) != NULL : pi.profile_notes[0] == '\0');
+            if (!ok) { fprintf(stderr, "FAIL lenient #%zu: kept %s, noted [%s]\n", i, pi.profile, pi.profile_notes); failures++; }
+            puddle_peer_info_free(&pi);
+        }
+        {
+            /* and none at all: they show us nothing, which is theirs to choose */
+            char obj[300];
+            snprintf(obj, sizeof obj, "{\"id\":\"%s\",\"address\":\"203.0.113.7:8443\",\"chain\":\"x\"}", carol.uid);
+            puddle_peer_info pi;
+            CHECK(puddle_peer_parse(obj, strlen(obj), &pi) == 0 && pi.profile[0] == '\0' && pi.profile_notes[0] == '\0');
+            puddle_peer_info_free(&pi);
+        }
         char note[2200];
         strcpy(note, "\"message\":\"");
         memset(note + 11, 'm', 501); strcpy(note + 512, "\"");
-        b = body_for(&carol, PROFILE, "203.0.113.7:8443", note, NULL);
+        char *b = body_for(&carol, PROFILE, "203.0.113.7:8443", note, NULL);
         sign_for(&carol, b, sig, sizeof sig);
         CHECK(post(b, sig).status == 404);                                                       /* a 501-character note */
         free(b);
@@ -307,7 +338,7 @@ int main(void)
         CHECK(post(b, sig).status == 202);
         free(b);
         CHECK(puddle_streams_get(ss, carol.uid, &rec) == 0);
-        CHECK(rec.profile && !strcmp(rec.profile, "{\"display_name\":\"Carol\"}"));
+        CHECK(!strcmp(their_profile(carol.uid), "{\"display_name\":\"Carol\"}"));
         CHECK(!strcmp(rec.note, "line1 x \nline2 end"));
         CHECK(!strcmp(rec.addresses[0], "[2001:db8::1]:9000"));
         puddle_stream_free(&rec);
@@ -522,6 +553,7 @@ int main(void)
         CHECK(puddle_clean_text(many, sizeof many, 5, 0, out, sizeof out, &n) == 0 && !strcmp(out, "x"));
     }
 
+    puddle_people_close(ps);
     puddle_streams_close(ss);
     puddle_replay_free(ctx.replay);
     puddle_bucket_free(ctx.anon_bucket);

@@ -9,8 +9,9 @@
  * What goes in is checked on the way: a peer's chain is verified against its id before it is stored, so
  * nothing in here is a key that hasn't been proven to belong to the id it is filed under. */
 
-#include "identity.h"
-#include "link.h"
+#include "core/identity.h"
+#include "core/link.h"
+#include "storage/storage.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -66,7 +67,6 @@ typedef struct {
     int provisional;       /* a request we sent to an address whose owner we do not know yet: filed under a made-up id */
     char error[200];       /* why a request we sent, or an answer we owed, did not get through; "" if nothing went wrong */
     char note[PUDDLE_NOTE_MAX_BYTES + 1]; /* the message sent with the request */
-    char *profile;     /* the profile they showed us, as a JSON object; NULL if none */
     int64_t created_ms, updated_ms;
 } puddle_stream;
 
@@ -81,19 +81,26 @@ int puddle_stream_carries_groups(const puddle_stream *st);
 
 /* Fill in an empty record for `id`. 0, or -1 if `id` is not a valid user id. */
 int puddle_stream_init(puddle_stream *st, const char *id, puddle_stream_state state, int64_t now_ms);
-/* Copy text in (replacing what was there). 0 or -1 (out of memory, or over the size limit; set_profile also
- * refuses anything that is not a JSON object). A NULL text clears it. */
+/* Copy text in (replacing what was there). 0 or -1 (out of memory, or over the size limit). A NULL text clears it. */
 int puddle_stream_set_chain(puddle_stream *st, const char *text, size_t len);
-int puddle_stream_set_profile(puddle_stream *st, const char *json, size_t len);
 /* Add an address to the end (ignores one already present). 0 or -1 if it is invalid or the list is full. */
 int puddle_stream_add_address(puddle_stream *st, const char *address);
 void puddle_stream_free(puddle_stream *st); /* frees what the record owns; the struct itself is the caller's */
 
 typedef struct puddle_streams puddle_streams;
 
-/* Open (creating <data_dir>/state/streams/ if needed) and read everything in. A damaged file is skipped with
- * a warning rather than stopping the Puddle: it loses that one peer, not all of them. */
+/* Open and read every stream record in (collection "streams", one per peer; the block list, read markers, invites
+ * and access policy are documents in "state"). A damaged record is skipped with a warning rather than stopping the
+ * Puddle: it loses that one peer, not all of them. The first form keeps them as files under `data_dir`; the second
+ * uses `storage`, which must outlive the store. */
 puddle_streams *puddle_streams_open(const char *data_dir, char *err, size_t errlen);
+puddle_streams *puddle_streams_open_with(puddle_storage *storage, char *err, size_t errlen);
+
+/* Stream records written before profiles moved to their own records (core/people.h) carry the peer's profile. Hand
+ * each such profile to `fn`; where it returns 0, the record is written again without it. Run once at startup. The
+ * number handed over, or -1 if a record could not be rewritten. */
+typedef int (*puddle_stream_profile_fn)(void *user, const char *id, const char *json, size_t len, int64_t updated_ms);
+int puddle_streams_take_profiles(puddle_streams *s, puddle_stream_profile_fn fn, void *user);
 void puddle_streams_close(puddle_streams *s);
 
 /* 0 found (a copy: free it with puddle_stream_free), 1 no such peer, -1 `id` is not a valid user id. */

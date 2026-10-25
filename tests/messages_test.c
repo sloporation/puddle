@@ -1,9 +1,14 @@
-#include "messages.h"
+#include "federation/messages.h"
+#include "core/conversations.h"
 
-#include "encoding.h"
-#include "hash.h"
-#include "message.h"
-#include "phrase.h"
+#include "base/encoding.h"
+#include "base/hash.h"
+#include "events/message.h"
+#include "core/phrase.h"
+#include "service/routes.h"
+#include "federation/courier.h"
+#include "federation/sender.h"
+#include "http/client.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -27,6 +32,15 @@ static puddle_ctx ctx;
 static puddle_router R;
 static puddle_streams *ss;
 static puddle_store *store;
+static puddle_conversations *cs;
+
+/* when the owner last read a conversation, as its record holds it */
+static int64_t read_at(const char *id)
+{
+    puddle_conv_record rec;
+    int fresh;
+    return puddle_conversations_get(cs, id, &rec, &fresh) == 0 ? rec.read_at : 0;
+}
 static puddle_outbox *ob;
 static int g_addr_mode; /* 0: we know no address for anyone; 1: a closed port on this machine (so: offline) */
 static int addr_cb(void *u, const char *peer, puddle_address *out, int max)
@@ -220,10 +234,12 @@ int main(void)
     char err[300];
     snprintf(data, sizeof data, "%s/data", root);
     store = puddle_store_open(data, err, sizeof err);
+    cs = puddle_conversations_open(data, err, sizeof err);
+    puddle_store_on_append(store, puddle_conversations_appended, cs);
     ss = puddle_streams_open(data, err, sizeof err);
-    puddle_outbox_hooks hooks = { .identity = me.id, .now_ms = now_cb };
+    puddle_outbox_hooks hooks = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb };
     ob = puddle_outbox_open(data, &hooks, err, sizeof err);
-    ctx = (puddle_ctx){ .identity = me.id, .store = store, .streams = ss, .outbox = ob, .replay = puddle_replay_new(1024), .now_ms = now_cb,
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .identity = me.id, .store = store, .streams = ss, .conversations = cs, .outbox = ob, .replay = puddle_replay_new(1024), .now_ms = now_cb,
                         .peer_key = puddle_streams_peer_key, .peer_key_user = ss };
     R = (puddle_router){ .ctx = &ctx };
     R.routes = puddle_all_routes(&R.count);
@@ -834,14 +850,14 @@ int main(void)
         clock_now += 100000000; /* well after everything above, so this is the newest conversation */
         char data2[720];
         snprintf(data2, sizeof data2, "%s/data2", root);
-        puddle_outbox_hooks hooks2 = { .identity = me.id, .now_ms = now_cb, .addresses = addr_cb };
+        puddle_outbox_hooks hooks2 = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb, .addresses = addr_cb };
         puddle_outbox *ob2 = puddle_outbox_open(data2, &hooks2, err, sizeof err); /* the first one was filled by the tests above */
         CHECK(ob2 != NULL);
         ctx.outbox = ob2;
         set_peer(&dave, PUDDLE_STREAM_ACTIVE);
         char chat_d[64];
         chat_with_me(&dave, chat_d);
-        CHECK(puddle_streams_read_marker(ss, dave.uid) == 0);
+        CHECK(read_at(dave.uid) == 0);
         clock_now += 100000;
         env d1 = make_env(&dave, &dave, chat_d, clock_now, "first\nline", NULL);
         char *db = delivery(chat_d, &d1, 1);
@@ -870,7 +886,7 @@ int main(void)
         const char *read_path = conv_path(dave.uid, "read");
         r = owner("POST", read_path, NULL);
         CHECK(r->status == 200 && strstr(body_of(r), "\"unread\":0"));
-        CHECK(puddle_streams_read_marker(ss, dave.uid) == clock_now);
+        CHECK(read_at(dave.uid) == clock_now);
         r = owner("GET", "/api/v1/conversations", NULL);
         mine = conv_of(r, dave.uid);
         CHECK(mine && strstr(mine, "\"unread\":0"));
@@ -886,15 +902,23 @@ int main(void)
         r = owner("GET", "/api/v1/conversations", NULL);
         mine = conv_of(r, dave.uid);
         CHECK(mine && strstr(mine, "\"unread\":1"));
-        int64_t m = puddle_streams_read_marker(ss, dave.uid);
-        CHECK(puddle_streams_set_read_marker(ss, dave.uid, 5, err, sizeof err) == 0 && puddle_streams_read_marker(ss, dave.uid) == m);
+        int64_t m = read_at(dave.uid);
+        CHECK(puddle_conversations_set_read(cs, dave.uid, chat_d, PUDDLE_CONV_DM, 5) == 0 && read_at(dave.uid) == m);
 
         /* it survives a restart */
         puddle_streams_close(ss);
         ss = puddle_streams_open(data, err, sizeof err);
         ctx.streams = ss;
         ctx.peer_key_user = ss;
-        CHECK(puddle_streams_read_marker(ss, dave.uid) == m);
+        puddle_store_on_append(store, NULL, NULL);
+        puddle_conversations_close(cs);
+        cs = puddle_conversations_open(data, err, sizeof err);
+        puddle_store_on_append(store, puddle_conversations_appended, cs);
+        ctx.conversations = cs;
+        CHECK(read_at(dave.uid) == m);
+        r = owner("GET", "/api/v1/conversations", NULL); /* worked out again from the log, with the same marker */
+        mine = conv_of(r, dave.uid);
+        CHECK(mine && strstr(mine, "\"unread\":1"));
 
         /* the owner's own message shows as outgoing, and a deleted one has no preview */
         {
@@ -983,6 +1007,7 @@ int main(void)
     puddle_outbox_close(ob);
     puddle_streams_close(ss);
     puddle_store_close(store);
+    puddle_conversations_close(cs);
     puddle_replay_free(ctx.replay);
     puddle_identity_close(me.id); puddle_identity_close(alice.id); puddle_identity_close(carol.id);
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);

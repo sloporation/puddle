@@ -1,24 +1,22 @@
-#include "identity.h"
+#include "core/identity.h"
 
-#include "clock.h"
-#include "config.h"
-#include "encoding.h"
-#include "fsutil.h"
-#include "hash.h"
-#include "json.h"
-#include "log.h"
+#include "platform/clock.h"
+#include "core/config.h"
+#include "base/encoding.h"
+#include "platform/fsutil.h"
+#include "platform/process.h"
+#include "base/hash.h"
+#include "base/json.h"
+#include "base/log.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <mutex>
 #include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <openssl/evp.h>
 
@@ -234,26 +232,17 @@ static size_t build_rotate(char *out, size_t cap, uint64_t seq, const char *prev
 
 static int append_line(const char *path, const char *dir, const char *line, size_t len)
 {
-    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    int fd = puddle_fd_open(path, PUDDLE_F_WRITE | PUDDLE_F_APPEND | PUDDLE_F_CREATE);
     if (fd < 0)
         return -1;
-    off_t before = lseek(fd, 0, SEEK_END);
-    size_t left = len;
-    const char *p = line;
-    while (left) {
-        ssize_t w = write(fd, p, left);
-        if (w < 0 && errno == EINTR)
-            continue;
-        if (w <= 0) {
-            if (before >= 0 && ftruncate(fd, before) != 0) {} /* don't leave half a record behind */
-            close(fd);
-            return -1;
-        }
-        p += w;
-        left -= (size_t)w;
+    int64_t before = puddle_fd_end(fd);
+    if (puddle_fd_write_all(fd, line, len) != 0) {
+        if (before >= 0 && puddle_fd_truncate(fd, before) != 0) {} /* don't leave half a record behind */
+        puddle_fd_close(fd);
+        return -1;
     }
     int rc = puddle_fsync_fd(fd);
-    close(fd);
+    puddle_fd_close(fd);
     if (rc == 0)
         puddle_fsync_dir(dir);
     return rc;
@@ -398,9 +387,8 @@ static void paths(const char *data_dir, char dir[PUDDLE_PATH_MAX])
 int puddle_identity_exists(const char *data_dir)
 {
     char dir[PUDDLE_PATH_MAX];
-    struct stat st;
     paths(data_dir, dir);
-    return stat(dir, &st) == 0 && S_ISDIR(st.st_mode);
+    return puddle_path_is_dir(dir);
 }
 
 static void marker_path(const char *dir, char out[PUDDLE_PATH_MAX])
@@ -411,10 +399,9 @@ static void marker_path(const char *dir, char out[PUDDLE_PATH_MAX])
 int puddle_identity_unconfirmed(const char *data_dir)
 {
     char dir[PUDDLE_PATH_MAX], marker[PUDDLE_PATH_MAX];
-    struct stat st;
     paths(data_dir, dir);
     marker_path(dir, marker);
-    return stat(marker, &st) == 0;
+    return puddle_path_exists(marker);
 }
 
 int puddle_identity_confirm(const char *data_dir)
@@ -424,7 +411,7 @@ int puddle_identity_confirm(const char *data_dir)
         return -1;
     paths(data_dir, dir);
     marker_path(dir, marker);
-    if (unlink(marker) != 0 && errno != ENOENT)
+    if (puddle_remove_file(marker) != 0)
         return -1;
     puddle_fsync_dir(dir);
     return 0;
@@ -651,7 +638,7 @@ static int apply_pending(puddle_identity *id, int announce, char *err, size_t er
         seterr(err, errlen, "cannot write %s: %s", id->keys_path, strerror(errno));
         goto out;
     }
-    unlink(jpath);
+    puddle_remove_file(jpath);
     puddle_fsync_dir(id->dir);
     if (announce)
         puddle_log(PUDDLE_LOG_WARN, "finished an interrupted key roll");
@@ -829,7 +816,7 @@ static int install_identity(const char *data_dir, const char *final_dir, const c
                             char *err, size_t errlen)
 {
     char tmp[PUDDLE_PATH_MAX], keys[PUDDLE_PATH_MAX], chain[PUDDLE_PATH_MAX], marker[PUDDLE_PATH_MAX];
-    snprintf(tmp, sizeof tmp, "%s/identity.new-%ld", data_dir, (long)getpid());
+    snprintf(tmp, sizeof tmp, "%s/identity.new-%ld", data_dir, puddle_process_id());
     snprintf(keys, sizeof keys, "%s/keys", tmp);
     snprintf(chain, sizeof chain, "%s/chain.jsonl", tmp);
     remove_tree(tmp);
@@ -852,7 +839,7 @@ static int install_identity(const char *data_dir, const char *final_dir, const c
         }
     }
     puddle_fsync_dir(tmp);
-    if (rename(tmp, final_dir) != 0) {
+    if (puddle_rename(tmp, final_dir) != 0) {
         seterr(err, errlen, errno == ENOTEMPTY || errno == EEXIST ? "an identity already exists in %s"
                : "cannot put the identity in place in %s", data_dir);
         remove_tree(tmp);
@@ -873,10 +860,10 @@ static void remove_tree(const char *dir)
     while ((entry = puddle_dir_next(d))) {
         char p[PUDDLE_PATH_MAX];
         snprintf(p, sizeof p, "%s/%s", dir, entry);
-        unlink(p);
+        puddle_remove_file(p);
     }
     puddle_dir_close(d);
-    rmdir(dir);
+    puddle_remove_dir(dir);
 }
 
 puddle_identity *puddle_identity_create(const char *data_dir, char phrase_out[PUDDLE_PHRASE_LEN + 1],

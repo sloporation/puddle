@@ -1,6 +1,8 @@
-#include "router.h"
+#include "http/router.h"
 
-#include "phrase.h"
+#include "core/phrase.h"
+#include "service/routes.h"
+#include "api/api.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -86,10 +88,11 @@ int main(void)
     puddle_identity *id = puddle_identity_create(cfg.data_dir, phrase, err, sizeof err);
     if (!id) { fprintf(stderr, "identity: %s\n", err); return 2; }
     puddle_identity_confirm(cfg.data_dir);
-    puddle_profiles profiles;
-    if (puddle_profiles_load(&profiles, &cfg, err, sizeof err) != 0) { fprintf(stderr, "profiles: %s\n", err); return 2; }
+    puddle_profiles *profiles;
+    char old_default[PUDDLE_PROFILE_ID_MAX + 1];
+    if (!(profiles = puddle_profiles_open(&cfg, old_default, err, sizeof err))) { fprintf(stderr, "profiles: %s\n", err); return 2; }
 
-    puddle_ctx ctx = { .config = &cfg, .identity = id, .profiles = &profiles, .roll_slot = puddle_roll_slot_new(),
+    puddle_ctx ctx = { .config = &cfg, .identity = id, .profiles = profiles, .roll_slot = puddle_roll_slot_new(),
                        .replay = puddle_replay_new(64), .now_ms = now_cb };
     puddle_router R = { NULL, 0, &ctx };
     R.routes = puddle_all_routes(&R.count);
@@ -148,7 +151,7 @@ int main(void)
         puddle_span x;
         char s[300];
         CHECK(puddle_json_member(prof, p.len, "id", &x) == 0 && puddle_json_string(x, s, sizeof s) == 0 && !strcmp(s, "main"));
-        CHECK(puddle_json_member(prof, p.len, "default", &x) == 0 && x.len == 4 && !memcmp(x.p, "true", 4));
+        CHECK(puddle_json_member(prof, p.len, "places", &x) == 0 && x.len == 2);                     /* how the owner is shown to themselves: shown nowhere yet */
         CHECK(puddle_json_member(prof, p.len, "display_name", &x) == 0 && puddle_json_string(x, s, sizeof s) == 0 &&
               !strcmp(s, "Zo\xC3\xAB \"Z\" Q"));
         CHECK(puddle_json_member(prof, p.len, "blurb", &x) == 0 && puddle_json_string(x, s, sizeof s) == 0 && !strcmp(s, "a \"quoted\" line"));
@@ -255,7 +258,7 @@ int main(void)
 
     puddle_roll_slot_free(ctx.roll_slot);
     puddle_replay_free(ctx.replay);
-    puddle_profiles_free(&profiles);
+    puddle_profiles_close(profiles);
     puddle_identity_close(id);
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
     return failures ? 1 : 0;

@@ -19,8 +19,9 @@ Questions to settle:
 
 ## 2. Reloading profiles while running
 
-Today profile files are read once at startup. Reloading while Puddle is running
-(`POST /api/v1/profile/reload`) needs decisions on: how a reload swaps profiles safely while
+Profiles are files in the data folder, read once at startup and written by Puddle when the owner changes one through
+the API. A file edited by hand while Puddle runs is not noticed (and the next change made through the API overwrites
+it). Reloading while running (`POST /api/v1/profiles/reload`) needs decisions on: how a reload swaps profiles safely while
 requests are in flight, what happens to the old images, whether a file watcher reloads
 automatically, what a mistake in the new files does (keep the old ones, and how the owner is told),
 and how changes are pushed to the streams that see them.
@@ -68,6 +69,16 @@ would be useful and each needs something new behind it:
 - **Menus:** native menus on macOS and Windows (the styled menu looks the same everywhere but is not the system's). Qt 6.9 added a
   built-in `ContextMenu` attached type that does the right-click, Menu key and press-and-hold wiring; we use our own so the app still builds on
   Qt 6.2 to 6.8, and could switch when the minimum Qt is raised.
+
+## 10. Who you are across places
+
+A Puddle shows a different profile in each place (directly to a friend, in each group, later in each Pond), but it is
+the same Puddle with the same user id everywhere. Someone who is your friend and also shares a group or Pond with you
+keeps both profiles and can see both: being in a place together is the consent for that place's profile, and nobody is
+told when two of your profiles meet. That is by design: profiles are about how you present yourself, not about hiding
+who you are. Someone who wants two identities that cannot be linked runs two Puddles today. Later: one Puddle with
+several identities, each with its own user id and address (multi-address Puddles), and what that means for keys,
+streams and the app.
 
 ## Carried over from earlier
 

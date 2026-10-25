@@ -12,9 +12,9 @@
 #include "dock.h"
 
 extern "C" {
-#include "identity.h"
-#include "router.h"
-#include "log.h"
+#include "core/identity.h"
+#include "http/router.h"
+#include "base/log.h"
 }
 
 namespace {

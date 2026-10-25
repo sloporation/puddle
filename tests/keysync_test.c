@@ -1,9 +1,14 @@
-#include "keysync.h"
+#include "federation/keysync.h"
 
-#include "flow.h"
-#include "hash.h"
-#include "message.h"
-#include "phrase.h"
+#include "federation/flow.h"
+#include "base/hash.h"
+#include "events/message.h"
+#include "core/phrase.h"
+#include "service/routes.h"
+#include "federation/courier.h"
+#include "federation/sender.h"
+#include "http/client.h"
+#include "platform/fsutil.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -173,7 +178,7 @@ static void clear_outbox(void)
     char path[900], err[200];
     snprintf(path, sizeof path, "%s/state/outbox", data);
     nftw(path, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
-    puddle_outbox_hooks h = { .identity = me.id, .now_ms = now_cb };
+    puddle_outbox_hooks h = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb };
     ob = puddle_outbox_open(data, &h, err, sizeof err);
     ctx.outbox = ob;
 }
@@ -189,6 +194,8 @@ static void write_outbox_item(unsigned long long seq, const char *peer, const ch
     esc[j] = 0;
     snprintf(text, sizeof text, "{\"v\":1,\"seq\":%llu,\"peer\":\"%s\",\"kind\":\"%s\",\"path\":\"%s\",\"body\":\"%s\",\"created\":%lld,\"next\":%lld,"
              "\"first_offline\":0,\"attempts\":1,\"state\":\"%s\",\"status\":0,\"reason\":\"x\"}", seq, peer, kind, path, esc, (long long)T0, (long long)T0, state);
+    snprintf(file, sizeof file, "%s/state/outbox", data);
+    puddle_mkdir_p(file); /* the folder is made with the first item the outbox keeps itself */
     snprintf(file, sizeof file, "%s/state/outbox/%012llu.json", data, seq);
     FILE *f = fopen(file, "wb");
     fputs(text, f);
@@ -199,7 +206,7 @@ static void reopen_outbox(void)
 {
     puddle_outbox_close(ob);
     char err[200];
-    puddle_outbox_hooks h = { .identity = me.id, .now_ms = now_cb };
+    puddle_outbox_hooks h = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb };
     ob = puddle_outbox_open(data, &h, err, sizeof err);
     ctx.outbox = ob;
 }
@@ -228,9 +235,9 @@ int main(void)
     snprintf(cfg.address, sizeof cfg.address, "127.0.0.1");
     cfg.port = 8443;
     ss = puddle_streams_open(data, err, sizeof err);
-    puddle_outbox_hooks hooks = { .identity = me.id, .now_ms = now_cb };
+    puddle_outbox_hooks hooks = { .send = puddle_federation_send, .identity = me.id, .now_ms = now_cb };
     ob = puddle_outbox_open(data, &hooks, err, sizeof err);
-    ctx = (puddle_ctx){ .config = &cfg, .identity = me.id, .streams = ss, .outbox = ob, .replay = puddle_replay_new(4096), .now_ms = now_cb,
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .config = &cfg, .identity = me.id, .streams = ss, .outbox = ob, .replay = puddle_replay_new(4096), .now_ms = now_cb,
                         .peer_key = puddle_streams_peer_key, .peer_key_user = ss };
     snprintf(ctx.own_tls_fp, sizeof ctx.own_tls_fp, "%s", "1111111111111111111111111111111111111111111111111111111111111111");
     R = (puddle_router){ .ctx = &ctx };

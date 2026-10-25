@@ -1,6 +1,7 @@
-#include "group.h"
+#include "core/group.h"
 
-#include "encoding.h"
+#include "base/encoding.h"
+#include "events/group_events.h"
 
 #include <ftw.h>
 #include <stdio.h>

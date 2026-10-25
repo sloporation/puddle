@@ -16,10 +16,10 @@
 #include "testnode.h"
 
 extern "C" {
-#include "config.h"
-#include "identity.h"
-#include "phrase.h"
-#include "server.h"
+#include "core/config.h"
+#include "core/identity.h"
+#include "core/phrase.h"
+#include "service/server.h"
 }
 
 static int failures;
@@ -58,7 +58,7 @@ int main(int argc, char **argv)
 
     /* Alice asks Bob; Bob sees a request from "Alice" and is told about it */
     QSignalSpy newRequest(&B, &Chats::newRequest);
-    A.request(bob.link, "hello, it is me");
+    A.request(bob.link, "hello, it is me", "main");
     CHECK(until([&] { return B.incomingRequests() == 1; }));
     QJsonObject req = row(people_b, "id", alice.uid);
     CHECK(req.value("state").toString() == "pending_in" && req.value("note").toString() == "hello, it is me");
@@ -89,7 +89,7 @@ int main(int argc, char **argv)
     A.request("not a link", "");
     CHECK(until([&] { return failed.count() == 1; }));
 
-    B.accept(alice.uid);
+    B.accept(alice.uid, "main");
     CHECK(until([&] { return B.incomingRequests() == 0 && row(people_a, "id", bob.uid).value("state").toString() == "active"; }));
     CHECK(until([&] { return row(people_b, "id", alice.uid).value("name").toString() == "Alice"; }));
     CHECK(until([&] { return row(people_a, "id", bob.uid).value("name").toString() == "Bob"; }));
@@ -190,13 +190,13 @@ int main(int argc, char **argv)
         auto *conv_c = static_cast<JsonListModel *>(C.conversations());
         auto *msgs_c = static_cast<JsonListModel *>(C.messages());
         A.setSelf(alice.uid); B.setSelf(bob.uid); C.setSelf(carol.uid);
-        A.request(carol.link, "carol, it is Alice");
+        A.request(carol.link, "carol, it is Alice", "main");
         CHECK(until([&] { return C.incomingRequests() == 1; }));
-        C.accept(alice.uid);
+        C.accept(alice.uid, "main");
         CHECK(until([&] { return row(static_cast<JsonListModel *>(A.people()), "id", carol.uid).value("state").toString() == "active"; }));
 
         QSignalSpy created(&A, &Chats::groupCreated), invited(&B, &Chats::newGroupInvite);
-        A.createGroup("Weekend", { bob.uid, carol.uid });
+        A.createGroup("Weekend", { bob.uid, carol.uid }, "main");
         CHECK(until([&] { return created.count() == 1; }));
         const QString gid = created.at(0).at(0).toString();
         CHECK(gid.size() == 52);
@@ -214,21 +214,22 @@ int main(int argc, char **argv)
             CHECK(inv.value("kind").toString() == "invite" && inv.value("section").toString() == "pending" && inv.value("name").toString() == "Weekend");
             CHECK(side_b->at(0).value("key").toString() == "invite:" + gid);
         }
-        B.acceptGroup(gid);
+        B.acceptGroup(gid, "main");
         CHECK(until([&] { return row(side_b, "key", "group:" + gid).value("kind").toString() == "group" && row(side_b, "key", "invite:" + gid).isEmpty(); }));
         CHECK(until([&] { return B.incomingGroupInvites() == 0 && row(conv_b, "id", gid).value("kind").toString() == "group"; }));
-        C.acceptGroup(gid);
+        C.acceptGroup(gid, "main");
         CHECK(until([&] { return row(conv_c, "id", gid).value("name").toString() == "Weekend"; }));
         /* bob and carol are connected through the group, and not as friends */
         CHECK(until([&] { return row(static_cast<JsonListModel *>(B.people()), "id", carol.uid).value("state").toString() == "scoped"; }));
-        CHECK(until([&] { return row(static_cast<JsonListModel *>(B.people()), "id", carol.uid).value("name").toString() == "Carol"; }));
-        CHECK(until([&] { return row(static_cast<JsonListModel *>(C.people()), "id", bob.uid).value("name").toString() == "Bob"; }));
+        /* and neither chose a profile for the other directly, so there they are shown by their ids */
+        CHECK(row(static_cast<JsonListModel *>(B.people()), "id", carol.uid).value("name").toString() == carol.uid.left(8));
         CHECK(B.friendCount() == 1);                                                              /* only alice */
 
         B.open(gid, "group");
         CHECK(B.currentIsGroup() && B.current() == gid && B.currentName() == "Weekend" && B.currentState() == "active");
         auto *members_b = static_cast<JsonListModel *>(B.members());
         CHECK(until([&] { return members_b->rowCount() == 3; }));
+        CHECK(until([&] { B.refresh(); return row(members_b, "id", carol.uid).value("name").toString() == "Carol"; })); /* in the group, as she is there */
         {
             int me = 0, friends = 0;
             for (const QJsonObject &m : members_b->items()) {

@@ -1,15 +1,15 @@
 /* Group chats between three real Puddles over real TLS on loopback, where two of the members are strangers to each other:
  * the invitation, the group-only connection that joins them, messages both ways, edits, deletes, a rename, a friend request over
  * a group connection, and leaving. Each Puddle is the real server with its own data directory; the owner calls are real HTTPS calls. */
-#include "access.h"
-#include "json.h"
-#include "client.h"
-#include "media.h"
-#include "config.h"
-#include "outbox.h"
-#include "phrase.h"
-#include "server.h"
-#include "streams.h"
+#include "federation/access.h"
+#include "base/json.h"
+#include "http/client.h"
+#include "storage/media.h"
+#include "core/config.h"
+#include "core/outbox.h"
+#include "core/phrase.h"
+#include "service/server.h"
+#include "core/streams.h"
 
 #include <arpa/inet.h>
 #include <ftw.h>
@@ -228,12 +228,12 @@ static void id_of(char out[65], const char *after)
 static void befriend(node *from, node *to)
 {
     char body[600];
-    snprintf(body, sizeof body, "{\"target\":\"%s\",\"message\":\"hi\"}", to->link);
+    snprintf(body, sizeof body, "{\"target\":\"%s\",\"message\":\"hi\",\"profile\":\"main\"}", to->link); /* who they will see us as */
     CHECK(post(from, "/api/v1/streams/request", body) == 201);
     has_arg a = { to, "/api/v1/streams?state=pending_in", from->uid };
     CHECK(wait_for(has_cond, &a));
     snprintf(body, sizeof body, "/api/v1/streams/%s/accept", from->uid);
-    CHECK(post(to, body, NULL) == 200);
+    CHECK(post(to, body, "{\"profile\":\"main\"}") == 200);
     CHECK(wait_state(from, to->uid, PUDDLE_STREAM_ACTIVE));
 }
 
@@ -257,7 +257,7 @@ int main(void)
     }
 
     /* ---- alice starts a group and asks them both ---- */
-    snprintf(body, sizeof body, "{\"name\":\"Trio\",\"members\":[\"%s\",\"%s\"]}", b.uid, c.uid);
+    snprintf(body, sizeof body, "{\"name\":\"Trio\",\"members\":[\"%s\",\"%s\"],\"profile\":\"main\"}", b.uid, c.uid);
     CHECK(post(&a, "/api/v1/groups/create", body) == 201 && json_has("\"name\":\"Trio\"") && json_has("\"not_invited\":[]"));
     id_of(gid, "{\"id\":\"");
     {
@@ -274,7 +274,7 @@ int main(void)
     snprintf(gpath, sizeof gpath, "/api/v1/groups/%s", gid);
     snprintf(cpath, sizeof cpath, "/api/v1/conversations/%s/messages/send", gid);
 #define G(verb) (snprintf(url, sizeof url, "%s/%s", gpath, verb), url)
-    CHECK(post(&b, G("accept"), NULL) == 200 && json_has("\"my\":\"in\""));
+    CHECK(post(&b, G("accept"), "{\"profile\":\"main\"}") == 200 && json_has("\"my\":\"in\""));
     {
         char path[300];
         snprintf(path, sizeof path, "/api/v1/groups");
@@ -300,7 +300,7 @@ int main(void)
     }
 
     /* ---- carol says yes: she joins, and reaches bob, whom she has never met, through a group-only connection ---- */
-    CHECK(post(&c, G("accept"), NULL) == 200);
+    CHECK(post(&c, G("accept"), "{\"profile\":\"main\"}") == 200);
     CHECK(wait_state(&c, b.uid, PUDDLE_STREAM_SCOPED) && wait_state(&b, c.uid, PUDDLE_STREAM_SCOPED));
     {
         /* until each of the three has the other two as members: carol hears bob's yes from bob, and bob hers from her */
@@ -322,9 +322,12 @@ int main(void)
         CHECK(puddle_groups_get(puddle_server_groups(c.srv), gid, &g) == 0 && puddle_group_count(&g, PUDDLE_GM_MEMBER) == 3 && g.my == PUDDLE_GROUP_IN);
         puddle_group_free(&g);
     }
-    /* what they know of each other is a name and a picture, as a group member's, and they are not friends */
-    CHECK(get(&b, "/api/v1/streams") == 200 && json_has("\"state\":\"scoped\"") && json_has("\"display_name\":\"Carol\""));
-    CHECK(get(&c, "/api/v1/streams") == 200 && json_has("\"state\":\"scoped\"") && json_has("\"display_name\":\"Bob\""));
+    /* what they know of each other is the profile each shows the group, and they are not friends: directly, they are
+     * shown by their ids only, since neither chose a profile for the other */
+    CHECK(get(&b, "/api/v1/streams") == 200 && json_has("\"state\":\"scoped\"") && !json_has("\"display_name\":\"Carol\""));
+    CHECK(get(&c, "/api/v1/streams") == 200 && json_has("\"state\":\"scoped\"") && !json_has("\"display_name\":\"Bob\""));
+    CHECK(wait_has(&b, gpath, "\"display_name\":\"Carol\""));
+    CHECK(wait_has(&c, gpath, "\"display_name\":\"Bob\""));
     snprintf(url, sizeof url, "/api/v1/conversations/%s/messages/send", c.uid);
     CHECK(post(&b, url, "{\"body\":\"a private word\"}") == 403);                                            /* a group connection is not a friendship */
 

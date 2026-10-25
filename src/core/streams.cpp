@@ -1,9 +1,8 @@
-#include "streams.h"
+#include "core/streams.h"
 
-#include "encoding.h"
-#include "fsutil.h"
-#include "json.h"
-#include "log.h"
+#include "base/encoding.h"
+#include "base/json.h"
+#include "base/log.h"
 
 #include <errno.h>
 #include <openssl/crypto.h>
@@ -15,8 +14,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define FILE_MAX (2u << 20)
 #define RECORD_VERSION 1
@@ -38,8 +35,8 @@ typedef struct {
 
 struct puddle_streams {
     std::mutex mu;
-    char state_dir[1100];
-    char streams_dir[1100];
+    puddle_storage *storage;
+    puddle_storage *owned; /* the files driver opened for a data directory; NULL when handed one */
     entry *entries;
     size_t nentries, capentries;
     blocked *blocks;
@@ -142,13 +139,6 @@ int puddle_stream_set_chain(puddle_stream *st, const char *text, size_t len)
     return set_text(&st->chain, &st->chain_len, text, len, PUDDLE_CHAIN_MAX_BYTES);
 }
 
-int puddle_stream_set_profile(puddle_stream *st, const char *json, size_t len)
-{
-    if (json && !puddle_json_valid_object(json, len))
-        return -1;
-    return set_text(&st->profile, NULL, json, len, PUDDLE_PROFILE_MAX_BYTES);
-}
-
 int puddle_stream_add_address(puddle_stream *st, const char *address)
 {
     puddle_address a;
@@ -166,45 +156,45 @@ int puddle_stream_add_address(puddle_stream *st, const char *address)
 void puddle_stream_free(puddle_stream *st)
 {
     free(st->chain);
-    free(st->profile);
-    st->chain = st->profile = NULL;
+    st->chain = NULL;
     st->chain_len = 0;
 }
 
 /* ---- files ---- */
 
-static char *read_all(const char *path, size_t *len)
+#define COLLECTION "streams" /* one record per peer, keyed by their user id */
+
+/* a stream record, or NULL if there is none (or it is too large to be one) */
+static char *read_record(const puddle_streams *s, const char *id, size_t *len)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    char *text;
+    if (puddle_record_get(s->storage, COLLECTION, id, &text, len) != 0)
         return NULL;
-    char *buf = (char *)malloc(FILE_MAX + 1);
-    if (!buf) {
-        fclose(f);
-        return NULL;
-    }
-    size_t n = fread(buf, 1, FILE_MAX + 1, f);
-    int bad = ferror(f) || n > FILE_MAX;
-    fclose(f);
-    if (bad) {
-        free(buf);
+    if (*len > FILE_MAX) {
+        free(text);
         return NULL;
     }
-    buf[n] = '\0';
-    *len = n;
-    return buf;
+    return text;
 }
 
-static void record_path(const puddle_streams *s, const char *id, char *out, size_t cap)
+/* one of the single documents (blocks.tsv, read.tsv, invites.tsv, access-policy), or NULL */
+static char *read_state(const puddle_streams *s, const char *name, size_t *len)
 {
-    snprintf(out, cap, "%s/%s.json", s->streams_dir, id); /* callers have already checked `id` */
+    char *text;
+    if (puddle_record_get(s->storage, "state", name, &text, len) != 0)
+        return NULL;
+    if (*len > FILE_MAX) {
+        free(text);
+        return NULL;
+    }
+    return text;
 }
 
 /* what goes in a file: JSON, one object */
 static char *encode(const puddle_stream *st, size_t *out_len)
 {
     size_t note_len = strlen(st->note);
-    size_t cap = (st->chain_len + note_len) * 6 + (st->profile ? strlen(st->profile) : 0) + 4096;
+    size_t cap = (st->chain_len + note_len) * 6 + 4096;
     char *buf = (char *)malloc(cap);
     if (!buf)
         return NULL;
@@ -245,10 +235,6 @@ static char *encode(const puddle_stream *st, size_t *out_len)
     }
     puddle_jw_str(&w, "addresses", addrs);
     puddle_jw_num(&w, "addr_seq", st->addr_seq);
-    if (st->profile) {
-        puddle_jw_key(&w, "profile");
-        puddle_jw_raw(&w, st->profile, strlen(st->profile));
-    }
     if (st->chain) {
         puddle_jw_key(&w, "chain");
         puddle_jw_string_n(&w, st->chain, st->chain_len);
@@ -276,8 +262,9 @@ static int member_int(const char *json, size_t len, const char *key, int64_t *ou
 }
 
 /* Read one record back, checking everything: the file is ours, but it may be damaged or edited. */
+/* `old_profile`, if given, is pointed at the profile a record from before core/people.h still carries (len 0 if none) */
 static int decode(const char *json, size_t len, const char *expect_id, puddle_stream *st, puddle_chain_head *head,
-                  int *has_head)
+                  int *has_head, puddle_span *old_profile = nullptr)
 {
     char tmp[PUDDLE_STREAM_MAX_ADDRS * PUDDLE_ADDR_MAX + 8];
     int64_t v;
@@ -360,8 +347,10 @@ static int decode(const char *json, size_t len, const char *expect_id, puddle_st
             goto bad;
     puddle_span sp;
     int rc; rc = puddle_json_member(json, len, "profile", &sp);
-    if (rc < 0 || (rc == 0 && puddle_stream_set_profile(st, sp.p, sp.len) != 0))
+    if (rc < 0 || (rc == 0 && (sp.len > PUDDLE_PROFILE_MAX_BYTES || !puddle_json_valid_object(sp.p, sp.len))))
         goto bad;
+    if (old_profile)
+        *old_profile = rc == 0 ? sp : puddle_span{ NULL, 0 };
     rc = puddle_json_member(json, len, "chain", &sp);
     if (rc < 0)
         goto bad;
@@ -429,9 +418,7 @@ static int index_put(puddle_streams *s, const char *id, puddle_stream_state stat
 
 static int write_state_file(puddle_streams *s, const char *name, const char *data, size_t len)
 {
-    char path[1200];
-    snprintf(path, sizeof path, "%s/%s", s->state_dir, name);
-    return puddle_write_file_atomic(s->state_dir, path, data, len);
+    return puddle_record_put(s->storage, "state", name, data, len);
 }
 
 static int save_blocks(puddle_streams *s)
@@ -460,10 +447,8 @@ static int save_invites(puddle_streams *s)
 
 static void load_blocks(puddle_streams *s)
 {
-    char path[1200];
     size_t len;
-    snprintf(path, sizeof path, "%s/blocks.tsv", s->state_dir);
-    char *text = read_all(path, &len);
+    char *text = read_state(s, "blocks.tsv", &len);
     if (!text)
         return;
     for (char *save = NULL, *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
@@ -499,10 +484,8 @@ static int save_reads(puddle_streams *s)
 
 static void load_reads(puddle_streams *s)
 {
-    char path[1200];
     size_t len;
-    snprintf(path, sizeof path, "%s/read.tsv", s->state_dir);
-    char *text = read_all(path, &len);
+    char *text = read_state(s, "read.tsv", &len);
     if (!text)
         return;
     for (char *save = NULL, *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
@@ -583,10 +566,8 @@ int puddle_streams_set_read_marker(puddle_streams *s, const char *id, int64_t ts
 
 static void load_invites(puddle_streams *s)
 {
-    char path[1200];
     size_t len;
-    snprintf(path, sizeof path, "%s/invites.tsv", s->state_dir);
-    char *text = read_all(path, &len);
+    char *text = read_state(s, "invites.tsv", &len);
     if (!text)
         return;
     for (char *save = NULL, *line = strtok_r(text, "\n", &save); line && s->ninvites < PUDDLE_MAX_INVITES;
@@ -609,62 +590,58 @@ static void load_invites(puddle_streams *s)
 
 /* ---- open / close ---- */
 
+/* one stream record, into the index; a damaged one is skipped rather than stopping the Puddle */
+static int load_record(void *user, const char *id, const char *text, size_t len)
+{
+    puddle_streams *s = (puddle_streams *)user;
+    if (!puddle_id_valid(id) || len > FILE_MAX)
+        return 0;
+    puddle_stream st;
+    puddle_chain_head head;
+    int has_head;
+    if (decode(text, len, id, &st, &head, &has_head) != 0) {
+        puddle_log(PUDDLE_LOG_WARN, "skipping damaged stream record %s", id);
+        return 0;
+    }
+    index_put(s, id, st.state, has_head ? &head : NULL, st.provisional);
+    puddle_stream_free(&st);
+    return 0;
+}
+
 puddle_streams *puddle_streams_open(const char *data_dir, char *err, size_t errlen)
+{
+    puddle_storage *st = puddle_storage_open_files(data_dir, err, errlen);
+    if (!st)
+        return NULL;
+    puddle_streams *s = puddle_streams_open_with(st, err, errlen);
+    if (!s) {
+        puddle_storage_close(st);
+        return NULL;
+    }
+    s->owned = st;
+    return s;
+}
+
+puddle_streams *puddle_streams_open_with(puddle_storage *storage, char *err, size_t errlen)
 {
     puddle_streams *s = new (std::nothrow) puddle_streams();
     if (!s) {
         seterr(err, errlen, "out of memory");
         return NULL;
     }
-    snprintf(s->state_dir, sizeof s->state_dir, "%s/state", data_dir);
-    snprintf(s->streams_dir, sizeof s->streams_dir, "%s/state/streams", data_dir);
-    if (puddle_mkdir_p(s->streams_dir) != 0) {
-        seterr(err, errlen, "cannot create %s: %s", s->streams_dir, strerror(errno));
+    s->storage = storage;
+    if (puddle_record_each(storage, COLLECTION, load_record, s) != 0) {
+        seterr(err, errlen, "cannot read the stream records: %s", strerror(errno));
         puddle_streams_close(s);
         return NULL;
     }
-
-    puddle_dir *d = puddle_dir_open(s->streams_dir);
-    if (!d) {
-        seterr(err, errlen, "cannot read %s: %s", s->streams_dir, strerror(errno));
-        puddle_streams_close(s);
-        return NULL;
-    }
-    const char *file;
-    while ((file = puddle_dir_next(d))) {
-        size_t nl = strlen(file);
-        if (nl != PUDDLE_USER_ID_LEN + 5 || strcmp(file + PUDDLE_USER_ID_LEN, ".json") != 0)
-            continue; /* temp files and anything else that is not <id>.json */
-        char id[PUDDLE_USER_ID_LEN + 1];
-        memcpy(id, file, PUDDLE_USER_ID_LEN);
-        id[PUDDLE_USER_ID_LEN] = '\0';
-        if (!puddle_id_valid(id))
-            continue;
-        char path[1200];
-        size_t len;
-        record_path(s, id, path, sizeof path);
-        char *text = read_all(path, &len);
-        puddle_stream st;
-        puddle_chain_head head;
-        int has_head;
-        if (!text || decode(text, len, id, &st, &head, &has_head) != 0) {
-            puddle_log(PUDDLE_LOG_WARN, "skipping damaged stream file %s", path);
-            free(text);
-            continue;
-        }
-        index_put(s, id, st.state, has_head ? &head : NULL, st.provisional);
-        puddle_stream_free(&st);
-        free(text);
-    }
-    puddle_dir_close(d);
 
     load_blocks(s);
     load_reads(s);
     load_invites(s);
-    char path[1200], word[32] = "";
+    char word[32] = "";
     size_t len;
-    snprintf(path, sizeof path, "%s/access-policy", s->state_dir);
-    char *text = read_all(path, &len);
+    char *text = read_state(s, "access-policy", &len);
     if (text) {
         sscanf(text, "%31s", word);
         free(text);
@@ -674,6 +651,37 @@ puddle_streams *puddle_streams_open(const char *data_dir, char *err, size_t errl
     return s;
 }
 
+int puddle_streams_take_profiles(puddle_streams *s, puddle_stream_profile_fn fn, void *user)
+{
+    std::lock_guard<std::mutex> hold(s->mu);
+    int moved = 0, rc = 0;
+    for (size_t i = 0; i < s->nentries; i++) {
+        const char *id = s->entries[i].id;
+        size_t len;
+        char *text = read_record(s, id, &len);
+        if (!text)
+            continue;
+        puddle_stream st;
+        puddle_chain_head head;
+        int has_head;
+        puddle_span prof = { NULL, 0 };
+        if (decode(text, len, id, &st, &head, &has_head, &prof) == 0) {
+            if (prof.len && fn(user, id, prof.p, prof.len, st.updated_ms) == 0) {
+                size_t n;
+                char *out = encode(&st, &n); /* the same record, now without it */
+                if (out && puddle_record_put(s->storage, COLLECTION, id, out, n) == 0)
+                    moved++;
+                else
+                    rc = -1;
+                free(out);
+            }
+            puddle_stream_free(&st);
+        }
+        free(text);
+    }
+    return rc < 0 ? -1 : moved;
+}
+
 void puddle_streams_close(puddle_streams *s)
 {
     if (!s)
@@ -681,6 +689,7 @@ void puddle_streams_close(puddle_streams *s)
     free(s->entries);
     free(s->blocks);
     free(s->reads);
+    puddle_storage_close(s->owned);
     delete s;
 }
 
@@ -700,11 +709,9 @@ int puddle_streams_get(puddle_streams *s, const char *id_in, puddle_stream *out)
         return -1;
     char id[PUDDLE_USER_ID_LEN + 1]; /* `id_in` may point into `out`, which decoding starts by clearing */
     memcpy(id, id_in, sizeof id);
-    char path[1200];
     size_t len;
-    record_path(s, id, path, sizeof path);
     s->mu.lock();
-    char *text = read_all(path, &len);
+    char *text = read_record(s, id, &len);
     s->mu.unlock();
     if (!text)
         return 1;
@@ -727,12 +734,10 @@ static int put_locked(puddle_streams *s, const puddle_stream *st, char *err, siz
         seterr(err, errlen, "cannot encode the stream record");
         return -1;
     }
-    char path[1200];
-    record_path(s, st->id, path, sizeof path);
-    int rc = puddle_write_file_atomic(s->streams_dir, path, text, n);
+    int rc = puddle_record_put(s->storage, COLLECTION, st->id, text, n);
     free(text);
     if (rc != 0) {
-        seterr(err, errlen, "cannot write %s: %s", path, strerror(errno));
+        seterr(err, errlen, "cannot write the stream record for %s: %s", st->id, strerror(errno));
         return -1;
     }
     if (index_put(s, st->id, st->state, st->chain ? &head : NULL, st->provisional) != 0) {
@@ -773,15 +778,13 @@ int puddle_streams_update(puddle_streams *s, const char *id_in, puddle_stream_up
     }
     char id[PUDDLE_USER_ID_LEN + 1];
     memcpy(id, id_in, sizeof id);
-    char path[1200];
     size_t len = 0;
-    record_path(s, id, path, sizeof path);
     s->mu.lock();
     int rc = -1;
     puddle_stream st;
     puddle_chain_head head;
     int has_head;
-    char *text = read_all(path, &len);
+    char *text = read_record(s, id, &len);
     int exists = text && decode(text, len, id, &st, &head, &has_head) == 0;
     free(text);
     if (!exists && puddle_stream_init(&st, id, PUDDLE_STREAM_PENDING_IN, 0) != 0) {
@@ -838,10 +841,8 @@ static int find_provisional_locked(puddle_streams *s, int (*match)(const puddle_
     for (size_t i = 0; i < s->nentries; i++) {
         if (!s->entries[i].provisional)
             continue;
-        char path[1200];
         size_t len;
-        record_path(s, s->entries[i].id, path, sizeof path);
-        char *text = read_all(path, &len);
+        char *text = read_record(s, s->entries[i].id, &len);
         if (!text)
             continue;
         puddle_stream st;
@@ -882,9 +883,7 @@ int puddle_streams_find_provisional(puddle_streams *s, const char *address, pudd
 /* caller holds the lock */
 static void drop_locked(puddle_streams *s, const char *id)
 {
-    char path[1200];
-    record_path(s, id, path, sizeof path);
-    unlink(path);
+    puddle_record_remove(s->storage, COLLECTION, id);
     for (size_t i = 0; i < s->nentries; i++)
         if (!strcmp(s->entries[i].id, id)) {
             memmove(&s->entries[i], &s->entries[i + 1], (s->nentries - i - 1) * sizeof *s->entries);
@@ -899,12 +898,10 @@ int puddle_streams_adopt(puddle_streams *s, const char *provisional_id, const ch
         seterr(err, errlen, "not a valid user id");
         return -1;
     }
-    char path[1200];
     size_t len;
     s->mu.lock();
     int rc = -1;
-    record_path(s, provisional_id, path, sizeof path);
-    char *text = read_all(path, &len);
+    char *text = read_record(s, provisional_id, &len);
     puddle_stream st;
     puddle_chain_head head;
     int has_head;
@@ -928,10 +925,8 @@ int puddle_streams_adopt(puddle_streams *s, const char *provisional_id, const ch
     if (find_entry(s, real_id)) {
         /* We know them already. If that stream was closed, or only for groups, this request starts it afresh; any other state stands. */
         puddle_stream old;
-        char rpath[1200];
         size_t rlen;
-        record_path(s, real_id, rpath, sizeof rpath);
-        char *rtext = read_all(rpath, &rlen);
+        char *rtext = read_record(s, real_id, &rlen);
         if (rtext && decode(rtext, rlen, real_id, &old, &head, &has_head) == 0) {
             if (old.state == PUDDLE_STREAM_CLOSED || old.state == PUDDLE_STREAM_SCOPED) { /* a group-only connection becomes a friend request */
                 old.state = PUDDLE_STREAM_PENDING_OUT;
@@ -977,11 +972,9 @@ int puddle_streams_forget(puddle_streams *s, const char *provisional_id)
 {
     if (!puddle_id_valid(provisional_id))
         return -1;
-    char path[1200];
     size_t len;
     s->mu.lock();
-    record_path(s, provisional_id, path, sizeof path);
-    char *text = read_all(path, &len);
+    char *text = read_record(s, provisional_id, &len);
     puddle_stream st;
     puddle_chain_head head;
     int has_head;
@@ -1169,10 +1162,8 @@ int puddle_streams_block(puddle_streams *s, const char *id, int64_t now_ms, char
     /* the block is on disk; now close whatever stream there was (and do it even if it was blocked before) */
     entry *e; e = find_entry(s, id);
     if (e && e->state != PUDDLE_STREAM_CLOSED) {
-        char path[1200];
         size_t len;
-        record_path(s, id, path, sizeof path);
-        char *text = read_all(path, &len);
+        char *text = read_record(s, id, &len);
         puddle_stream st;
         puddle_chain_head head;
         int has_head;

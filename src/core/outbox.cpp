@@ -1,10 +1,10 @@
-#include "outbox.h"
+#include "core/outbox.h"
 
-#include "clock.h"
-#include "fsutil.h"
-#include "json.h"
-#include "log.h"
-#include "reqsig.h"
+#include "platform/clock.h"
+#include "platform/fsutil.h"
+#include "storage/storage.h"
+#include "base/json.h"
+#include "base/log.h"
 
 #include <errno.h>
 #include <chrono>
@@ -17,9 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #define RECORD_VERSION 1
 #define MINUTE_MS (60 * 1000LL)
@@ -35,7 +33,8 @@ static void wait_on(std::condition_variable &cv, std::mutex &mu)
 
 struct puddle_outbox {
     puddle_outbox_hooks hooks;
-    char dir[1100];
+    puddle_storage *storage;
+    puddle_storage *owned; /* the files driver opened for a data directory; NULL when handed one */
     std::mutex mu;
     std::condition_variable wake;
     std::condition_variable idle; /* notified when a peer's delivery thread ends */
@@ -79,9 +78,12 @@ int64_t puddle_outbox_retry_delay_ms(int64_t first_offline_ms, int64_t now_ms)
 
 static const char *const STATE[] = { "queued", "failed", "held" };
 
-static void item_path(const puddle_outbox *ob, uint64_t seq, char *out, size_t cap)
+#define COLLECTION "outbox"
+
+/* an item's key: its sequence number, zero-padded so the files sort in order */
+static void item_key(uint64_t seq, char out[24])
 {
-    snprintf(out, cap, "%s/%012llu.json", ob->dir, (unsigned long long)seq);
+    snprintf(out, 24, "%012llu", (unsigned long long)seq);
 }
 
 static int save_item(const puddle_outbox *ob, const puddle_ob_item *it)
@@ -114,9 +116,9 @@ static int save_item(const puddle_outbox *ob, const puddle_ob_item *it)
     size_t n = puddle_jw_finish(&w);
     int rc = -1;
     if (n) {
-        char path[1200];
-        item_path(ob, it->seq, path, sizeof path);
-        rc = puddle_write_file_atomic(ob->dir, path, buf, n);
+        char key[24];
+        item_key(it->seq, key);
+        rc = puddle_record_put(ob->storage, COLLECTION, key, buf, n);
     }
     free(buf);
     return rc;
@@ -124,9 +126,9 @@ static int save_item(const puddle_outbox *ob, const puddle_ob_item *it)
 
 static void remove_file(const puddle_outbox *ob, uint64_t seq)
 {
-    char path[1200];
-    item_path(ob, seq, path, sizeof path);
-    unlink(path);
+    char key[24];
+    item_key(seq, key);
+    puddle_record_remove(ob->storage, COLLECTION, key);
 }
 
 static void item_free(puddle_ob_item *it)
@@ -145,19 +147,9 @@ static int item_copy(puddle_ob_item *dst, const puddle_ob_item *src)
     return 0;
 }
 
-static int read_item(const char *path, puddle_ob_item *it)
+static int read_item(const char *text, size_t n, puddle_ob_item *it)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return -1;
     size_t cap = 2 * PUDDLE_OUTBOX_BODY_MAX * 6 / 4 + 4096;
-    char *text = (char *)malloc(cap + 1);
-    if (!text) {
-        fclose(f);
-        return -1;
-    }
-    size_t n = fread(text, 1, cap + 1, f);
-    fclose(f);
     int rc = -1;
     memset(it, 0, sizeof *it);
     if (n == 0 || n > cap || !puddle_json_valid_object(text, n))
@@ -214,7 +206,6 @@ static int read_item(const char *path, puddle_ob_item *it)
 out:
     if (rc != 0)
         item_free(it);
-    free(text);
     return rc;
 }
 
@@ -238,7 +229,41 @@ static int push(puddle_outbox *ob, const puddle_ob_item *it)
     return 0;
 }
 
+/* one item as it was kept; a damaged one is skipped, not fatal */
+static int load_item(void *user, const char *key, const char *text, size_t len)
+{
+    puddle_outbox *ob = (puddle_outbox *)user;
+    if (strlen(key) != 12 || strspn(key, "0123456789") != 12)
+        return 0;
+    puddle_ob_item it;
+    if (read_item(text, len, &it) != 0) {
+        puddle_log(PUDDLE_LOG_WARN, "skipping damaged outbox item %s", key);
+        return 0;
+    }
+    if (push(ob, &it) != 0) {
+        item_free(&it);
+        return 1;
+    }
+    if (it.seq >= ob->next_seq)
+        ob->next_seq = it.seq + 1;
+    return 0;
+}
+
 puddle_outbox *puddle_outbox_open(const char *data_dir, const puddle_outbox_hooks *hooks, char *err, size_t errlen)
+{
+    puddle_storage *st = puddle_storage_open_files(data_dir, err, errlen);
+    if (!st)
+        return NULL;
+    puddle_outbox *ob = puddle_outbox_open_with(st, hooks, err, errlen);
+    if (!ob) {
+        puddle_storage_close(st);
+        return NULL;
+    }
+    ob->owned = st;
+    return ob;
+}
+
+puddle_outbox *puddle_outbox_open_with(puddle_storage *st, const puddle_outbox_hooks *hooks, char *err, size_t errlen)
 {
     puddle_outbox *ob = new (std::nothrow) puddle_outbox();
     if (!ob) {
@@ -247,38 +272,12 @@ puddle_outbox *puddle_outbox_open(const char *data_dir, const puddle_outbox_hook
     }
     ob->hooks = *hooks;
     ob->next_seq = 1;
-    snprintf(ob->dir, sizeof ob->dir, "%s/state/outbox", data_dir);
-    if (puddle_mkdir_p(ob->dir) != 0) {
-        seterr(err, errlen, "cannot create %s: %s", ob->dir, strerror(errno));
+    ob->storage = st;
+    if (puddle_record_each(st, COLLECTION, load_item, ob) != 0) {
+        seterr(err, errlen, "cannot read the outbox: %s", strerror(errno));
         puddle_outbox_close(ob);
         return NULL;
     }
-    puddle_dir *d = puddle_dir_open(ob->dir);
-    if (!d) {
-        seterr(err, errlen, "cannot read %s: %s", ob->dir, strerror(errno));
-        puddle_outbox_close(ob);
-        return NULL;
-    }
-    const char *entry;
-    while ((entry = puddle_dir_next(d))) {
-        size_t nl = strlen(entry);
-        if (nl != 17 || strcmp(entry + 12, ".json") != 0)
-            continue; /* .tmp files and anything that is not <seq>.json */
-        char path[1200];
-        snprintf(path, sizeof path, "%s/%s", ob->dir, entry);
-        puddle_ob_item it;
-        if (read_item(path, &it) != 0) {
-            puddle_log(PUDDLE_LOG_WARN, "skipping damaged outbox file %s", path);
-            continue;
-        }
-        if (push(ob, &it) != 0) {
-            item_free(&it);
-            break;
-        }
-        if (it.seq >= ob->next_seq)
-            ob->next_seq = it.seq + 1;
-    }
-    puddle_dir_close(d);
     qsort(ob->items, ob->n, sizeof *ob->items, cmp_seq);
     return ob;
 }
@@ -301,6 +300,7 @@ void puddle_outbox_close(puddle_outbox *ob)
     for (size_t i = 0; i < ob->n; i++)
         item_free(&ob->items[i]);
     free(ob->items);
+    puddle_storage_close(ob->owned);
     delete ob;
 }
 
@@ -408,44 +408,6 @@ int puddle_outbox_enqueue_get(puddle_outbox *ob, const char *peer, const char *k
 
 /* ---- delivering ---- */
 
-typedef struct {
-    puddle_outbox *ob;
-    const char *peer;
-} fp_ctx;
-
-static int fp_cb(void *u, const char *fp)
-{
-    fp_ctx *c = (fp_ctx *)u;
-    return c->ob->hooks.fingerprint ? c->ob->hooks.fingerprint(c->ob->hooks.user, c->peer, fp) : 1;
-}
-
-static void attempt(puddle_outbox *ob, const puddle_ob_item *it, puddle_net_reply *reply)
-{
-    puddle_address addrs[4];
-    int n = ob->hooks.addresses ? ob->hooks.addresses(ob->hooks.user, it->peer, addrs, 4) : 0;
-    if (n <= 0) {
-        memset(reply, 0, sizeof *reply);
-        reply->result = PUDDLE_NET_FAILED;
-        snprintf(reply->reason, sizeof reply->reason, "we have no address for them");
-        return;
-    }
-    fp_ctx fc = { ob, it->peer };
-    puddle_net_opts opts = ob->hooks.net;
-    opts.fingerprint_ok = fp_cb;
-    opts.user = &fc;
-    if (it->max_reply)
-        opts.max_body = it->max_reply;
-    for (int i = 0; i < n; i++) {
-        /* a first request to an address says who it is from but not who it is for: nobody has said who lives there yet */
-        const char *recipient = !strcmp(it->kind, PUDDLE_OB_KIND_OPEN_ACCESS) ? PUDDLE_RECIPIENT_ANY : it->peer;
-        puddle_net_request(&addrs[i], it->method, it->path, it->body_len ? it->body : NULL, it->body_len, ob->hooks.identity, recipient, &opts, reply);
-        if (reply->result != PUDDLE_NET_OFFLINE)
-            return; /* reached something: that is the answer */
-        if (i + 1 < n)
-            puddle_net_reply_free(reply);
-    }
-}
-
 /* the failed items beyond the cap are forgotten, oldest first. Caller holds the lock. */
 static void prune_failed(puddle_outbox *ob)
 {
@@ -510,7 +472,13 @@ static void deliver_peer(puddle_outbox *ob, const char *peer)
             return; /* nothing due, nothing left, or out of memory (it will be found again) */
 
         puddle_net_reply reply;
-        attempt(ob, &it, &reply);
+        memset(&reply, 0, sizeof reply);
+        if (ob->hooks.send) {
+            ob->hooks.send(&ob->hooks, &it, &reply);
+        } else {
+            reply.result = PUDDLE_NET_FAILED;
+            snprintf(reply.reason, sizeof reply.reason, "nothing here sends to other Puddles");
+        }
         now = now_of(ob);
 
         puddle_ob_outcome outcome = PUDDLE_OB_REJECTED;

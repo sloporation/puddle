@@ -38,13 +38,13 @@ So a thief with the daily keys (a stolen phone, a copied file) can't roll, becau
 key. A leaked *old* phrase is harmless: its daily keys are retired and its roll key was spent. The
 *current* phrase is the master secret.
 
-- [x] **1.1 The phrase.** `src/core/phrase.c`, tests in `tests/phrase_test.c`. 28 random characters from
+- [x] **1.1 The phrase.** `src/core/phrase.cpp`, tests in `tests/phrase_test.c`. 28 random characters from
   an alphabet without look-alikes (140 bits), plus a 20-bit CRC group. Typing is forgiving (case,
   spaces, hyphens; O is 0, I and L are 1). Every single wrong character and every swap of neighbours
   is caught, checked exhaustively over 200 phrases; any other slip is missed one time in a million.
   The seed is HKDF-SHA256 of the data characters, pinned by a known-answer test cross-checked against
   an independent implementation.
-- [x] **1.2 Keys from a phrase.** `src/core/identity.c`. The seed gives three keys through HKDF with
+- [x] **1.2 Keys from a phrase.** `src/core/identity.cpp`. The seed gives three keys through HKDF with
   fixed labels (`signing`, `encryption`, `roll`); the labels are pinned by a test against values worked
   out independently. Creating an identity makes the phrase, derives the keys, and writes a first record
   that commits to the hash of the roll key. `keys` holds the two daily keys only (mode 0600); tests prove
@@ -65,7 +65,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   unconfirmed identity; and an unfinished one is safe to throw away and redo, because nothing could have
   used it. A confirmed identity can never be discarded. `puddled` follows the same rule.
 
-- [x] **1.3 Roll.** `puddle_identity_roll_prepare` and `puddle_identity_roll_commit` in `src/core/identity.c`,
+- [x] **1.3 Roll.** `puddle_identity_roll_prepare` and `puddle_identity_roll_commit` in `src/core/identity.cpp`,
   and `puddled --roll`. The owner types the *current* phrase (not echoed); the Puddle checks it is the one
   the chain committed to, makes a **new phrase** and the next keys from it, and only after "the new phrase
   is written down" commits. Phase 1 changes nothing on disk, so stopping there costs nothing and the old
@@ -104,7 +104,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
 
 ## Phase 2: Server plumbing
 
-- [x] **2.1 Read request bodies.** `src/core/serve.c`, with the header parsing in `http.c`. Serving one request is
+- [x] **2.1 Read request bodies.** `src/http/serve.cpp`, with the header parsing in `http.c`. Serving one request is
   now its own module over an abstract connection (TLS in the server, a scripted fake in `tests/serve_test.c`), which is
   what makes the awkward cases testable. The rules: **the limit is decided before a body is read**, from the headers
   alone, and capped at 4 MiB whatever a route asks for, so memory is bounded by a number we choose and not by the
@@ -119,7 +119,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   mechanism is exercised by the tests and by `curl` against the real server. Tests also now run with the allocator
   poisoning new and freed memory, which exposed one missed check (a body that wasn't NUL-terminated).
 - [x] **2.2 JSON writer.** Escaping and building objects/arrays; handlers need it for every response.
-  Built in `src/core/json.c` (`puddle_jw_*`): writes into the caller's buffer, no allocation, commas and
+  Built in `src/core/json.cpp` (`puddle_jw_*`): writes into the caller's buffer, no allocation, commas and
   quoting automatic. Misuse (value without key, unbalanced ends, depth over 64, full buffer) is remembered
   and reported once by `puddle_jw_finish`, which returns 0. Strings are always valid UTF-8 out: bad bytes
   become U+FFFD, control characters are escaped, so a peer's display name can't break a response.
@@ -127,7 +127,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   identity, profiles and (later) streams, and one of three auth kinds: owner token, signed peer, or
   chain-proven (stream requests and key-roll pushes). One replay memory per Puddle. `/health` moves onto it.
   *Done when:* an unauthenticated request to any route is the same `404`; tests for each auth kind.
-  Built in `src/core/router.c/h` (the machinery) and `routes.c` (the Puddle's table; only `/health` so far).
+  Built in `src/http/router.cpp/h` (the machinery) and `routes.c` (the Puddle's table; only `/health` so far).
   - A route declares its method, path, auth kind, body cap and handler. The router authenticates *before* the
     handler runs, so a handler only ever sees a request that passed for it. PEER looks the sender's current key
     up in the Puddle's streams (`ctx->peer_key`; none until phase 3, so every PEER route is `404` for now).
@@ -158,7 +158,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
 
 - [x] **3.1 Stream store.** One file per peer (chain, address, state, note, profile shown), plus blocks,
   invite tokens and the access policy. The key lookup the signature check needs. A `puddle://` link parser.
-  Built in `src/core/streams.c/h` and `link.c/h`; layout in `docs/storage.md`.
+  Built in `src/api/streams.cpp/h` and `link.c/h`; layout in `docs/storage.md`.
   - **A stored chain is a proven chain.** `puddle_streams_put` verifies the chain against the id the record is
     filed under, so nothing in the store is a key that hasn't been shown to belong to its id; files are
     verified again on load, and a damaged or edited one costs that one peer (skipped with a warning), not the
@@ -178,7 +178,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
     updates after a roll (phase 4).
 - [x] **3.2 Inbound request.** `POST /stream/v1/access`: verify the chain in the body, check blocks,
   policy, invite token and rate limit, record `pending_in`, always answer `202` with no body.
-  Built in `src/core/access.c` (the request) and `ratelimit.c`; the route is a CHAIN route.
+  Built in `src/federation/access.cpp` (the request) and `ratelimit.c`; the route is a CHAIN route.
   - **Order:** the router asks `puddle_access_chain_key` for the requester's key, found in the chain in the
     body (after a global limit on this unauthenticated work, 50 a second with a burst of 100); the
     signature is then checked and replays are caught as for any signed request; only then does the handler
@@ -232,7 +232,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
   - **Any other failure** (TLS error, an HTTP error, `404`, a rejected signature) **fails once and is not
     retried.** The outbox keeps the reason so the app can later tell the owner "this failed because
     ..., try again or give up".
-  Built in `src/core/client.c` (one signed HTTPS request) and `outbox.c` (the queue, on disk).
+  Built in `src/http/client.cpp` (one signed HTTPS request) and `outbox.c` (the queue, on disk).
   - **Client:** TLS accepts any certificate and takes its SHA-256 fingerprint; `fingerprint_ok` is asked once
     the certificate is known and before anything is sent. Results are `OK` (any HTTP answer), `OFFLINE`
     (refused, timed out, unreachable, unknown host), `FAILED` (anything else: TLS, HTTP framing, an oversize
@@ -259,7 +259,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
 
 - [x] **3.5 Requesting and answering.** Owner `POST /api/v1/stream/request` sends the signed request;
   inbound `access/result`, `access/status` and `close`.
-  Built in `src/core/flow.c` (what we start and how it turned out) and `inbound.c` (what arrives).
+  Built in `src/federation/flow.cpp` (what we start and how it turned out) and `inbound.c` (what arrives).
   - **`POST /api/v1/stream/request`:** takes a `puddle://` link (an invite in it is sent along), a note and which
     profile to show. It refuses (`400`/`409`, with a code) yourself, a bad link, a note over 500 characters, an
     unknown profile, someone blocked, a stream already open or requested, or one they asked for (accept
@@ -320,7 +320,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
     - **Reading** (`dm/messages`) pages over *messages*, however many edits sit between them: it takes a window of the newest
       events and widens it until it holds enough messages.
     - Not here: an erase on this machine (storage.md's "optional local erase"); edit history; an edit window limit.
-  - [x] **4.1a Send and receive text.** Built in `src/core/message.c` (the event: chat id, signing, checks) and
+  - [x] **4.1a Send and receive text.** Built in `src/objects/message.cpp` (the event: chat id, signing, checks) and
     `messages.c` (routes).
     - **The event** is `{"type":"message","chat","sender","ts","body"[,"ref"]}`, stored and sent exactly as signed;
       its id is the SHA-256 of those bytes. The DM chat id is the one in `docs/storage.md`, and a DM has no
@@ -349,7 +349,7 @@ key. A leaked *old* phrase is harmless: its daily keys are retired and its roll 
       a per-sender rate limit (deliveries only come from people the owner has accepted); catching up on missed
       messages.
 - [x] **4.2 Key roll and address pushes.** `POST /stream/v1/identity` and `/address`; peers verify and update.
-  Built in `src/core/keysync.c`.
+  Built in `src/federation/keysync.cpp`.
   - **Keys:** after a roll (the API's `roll/confirm`, or at start if `puddled --roll` was used while stopped), every peer
     that holds our chain and has not been told (`chain_sent` on its record) gets it, queued **ahead** of everything else
     for that peer. The receiver takes it only as a continuation of the chain it holds (the stored text plus whole

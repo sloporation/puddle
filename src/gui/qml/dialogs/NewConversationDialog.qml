@@ -82,7 +82,7 @@ Popup {
     function send() {
         const t = link.text.trim()
         if (t === "") return
-        chats.request(t, note.text.trim(), profile.count > 1 ? profile.currentValue : "")
+        chats.request(t, note.text.trim(), profile.count > 0 ? profile.currentValue : "") // who they will see us as: our consent to show it them
         close()
     }
 
@@ -279,7 +279,7 @@ Popup {
                 FieldMenu {}
             }
             RowLayout {
-                visible: profile.count > 1
+                visible: profile.count > 0 // always said: it is what they will see of us
                 Layout.fillWidth: true
                 Label { text: qsTr("Appear as") }
                 ComboBox {

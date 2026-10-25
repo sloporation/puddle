@@ -1,4 +1,6 @@
-#include "link.h"
+#include "core/link.h"
+
+#include "core/config.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -247,4 +249,31 @@ int puddle_link_format(const char *address, const char *invite, char *out, size_
         shown[n - dl] = '\0'; /* the port everyone assumes is not written */
     int w = (invite && *invite) ? snprintf(out, cap, "%s?invite=%s", shown, invite) : snprintf(out, cap, "%s", shown);
     return w > 0 && (size_t)w < cap ? 0 : -1;
+}
+
+/* ---- this Puddle's own address ---- */
+
+int puddle_my_address(const puddle_config *cfg, char *out, size_t cap)
+{
+    char where[PUDDLE_ADDR_MAX];
+    if (cfg->advertise[0]) {
+        snprintf(where, sizeof where, "%s", cfg->advertise);
+    } else if (!strcmp(cfg->address, "::") || !strcmp(cfg->address, "0.0.0.0")) {
+        return 0;
+    } else if (strchr(cfg->address, ':')) {
+        snprintf(where, sizeof where, "[%s]:%u", cfg->address, cfg->port);
+    } else {
+        snprintf(where, sizeof where, "%s:%u", cfg->address, cfg->port);
+    }
+    puddle_address a;
+    if (puddle_address_parse(where, &a) != 0 || strlen(a.address) >= cap)
+        return 0;
+    memcpy(out, a.address, strlen(a.address) + 1);
+    return 1;
+}
+
+int puddle_make_link(const puddle_config *cfg, const char *invite, char *out, size_t cap)
+{
+    char where[PUDDLE_ADDR_MAX];
+    return puddle_my_address(cfg, where, sizeof where) && puddle_link_format(where, invite, out, cap) == 0;
 }

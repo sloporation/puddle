@@ -4,16 +4,16 @@ description: |
   A person as this Puddle knows them: a friend, someone asking for a stream, someone we share a group with, or
   someone we blocked. GET /api/v1/users/{user}. Code: src/core/objects/user.cpp.
 
-  Built from the Person record (../records/person.yaml), which holds the profile their Puddle sent us over
-  federation, plus the stream state and whether they are blocked. Today there is no such record: the profile sits
-  inside the stream record, so a person with no stream has none.
+  Built from their person record (core/people.h), which holds the profiles their Puddle sent us, one per place we
+  share, plus the stream state and whether they are blocked. `profile` is the one they show us directly; the ones
+  for groups are in GET /api/v1/users/{user}/profiles, and in a group's members and messages.
 type: object
 required: [id]
 properties:
   id: { $ref: "../wire/ids.yaml#/$defs/UserId" }
   profile:
     $ref: "../wire/profile.yaml"
-    description: What they show us; absent until they have (a request we sent, not yet answered)
+    description: What they show us directly; absent if they chose none for us, or have not answered yet
   stream:
     $ref: "stream.yaml#/$defs/StreamState"
     description: Absent when there is no stream record
@@ -22,5 +22,6 @@ x-methods:
   message: POST /api/v1/conversations/{user}/messages/send
   block: POST /api/v1/users/{user}/block
   unblock: POST /api/v1/users/{user}/unblock
+  profiles: GET /api/v1/users/{user}/profiles
   stream: GET /api/v1/streams/{user}
   conversation: GET /api/v1/conversations/{user}

@@ -1,6 +1,6 @@
 # The desktop app (`Puddle`)
 
-Qt 6 Quick. The window talks to its own Puddle over the owner API, like a phone client would; the Puddle itself is the C++ core in `src/core/`.
+Qt 6 Quick. The window talks to its own Puddle over the owner API, like a phone client would; the Puddle itself is the C++ code in `src/` (its layers are listed in CLAUDE.md).
 
 ```
 src/gui/

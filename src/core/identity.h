@@ -13,7 +13,7 @@
  *   keys         the daily private keys (mode 0600); no phrase, no roll key
  *   chain.jsonl  the signed records, one per line */
 
-#include "phrase.h"
+#include "core/phrase.h"
 
 #include <stddef.h>
 #include <stdint.h>

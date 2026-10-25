@@ -1,6 +1,6 @@
 # Storage (draft; basics implemented)
 
-Implemented in `src/core/store.c` (with `json.c`, `fsutil.c`) and covered by `tests/store_test.c`:
+Implemented in `src/storage/store.cpp` (with `json.c`, `fsutil.c`) and covered by `tests/store_test.c`:
 data directory and lock, day-file logs, event ids, crash recovery, dedupe, tail, get by id and
 chunk hashes. **Not built yet:** signatures and encryption (`sig` is stored but not checked),
 `redact` handling, media, `state.json`, the profile, and the persisted index sidecar.
@@ -16,11 +16,12 @@ Identity, signing and encryption are in [identity.md](identity.md).
     <data_dir>/
       chats/<chat-id>/<YYYY-MM-DD>.jsonl   one file per chat per UTC day (= one federation chunk)
       identity/                            keys, contacts (see identity.md)
-      profile/profile.yaml                 own profile
-      profile/avatar.png
+      profiles/<id>.yaml                   the owner's profiles, one file each (docs/profiles.md)
       media/<sha256>                       images (profile pictures, banners, attachments), named by content hash
-      state/stream-profiles.tsv            which profile each stream sees (docs/profiles.md)
+      state/profile-places.tsv             which profile each place sees: "dm:<user>" or "group:<group>" (docs/profiles.md)
       state/streams/<user id>.json         one file per peer: state, verified key chain, addresses, note (docs/streams.md)
+      state/people/<user id>.json          the profiles their Puddle sent us, one per place we share, and when (core/people.h)
+      state/conversations/<id>.json        a conversation's summary and when the owner last read it (core/conversations.h)
       state/blocks.tsv                     blocked user ids, one per line with the time
       state/invites.tsv                    live invite tokens: token, created, expires, uses left
       state/access-policy                  who may ask for a stream: manual (default), open or closed

@@ -1,6 +1,6 @@
-#include "streams.h"
+#include "core/streams.h"
 
-#include "phrase.h"
+#include "core/phrase.h"
 
 #include <ftw.h>
 #include <pthread.h>
@@ -162,14 +162,11 @@ int main(void)
     CHECK(puddle_stream_add_address(&st, "bad address") == -1 && st.naddr == 2);
     snprintf(st.note, sizeof st.note, "hey it's \"Jayden\" from work\nline two \xC3\xA9 \xF0\x9F\x99\x82 \\ end");
     st.addr_seq = 7;
-    CHECK(puddle_stream_set_profile(&st, "{\"display_name\":\"Alice\",\"blurb\":\"hi\"}", strlen("{\"display_name\":\"Alice\",\"blurb\":\"hi\"}")) == 0);
-    CHECK(puddle_stream_set_profile(&st, "[1]", 3) == -1 && st.profile != NULL); /* not an object; kept what was there */
     CHECK(puddle_streams_put(s, &st, err, sizeof err) == 0);
     CHECK(puddle_streams_get(s, alice.uid, &got) == 0);
     CHECK(got.state == PUDDLE_STREAM_PENDING_OUT && got.chain == NULL && got.naddr == 2 && got.addr_seq == 7);
     CHECK(!strcmp(got.addresses[0], "203.0.113.7:8443") && !strcmp(got.addresses[1], "[2001:db8::1]:8443"));
     CHECK(!strcmp(got.note, st.note) && got.created_ms == T0 && got.updated_ms == T0);
-    CHECK(got.profile && !strcmp(got.profile, "{\"display_name\":\"Alice\",\"blurb\":\"hi\"}"));
     puddle_stream_free(&got);
     key_of(&alice, kid, pub);
     CHECK(puddle_streams_peer_key(s, alice.uid, kid, found) == 0); /* no keys yet, so no signature can be checked */
@@ -216,7 +213,6 @@ int main(void)
         memset(huge, 'x', PUDDLE_CHAIN_MAX_BYTES + 1);
         CHECK(puddle_stream_set_chain(&big, huge, PUDDLE_CHAIN_MAX_BYTES + 1) == -1 && big.chain == NULL);
         free(huge);
-        CHECK(puddle_stream_set_profile(&big, "{}", 2) == 0 && puddle_stream_set_profile(&big, NULL, 0) == 0 && big.profile == NULL);
         for (int i = 0; i < PUDDLE_STREAM_MAX_ADDRS; i++) {
             char a[40];
             snprintf(a, sizeof a, "10.0.0.%d:1", i + 1);
@@ -518,6 +514,27 @@ int main(void)
         key_of(&alice, kid, pub);
         CHECK(puddle_streams_peer_key(shared, alice.uid, kid, found) == 1); /* untouched by all that */
         puddle_streams_close(shared);
+    }
+
+    /* the same store on the memory driver: no folder, and what it keeps outlives the store but not the storage */
+    {
+        puddle_storage *mem = puddle_storage_open_memory();
+        puddle_streams *m = puddle_streams_open_with(mem, err, sizeof err);
+        CHECK(m != NULL);
+        puddle_stream rec;
+        CHECK(puddle_stream_init(&rec, alice.uid, PUDDLE_STREAM_PENDING_OUT, T0) == 0);
+        CHECK(puddle_stream_add_address(&rec, "203.0.113.7:8443") == 0);
+        CHECK(puddle_streams_put(m, &rec, err, sizeof err) == 0);
+        puddle_stream_free(&rec);
+        CHECK(puddle_streams_block(m, bob.uid, T0, err, sizeof err) == 0);
+        puddle_streams_close(m);
+        m = puddle_streams_open_with(mem, err, sizeof err);
+        CHECK(m && puddle_streams_get(m, alice.uid, &got) == 0 && got.state == PUDDLE_STREAM_PENDING_OUT && got.naddr == 1);
+        puddle_stream_free(&got);
+        CHECK(puddle_streams_count(m, PUDDLE_STREAM_PENDING_OUT) == 1);
+        CHECK(puddle_streams_is_blocked(m, bob.uid) == 1);
+        puddle_streams_close(m);
+        puddle_storage_close(mem);
     }
 
     puddle_identity_close(alice.id); puddle_identity_close(bob.id); puddle_identity_close(carol.id);

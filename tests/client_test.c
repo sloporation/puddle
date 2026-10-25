@@ -1,7 +1,7 @@
-#include "client.h"
+#include "http/client.h"
 
-#include "phrase.h"
-#include "reqsig.h"
+#include "core/phrase.h"
+#include "http/reqsig.h"
 #include "tlsserver.h"
 
 #include <ftw.h>

@@ -43,64 +43,131 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_compile_definitions(_GNU_SOURCE)
 endif()
 
-# --- core: config, TLS, HTTP, listener (C++, shared by both targets; C-callable headers) -----
+# --- the Puddle, in layers (C++20, C-callable headers). Each layer links only the ones below it, so a file that
+# includes a layer it may not use does not build. Every include names its folder: "core/identity.h".
+# api/ and federation/ are siblings: neither links the other. The objects link neither http nor federation.
+
+# platform: what differs per OS: clocks, files and directories
+add_library(puddle_platform STATIC
+  src/platform/clock.cpp
+  src/platform/fsutil.cpp)
+# The one place the OS is chosen: each file in src/platform/ ends in _posix or _windows.
+if(WIN32)
+  target_sources(puddle_platform PRIVATE src/platform/fs_windows.cpp src/platform/net_windows.cpp
+                 src/platform/paths_windows.cpp src/platform/process_windows.cpp)
+  target_link_libraries(puddle_platform PUBLIC ws2_32)
+else()
+  target_sources(puddle_platform PRIVATE src/platform/fs_posix.cpp src/platform/net_posix.cpp
+                 src/platform/paths_posix.cpp src/platform/process_posix.cpp)
+endif()
+target_include_directories(puddle_platform PUBLIC src)
+
+# base: what every layer uses: hashing, JSON, encoding, logging, cleaning text
+add_library(puddle_base STATIC
+  src/base/encoding.cpp
+  src/base/hash.cpp
+  src/base/json.cpp
+  src/base/log.cpp
+  src/base/text.cpp)
+target_link_libraries(puddle_base PUBLIC puddle_platform OpenSSL::Crypto Threads::Threads)
+
+# storage: the chat logs and media on disk
+add_library(puddle_storage STATIC
+  src/storage/storage.cpp
+  src/storage/media.cpp
+  src/storage/store.cpp)
+target_link_libraries(puddle_storage PUBLIC puddle_base)
+
+# core: config, keys, and the records kept through storage/ (streams, people, conversations, groups, the outbox's queue, profile assignments)
 add_library(puddle_core STATIC
-  src/core/access.cpp
-  src/core/api/conversations.cpp
-  src/core/api/groups.cpp
-  src/core/api/request.cpp
-  src/core/api/streams.cpp
-  src/core/api/users.cpp
-  src/core/objects/conversation.cpp
-  src/core/objects/group.cpp
-  src/core/objects/message.cpp
-  src/core/objects/stream.cpp
-  src/core/objects/user.cpp
   src/core/auth.cpp
-  src/core/client.cpp
-  src/core/clock.cpp
   src/core/config.cpp
-  src/core/encoding.cpp
-  src/core/flow.cpp
-  src/core/fsutil.cpp
-  src/core/hash.cpp
-  src/core/http.cpp
-  src/core/identity.cpp
-  src/core/inbound.cpp
-  src/core/json.cpp
-  src/core/keysync.cpp
-  src/core/log.cpp
-  src/core/media.cpp
-  src/core/message.cpp
-  src/core/messages.cpp
-  src/core/phrase.cpp
-  src/core/outbox.cpp
-  src/core/profile.cpp
-  src/core/profiles_api.cpp
-  src/core/ratelimit.cpp
+  src/core/context.cpp
+  src/core/conversations.cpp
+  src/core/delivery.cpp
   src/core/group.cpp
-  src/core/groupapi.cpp
-  src/core/groupflow.cpp
+  src/core/identity.cpp
   src/core/link.cpp
-  src/core/router.cpp
-  src/core/routes.cpp
-  src/core/reqsig.cpp
-  src/core/serve.cpp
-  src/core/server.cpp
-  src/core/store.cpp
+  src/core/outbox.cpp
+  src/core/people.cpp
+  src/core/phrase.cpp
+  src/core/profile.cpp
+  src/core/ratelimit.cpp
   src/core/streams.cpp
-  src/core/tls.cpp
-  src/core/wireprofile.cpp
   src/core/yamltree.cpp)
-target_include_directories(puddle_core PUBLIC src/core)
-# Only yamltree.c sees libyaml's headers: a shared include dir like /opt/homebrew/include would
+target_link_libraries(puddle_core PUBLIC puddle_storage)
+# Only yamltree.cpp sees libyaml's headers: a shared include dir like /opt/homebrew/include would
 # also expose a different OpenSSL's headers.
 set_source_files_properties(src/core/yamltree.cpp PROPERTIES INCLUDE_DIRECTORIES "${YAML_INCLUDE_DIR}")
-target_link_libraries(puddle_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${YAML_LIBRARY})
+target_link_libraries(puddle_core PUBLIC OpenSSL::Crypto Threads::Threads ${YAML_LIBRARY})
+
+# wire: the shapes both APIs send
+add_library(puddle_wire STATIC
+  src/wire/wireprofile.cpp)
+target_link_libraries(puddle_wire PUBLIC puddle_core)
+
+# events: signed events: build, parse, sign, fold
+add_library(puddle_events STATIC
+  src/events/group_events.cpp
+  src/events/message.cpp)
+target_link_libraries(puddle_events PUBLIC puddle_core)
+
+# objects: the owner API's objects: User, Stream, Conversation, Message, Group
+add_library(puddle_objects STATIC
+  src/objects/conversation.cpp
+  src/objects/group.cpp
+  src/objects/message.cpp
+  src/objects/stream.cpp
+  src/objects/profile.cpp
+  src/objects/user.cpp)
+target_link_libraries(puddle_objects PUBLIC puddle_events)
+
+# http: TLS, the listener, the router, the client
+add_library(puddle_http STATIC
+  src/http/client.cpp
+  src/http/http.cpp
+  src/http/reqsig.cpp
+  src/http/router.cpp
+  src/http/serve.cpp
+  src/http/tls.cpp)
+target_link_libraries(puddle_http PUBLIC puddle_core)
+target_link_libraries(puddle_http PUBLIC OpenSSL::SSL)
+
+# api: the owner API: routes that use the objects
+add_library(puddle_api STATIC
+  src/api/conversations.cpp
+  src/api/groups.cpp
+  src/api/profiles.cpp
+  src/api/request.cpp
+  src/api/routes.cpp
+  src/api/streams.cpp
+  src/api/users.cpp)
+target_link_libraries(puddle_api PUBLIC puddle_objects puddle_http)
+
+# federation: the stream API: routes other Puddles call, and how our news reaches them
+add_library(puddle_federation STATIC
+  src/federation/access.cpp
+  src/federation/courier.cpp
+  src/federation/flow.cpp
+  src/federation/groupapi.cpp
+  src/federation/groupflow.cpp
+  src/federation/inbound.cpp
+  src/federation/keysync.cpp
+  src/federation/messages.cpp
+  src/federation/profiles_api.cpp
+  src/federation/sender.cpp)
+target_link_libraries(puddle_federation PUBLIC puddle_wire puddle_events puddle_http)
+
+# service: the assembled Puddle (server.cpp) and every route together
+add_library(puddle_service STATIC
+  src/service/main.cpp
+  src/service/routes.cpp
+  src/service/server.cpp)
+target_link_libraries(puddle_service PUBLIC puddle_api puddle_federation)
 
 # --- puddled: headless service (systemd --user, launchd, ...) -----------------
 add_executable(puddled src/service/main.cpp)
-target_link_libraries(puddled PRIVATE puddle_core)
+target_link_libraries(puddled PRIVATE puddle_service)
 install(TARGETS puddled RUNTIME DESTINATION bin)
 
 # --- Puddle: the desktop app (Qt). Embeds the server, so nothing else is needed.
@@ -158,7 +225,7 @@ if(PUDDLE_BUILD_GUI)
         src/gui/qml/components/WheelScroll.qml
         src/gui/qml/theme/Theme.qml
       RESOURCES src/gui/assets/puddle.png ${PUDDLE_ICONS})
-    target_link_libraries(puddle PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Svg)
+    target_link_libraries(puddle PRIVATE puddle_service Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Svg)
     if(APPLE)
       enable_language(OBJCXX)
       target_sources(puddle PRIVATE src/gui/app/dock_mac.mm)
@@ -175,7 +242,7 @@ if(PUDDLE_BUILD_GUI)
     add_executable(backend_test tests/backend_test.cpp src/gui/app/backend.cpp src/gui/app/backend.h src/gui/app/chats.cpp src/gui/app/chats.h
       src/gui/app/apiclient.cpp src/gui/app/apiclient.h src/gui/app/jsonlistmodel.cpp src/gui/app/jsonlistmodel.h)
     target_include_directories(backend_test PRIVATE src/gui/app)
-    target_link_libraries(backend_test PRIVATE puddle_core Qt6::Gui Qt6::Network)
+    target_link_libraries(backend_test PRIVATE puddle_service Qt6::Gui Qt6::Network)
     if(APPLE)
       target_sources(backend_test PRIVATE src/gui/app/dock_mac.mm)
       target_link_libraries(backend_test PRIVATE "-framework AppKit")
@@ -186,7 +253,7 @@ if(PUDDLE_BUILD_GUI)
     add_executable(chats_test tests/chats_test.cpp src/gui/app/chats.cpp src/gui/app/chats.h src/gui/app/apiclient.cpp src/gui/app/apiclient.h
       src/gui/app/jsonlistmodel.cpp src/gui/app/jsonlistmodel.h)
     set_target_properties(chats_test PROPERTIES AUTOMOC ON)
-    target_link_libraries(chats_test PRIVATE puddle_core Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
+    target_link_libraries(chats_test PRIVATE puddle_service Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
     add_test(NAME chats COMMAND chats_test)
 
     # The window, driven with real mouse and key events against two real Puddles.
@@ -195,7 +262,7 @@ if(PUDDLE_BUILD_GUI)
     set_target_properties(ui_test PROPERTIES AUTOMOC ON)
     target_include_directories(ui_test PRIVATE src/gui/app)
     target_compile_definitions(ui_test PRIVATE PUDDLE_GUI_DIR="${CMAKE_SOURCE_DIR}/src/gui/qml")
-    target_link_libraries(ui_test PRIVATE puddle_core Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Test)
+    target_link_libraries(ui_test PRIVATE puddle_service Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Test)
     if(APPLE)
       target_sources(ui_test PRIVATE src/gui/app/dock_mac.mm)
       target_link_libraries(ui_test PRIVATE "-framework AppKit")
@@ -211,9 +278,12 @@ endif()
 
 # --- tests --------------------------------------------------------------------
 enable_testing()
-foreach(t http json store config yaml profile encoding identity auth reqsig phrase serve router routes link group groupapi groupowner streams ratelimit access owner_streams client outbox inbound open_request flow message messages keysync wireprofile profiles e2e group_e2e)
+# Each layer of src/ includes only the layers it may (tests/layers.cmake).
+add_test(NAME layers COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/src -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/layers.cmake)
+
+foreach(t http json store storage people conversations config yaml profile encoding identity auth reqsig phrase serve router routes link group groupapi groupowner streams ratelimit access owner_streams client outbox inbound open_request flow message messages keysync wireprofile profiles e2e group_e2e)
   add_executable(${t}_test tests/${t}_test.c)
-  target_link_libraries(${t}_test PRIVATE puddle_core)
+  target_link_libraries(${t}_test PRIVATE puddle_service)
   add_test(NAME ${t} COMMAND ${t}_test)
   # fill new and freed heap memory with garbage, so reading memory nobody wrote shows up as a failure
   set_tests_properties(${t} PROPERTIES ENVIRONMENT "MallocScribble=1;MALLOC_PERTURB_=165")

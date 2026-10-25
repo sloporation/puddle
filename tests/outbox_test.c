@@ -1,8 +1,10 @@
-#include "outbox.h"
+#include "core/outbox.h"
 
-#include "encoding.h"
-#include "phrase.h"
+#include "base/encoding.h"
+#include "core/phrase.h"
 #include "tlsserver.h"
+#include "federation/sender.h"
+#include "http/client.h"
 
 #include <dirent.h>
 #include <pthread.h>
@@ -187,7 +189,7 @@ int main(void)
     snprintf(dir, sizeof dir, "%s/srv2", root);
     if (ts_start(&srv2, dir, 0) != 0) return 2;
 
-    hooks = (puddle_outbox_hooks){ .identity = me, .addresses = h_addresses, .fingerprint = h_fingerprint, .done = h_done,
+    hooks = (puddle_outbox_hooks){ .send = puddle_federation_send, .identity = me, .addresses = h_addresses, .fingerprint = h_fingerprint, .done = h_done,
                                    .now_ms = now_cb, .net = { .connect_timeout_s = 2, .io_timeout_s = 2, .total_timeout_s = 5 } };
     puddle_outbox *ob = open_ob(data);
     CHECK(ob != NULL);

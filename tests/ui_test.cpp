@@ -221,7 +221,7 @@ int main(int argc, char **argv)
     }
 
     /* ---- Bob accepts; the window shows a friend ---- */
-    B.accept(backend.myId());
+    B.accept(backend.myId(), "main");
     CHECK(until([&] { return A.friendCount() == 1; }));
     CHECK(until([&] { return dm_row("Bob") != nullptr && row_of_kind("sent") == nullptr; }, 5000));   /* a friend is in the list before anything is said; the request is no more */
 
@@ -387,7 +387,7 @@ int main(int argc, char **argv)
         Node carol;
         CHECK(carol.up(home.path() + "/friends", "Carol"));
         QSignalSpy asked(&A, &Chats::newRequest);
-        carol.chats->request(backend.myLink(), "carol here");
+        carol.chats->request(backend.myLink(), "carol here", "main"); /* who the window will see her as */
         CHECK(until([&] { return asked.count() == 1 && A.incomingRequests() == 1; }));
         CHECK(until([&] { return find("acceptButton") != nullptr && row_of_kind("request") != nullptr; }, 5000));   /* waiting for us, at the top of the list */
         CHECK(row_of_kind("request")->mapToScene(QPointF(0, 0)).y() < dm_row("Bob")->mapToScene(QPointF(0, 0)).y());                                   /* what waits for an answer is above everyone else */
@@ -428,7 +428,7 @@ int main(int argc, char **argv)
         auto *conv_a = static_cast<JsonListModel *>(A.conversations());
         A.request(dana.link, "dana, it is the window");
         CHECK(until([&] { return D.incomingRequests() == 1; }));
-        D.accept(backend.myId());
+        D.accept(backend.myId(), "main");
         CHECK(until([&] { return A.friendCount() == 3; }));
         auto group_rows = [&](JsonListModel *m) { int n = 0; for (const QJsonObject &o : m->items()) n += o.value("kind").toString() == "group"; return n; };
 
@@ -460,8 +460,8 @@ int main(int argc, char **argv)
 
         /* ---- they say yes; bob and dana have never met, and are connected through it ---- */
         CHECK(until([&] { return B.incomingGroupInvites() >= 1 && D.incomingGroupInvites() == 1; }));
-        B.acceptGroup(gid);
-        D.acceptGroup(gid);
+        B.acceptGroup(gid, "main");
+        D.acceptGroup(gid, "main");
         CHECK(until([&] { return A.members()->property("count").toInt() == 3; }));
         CHECK(until([&] { return row(static_cast<JsonListModel *>(B.people()), "id", dana.uid).value("state").toString() == "scoped"; }));
         CHECK(until([&] {
@@ -545,7 +545,7 @@ int main(int argc, char **argv)
 
         /* ---- invited: the invitation waits in Pending, and joining says what it costs ---- */
         QSignalSpy invited(&A, &Chats::newGroupInvite);
-        B.createGroup("Bob's trip", { backend.myId() });
+        B.createGroup("Bob's trip", { backend.myId() }, "main");
         CHECK(until([&] { return A.incomingGroupInvites() == 1 && invited.count() == 1; }));
         CHECK(until([&] { return find("acceptGroupButton") != nullptr && row_of_kind("invite") != nullptr; }, 5000));   /* pinned at the top of the list */
         {
@@ -573,7 +573,7 @@ int main(int argc, char **argv)
         CHECK(click(button("OK")));
         CHECK(until([&] { return A.incomingGroupInvites() == 0 && group_rows(conv_a) == 1; }, 5000));
         /* and one that is turned down */
-        B.createGroup("Not for me", { backend.myId() });
+        B.createGroup("Not for me", { backend.myId() }, "main");
         CHECK(until([&] { return A.incomingGroupInvites() == 1; }));
         CHECK(until([&] { return find("declineGroupButton") != nullptr; }, 5000));
         CHECK(click(find("declineGroupButton")));

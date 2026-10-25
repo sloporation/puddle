@@ -13,8 +13,8 @@
 #include "../src/gui/app/backend.h"
 
 extern "C" {
-#include "identity.h"
-#include "phrase.h"
+#include "core/identity.h"
+#include "core/phrase.h"
 }
 
 static int failures;

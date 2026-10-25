@@ -10,8 +10,8 @@
 #include "chats.h"
 
 extern "C" {
-#include "config.h"
-#include "server.h"
+#include "core/config.h"
+#include "service/server.h"
 }
 
 // C++ side of the UI: owns the embedded server and exposes state to QML.

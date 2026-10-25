@@ -1,7 +1,10 @@
-#include "flow.h"
+#include "federation/flow.h"
 
-#include "access.h"
-#include "phrase.h"
+#include "federation/access.h"
+#include "core/phrase.h"
+#include "federation/courier.h"
+#include "federation/sender.h"
+#include "http/client.h"
 
 #include <ftw.h>
 #include <stdio.h>
@@ -23,7 +26,7 @@ static puddle_ctx ctx;
 static puddle_config cfg;
 static puddle_streams *ss;
 static puddle_outbox *ob;
-static puddle_profiles profiles;
+static puddle_profiles *profiles;
 static puddle_assignments *as;
 static puddle_identity *me;
 static char my_id[PUDDLE_USER_ID_LEN + 1];
@@ -128,12 +131,13 @@ int main(void)
     cfg.port = 8443;
     snprintf(cfg.profile_files[0], PUDDLE_PATH_MAX, "%s", dir);
     cfg.nprofile_files = 1;
-    if (puddle_profiles_load(&profiles, &cfg, err, sizeof err) != 0) { fprintf(stderr, "%s\n", err); return 2; }
+    char old_default[PUDDLE_PROFILE_ID_MAX + 1];
+    if (!(profiles = puddle_profiles_open(&cfg, old_default, err, sizeof err))) { fprintf(stderr, "%s\n", err); return 2; }
     ss = puddle_streams_open(data, err, sizeof err);
     as = puddle_assignments_open(data, err, sizeof err);
-    puddle_outbox_hooks hooks = { .identity = me, .now_ms = now_cb, .max_queued = 6 };
+    puddle_outbox_hooks hooks = { .send = puddle_federation_send, .identity = me, .now_ms = now_cb, .max_queued = 6 };
     ob = puddle_outbox_open(data, &hooks, err, sizeof err);
-    ctx = (puddle_ctx){ .config = &cfg, .identity = me, .profiles = &profiles, .assignments = as, .streams = ss, .outbox = ob, .now_ms = now_cb };
+    ctx = (puddle_ctx){ .courier = &puddle_federation_courier, .config = &cfg, .identity = me, .profiles = profiles, .assignments = as, .streams = ss, .outbox = ob, .now_ms = now_cb };
 
     char a[64], b[64], c[64], d[64], e[64], g[64], id_out[64];
     make_id(0, a); make_id(1, b); make_id(2, c); make_id(3, d); make_id(4, e); make_id(5, g);
@@ -191,7 +195,8 @@ int main(void)
         memcpy(ticket_a, rec.ticket, sizeof ticket_a);
         puddle_stream_free(&rec);
         char prof[PUDDLE_PROFILE_ID_MAX + 1];
-        CHECK(puddle_assignments_get(as, pa, prof) == 0 && !strcmp(prof, "work"));              /* they see the profile we chose */
+        char place[PUDDLE_PLACE_MAX];
+        CHECK(puddle_place_dm(pa, place) == 0 && puddle_assignments_get(as, place, prof) == 0 && !strcmp(prof, "work")); /* they see the profile we chose */
         CHECK(queued_of(pa, PUDDLE_OB_KIND_OPEN_ACCESS) == 1 && queued_of(pa, "access") == 0);
         char *body = last_body(pa, PUDDLE_OB_KIND_OPEN_ACCESS, path);
         CHECK(body && !strcmp(path, "/stream/v1/access"));
@@ -378,7 +383,7 @@ int main(void)
     puddle_outbox_close(ob);
     puddle_assignments_close(as);
     puddle_streams_close(ss);
-    puddle_profiles_free(&profiles);
+    puddle_profiles_close(profiles);
     puddle_identity_close(me);
     nftw(root, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
     return failures ? 1 : 0;

@@ -1,15 +1,16 @@
 /* Two (and more) real Puddles in one process, talking over real TLS on loopback: asking for a stream, accepting
  * and declining, invites, blocks, closing, a changed certificate, and what a stranger is told. Each Puddle is the
  * real server with its own data directory; the "owner" calls are real HTTPS calls with the owner token. */
-#include "access.h"
-#include "json.h"
-#include "client.h"
-#include "media.h"
-#include "config.h"
-#include "outbox.h"
-#include "phrase.h"
-#include "server.h"
-#include "streams.h"
+#include "federation/access.h"
+#include "core/people.h"
+#include "base/json.h"
+#include "http/client.h"
+#include "storage/media.h"
+#include "core/config.h"
+#include "core/outbox.h"
+#include "core/phrase.h"
+#include "service/server.h"
+#include "core/streams.h"
 
 #include <arpa/inet.h>
 #include <ftw.h>
@@ -170,6 +171,17 @@ static char resp[70000];
 static int post(node *n, const char *path, const char *body) { return api(n, "POST", path, body, resp, sizeof resp); }
 static int get(node *n, const char *path) { return api(n, "GET", path, NULL, resp, sizeof resp); }
 
+/* does the profile `n` holds for `peer_id` mention `text`? */
+static int has_profile(node *n, const char *peer_id, const char *text)
+{
+    char *json;
+    size_t len;
+    if (puddle_people_profile(puddle_server_people(n->srv), peer_id, PUDDLE_PEOPLE_DM, &json, &len) != 0) return 0;
+    int found = strstr(json, text) != NULL;
+    free(json);
+    return found;
+}
+
 static int stream_state(node *n, const char *peer_id, puddle_stream_state *out)
 {
     puddle_stream st;
@@ -223,10 +235,22 @@ static int outbox_count(node *n, const char *peer_id, int *queued)
     return total;
 }
 
+/* Both outboxes empty: what was owed has been delivered. Deliveries finish on their own threads, so this waits for them
+ * (up to 10 s) rather than looking once, which under load can come a moment too soon. */
+static int outboxes_empty(node *a, node *b)
+{
+    for (int i = 0; i < 200; i++) {
+        if (outbox_count(a, NULL, NULL) == 0 && outbox_count(b, NULL, NULL) == 0) return 1;
+        usleep(50000);
+    }
+    return 0;
+}
+
 static void request(node *from, node *to, const char *message, const char *link_override, int expect)
 {
     char body[900];
-    snprintf(body, sizeof body, "{\"target\":\"%s\",\"message\":\"%s\"}", link_override ? link_override : to->link, message);
+    /* who they will see us as: nothing goes without that choice */
+    snprintf(body, sizeof body, "{\"target\":\"%s\",\"message\":\"%s\",\"profile\":\"main\"}", link_override ? link_override : to->link, message);
     int st = post(from, "/api/v1/streams/request", body);
     if (st != expect) { fprintf(stderr, "FAIL request %s->%s: %d %s\n", from->name, to->name, st, resp); failures++; }
 }
@@ -322,7 +346,7 @@ static const char *status_of(node *to, puddle_identity *who, const char *who_id)
  * sp("accept") is then "/api/v1/streams/<it>/accept". dm_to and dm_msg do the same for a conversation and a message. */
 static char sid[64];
 static const char *dm_to, *dm_msg;
-static void stream_body(char *out, size_t cap, const char *id) { snprintf(sid, sizeof sid, "%s", id); snprintf(out, cap, "{}"); }
+static void stream_body(char *out, size_t cap, const char *id) { snprintf(sid, sizeof sid, "%s", id); snprintf(out, cap, "{\"profile\":\"main\"}"); }
 static const char *path_of(const char *kind, const char *id, const char *rest)
 {
     static char buf[4][400];
@@ -381,14 +405,14 @@ int main(void)
     {
         puddle_stream st;
         CHECK(puddle_streams_get(puddle_server_streams(bob.srv), alice.uid, &st) == 0);
-        CHECK(st.chain && st.tls_fp[0] && strstr(st.profile ? st.profile : "", "Alice") && st.naddr >= 1);
+        CHECK(st.chain && st.tls_fp[0] && has_profile(&bob, alice.uid, "Alice") && st.naddr >= 1);
         puddle_stream_free(&st);
         CHECK(puddle_streams_get(puddle_server_streams(alice.srv), bob.uid, &st) == 0 && st.chain && st.tls_fp[0] &&
-              strstr(st.profile ? st.profile : "", "Bob"));
+              has_profile(&alice, bob.uid, "Bob"));
         puddle_stream_free(&st);
     }
     CHECK(get(&bob, "/api/v1/streams?state=active") == 200 && json_has(alice.uid) && json_has("\"display_name\":\"Alice\""));
-    CHECK(outbox_count(&alice, NULL, NULL) == 0 && outbox_count(&bob, NULL, NULL) == 0);        /* nothing left waiting anywhere */
+    CHECK(outboxes_empty(&alice, &bob));        /* nothing left waiting anywhere */
 
     /* ---- messages between the two ---- */
     {
@@ -437,7 +461,7 @@ int main(void)
         CHECK(gone && !json_has("hi Bob") && json_has("hello Alice, it's Bob"));
         snprintf(body2, sizeof body2, "{}"); dm_to = alice.uid; dm_msg = msg_id;
         CHECK(post(&bob, msg_path("delete"), NULL) == 404);                                      /* Bob cannot take back what Alice said */
-        CHECK(outbox_count(&alice, NULL, NULL) == 0 && outbox_count(&bob, NULL, NULL) == 0);     /* delivered, nothing waiting */
+        CHECK(outboxes_empty(&alice, &bob));     /* delivered, nothing waiting */
         /* someone with no stream cannot be sent to, nor send */
         snprintf(body2, sizeof body2, "{\"body\":\"hello\"}"); dm_to = eve.uid;
         CHECK(post(&alice, path_of("conversations", dm_to, "messages/send"), body2) == 404);                 /* no stream: no conversation */
@@ -446,11 +470,15 @@ int main(void)
 
     /* ---- profiles and their pictures ---- */
     {
-        const puddle_profiles *ap = puddle_server_profiles(alice.srv), *bp = puddle_server_profiles(bob.srv);
+        puddle_profile am, aw, bm;
+        CHECK(puddle_profiles_get(puddle_server_profiles(alice.srv), "main", &am) == 0 && puddle_profiles_get(puddle_server_profiles(alice.srv), "work", &aw) == 0 &&
+              puddle_profiles_get(puddle_server_profiles(bob.srv), "main", &bm) == 0);
         char ah_main[65], ah_work[65], bh_main[65];
-        snprintf(ah_main, sizeof ah_main, "%s", ap->items[0].avatar.hash);
-        snprintf(ah_work, sizeof ah_work, "%s", ap->items[1].avatar.hash);
-        snprintf(bh_main, sizeof bh_main, "%s", bp->items[0].avatar.hash);
+        uint64_t ah_main_size = am.avatar.size;
+        snprintf(ah_main, sizeof ah_main, "%s", am.avatar.hash);
+        snprintf(ah_work, sizeof ah_work, "%s", aw.avatar.hash);
+        snprintf(bh_main, sizeof bh_main, "%s", bm.avatar.hash);
+        puddle_profile_free(&am); puddle_profile_free(&aw); puddle_profile_free(&bm);
         int have_a = 0, have_b = 0;
         for (int i = 0; i < 200 && !(have_a && have_b); i++) {
             have_a = puddle_media_have(bob.cfg.data_dir, ah_main);                                 /* Alice's picture is on Bob's machine */
@@ -461,7 +489,7 @@ int main(void)
         char url[300], body2[400];
         snprintf(url, sizeof url, "/api/v1/media?hash=%s", ah_main);
         CHECK(api(&bob, "GET", url, NULL, resp, sizeof resp) == 200);                              /* and Bob's app can show it */
-        CHECK(outbox_count(&alice, NULL, NULL) == 0 && outbox_count(&bob, NULL, NULL) == 0);
+        CHECK(outboxes_empty(&alice, &bob));
         CHECK(get(&bob, "/api/v1/streams?state=active") == 200 && json_has(ah_main) && json_has("\"color\"") == 0);   /* its reference, with the profile */
         CHECK(get(&alice, "/api/v1/profiles") == 200 && json_has("Alice (work)") && json_has("\"color\":{\"colors\":[\"#336699\"]}") && json_has(ah_work));
 
@@ -477,8 +505,17 @@ int main(void)
         CHECK(seen && json_has("#336699"));
         snprintf(url, sizeof url, "/api/v1/media?hash=%s", ah_work);
         CHECK(api(&bob, "GET", url, NULL, resp, sizeof resp) == 200);
-        /* and back to the default */
+        /* none: Bob is told to forget it, and knows her only by her id */
         snprintf(body2, sizeof body2, "{\"profile\":null}");
+        CHECK(post(&alice, path_of("streams", bob.uid, "profile"), body2) == 200);
+        int gone = 0;
+        for (int i = 0; i < 200 && !gone; i++) {
+            gone = get(&bob, path_of("users", alice.uid, NULL)) == 200 && !json_has("\"profile\"");
+            if (!gone) usleep(50000);
+        }
+        CHECK(gone);
+        /* and her main one again */
+        snprintf(body2, sizeof body2, "{\"profile\":\"main\"}");
         CHECK(post(&alice, path_of("streams", bob.uid, "profile"), body2) == 200);
         int back = 0;
         for (int i = 0; i < 200 && !back; i++) {
@@ -487,7 +524,7 @@ int main(void)
         }
         CHECK(back);
         for (int i = 0; i < 100 && (outbox_count(&alice, NULL, NULL) || outbox_count(&bob, NULL, NULL)); i++) usleep(50000);
-        CHECK(outbox_count(&alice, NULL, NULL) == 0 && outbox_count(&bob, NULL, NULL) == 0);
+        CHECK(outboxes_empty(&alice, &bob));
         /* a picture we are not shown is not given out: Bob asks for the work one directly, as himself */
         {
             puddle_net_reply nr;
@@ -501,7 +538,7 @@ int main(void)
             puddle_net_reply_free(&nr);
             snprintf(target, sizeof target, "/stream/v1/media?hash=%s", ah_main);
             puddle_net_request(&at, "GET", target, NULL, 0, puddle_server_identity(bob.srv), alice.uid, NULL, &nr);
-            CHECK(nr.result == PUDDLE_NET_OK && nr.status == 200 && !strcmp(nr.content_type, "image/png") && nr.body_len == 2008 && nr.body_len == ap->items[0].avatar.size);
+            CHECK(nr.result == PUDDLE_NET_OK && nr.status == 200 && !strcmp(nr.content_type, "image/png") && nr.body_len == 2008 && nr.body_len == ah_main_size);
             puddle_net_reply_free(&nr);
         }
     }

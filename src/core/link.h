@@ -12,7 +12,8 @@
  * Nothing is looked up or resolved here; this only decides whether the text is well-formed, and the strictness
  * is the point: it comes from outside, and what it names is where we will connect. */
 
-#include "identity.h"
+#include "core/config.h"
+#include "core/identity.h"
 
 #include <stddef.h>
 
@@ -52,6 +53,15 @@ int puddle_link_parse(const char *text, puddle_link *out, char *err, size_t errl
 /* The text to give someone for `address` ("host:port"): the port is left off when it is the default. `invite` may be NULL
  * or "". 0 or -1 if it does not fit. */
 int puddle_link_format(const char *address, const char *invite, char *out, size_t cap);
+
+/* host:port others reach this Puddle at, from the config; 0 if it cannot be known (see puddle_make_link). */
+int puddle_my_address(const puddle_config *cfg, char *out, size_t cap);
+
+/* The address to give someone for this Puddle (host[:port], the default port left off), with `?invite=<token>` when there is one,
+ * or 0 if we cannot say where that is:
+ * listening on every interface says nothing about which address the outside world should use, so the owner
+ * has to set `advertise:` in the config. */
+int puddle_make_link(const puddle_config *cfg, const char *invite, char *out, size_t cap);
 
 #ifdef __cplusplus
 }
